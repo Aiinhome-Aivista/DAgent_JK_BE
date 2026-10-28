@@ -1,0 +1,11 @@
+venv
+env
+.env
+uploads
+__pycache__
+graphs
+chroma_store
+*.xlsx
+/lib
+*.zip
+/local_models

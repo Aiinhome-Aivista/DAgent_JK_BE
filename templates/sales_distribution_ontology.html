@@ -1,0 +1,1109 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sales &amp; Distribution Graph Explorer</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <!-- Vis.js Network for interactive physics graph visualization -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/vis-network/9.1.9/dist/vis-network.min.js"></script>
+
+  <style>
+    /* Dark Theme (Default) */
+    :root, [data-theme="dark"] {
+      --bg-dark: #070a13;
+      --bg-canvas: #090e1a;
+      --panel-bg: rgba(13, 18, 29, 0.95);
+      --panel-header: #121826;
+      --border-color: #1e293b;
+      --border-subtle: #172033;
+      --text-main: #f8fafc;
+      --text-muted: #7c8ba1;
+      --accent-arango: #77c541;
+      --code-bg: #090d16;
+      --input-bg: rgba(18, 24, 38, 0.85);
+      --legend-bg: rgba(10, 14, 24, 0.88);
+      --btn-hover: rgba(255, 255, 255, 0.08);
+      --shadow-color: rgba(0, 0, 0, 0.65);
+    }
+
+    /* Pure White Light Theme (No Blueish Tint) */
+    [data-theme="light"] {
+      --bg-dark: #ffffff;
+      --bg-canvas: #ffffff;
+      --panel-bg: rgba(255, 255, 255, 0.98);
+      --panel-header: #ffffff;
+      --border-color: #e5e7eb;
+      --border-subtle: #f3f4f6;
+      --text-main: #111827;
+      --text-muted: #6b7280;
+      --accent-arango: #3e831c;
+      --code-bg: #f9fafb;
+      --input-bg: #ffffff;
+      --legend-bg: rgba(255, 255, 255, 0.96);
+      --btn-hover: rgba(0, 0, 0, 0.05);
+      --shadow-color: rgba(0, 0, 0, 0.08);
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      user-select: none;
+    }
+
+    body, html {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background-color: var(--bg-dark);
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      color: var(--text-main);
+      transition: background-color 0.25s ease, color 0.25s ease;
+    }
+
+    /* Minimal Top Navigation Bar */
+    header {
+      height: 48px;
+      background: var(--panel-header);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border-subtle);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 16px;
+      z-index: 20;
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      transition: background 0.25s ease, border-color 0.25s ease;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .title-group h1 {
+      font-size: 13.5px;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+      color: var(--text-main);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .title-group h1 .tag {
+      background: rgba(119, 197, 65, 0.14);
+      color: var(--accent-arango);
+      font-size: 10px;
+      font-weight: 600;
+      padding: 1px 7px;
+      border-radius: 4px;
+      border: 1px solid rgba(119, 197, 65, 0.3);
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    .toolbar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .search-box {
+      position: relative;
+      display: flex;
+      align-items: center;
+    }
+
+    .search-box input {
+      background: var(--input-bg);
+      border: 1px solid var(--border-color);
+      color: var(--text-main);
+      font-size: 11.5px;
+      padding: 5px 10px 5px 28px;
+      border-radius: 6px;
+      outline: none;
+      width: 200px;
+      transition: all 0.2s ease;
+      font-family: 'Inter', sans-serif;
+    }
+
+    .search-box input:focus {
+      border-color: #38bdf8;
+      box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.2);
+      width: 230px;
+    }
+
+    .search-box svg {
+      position: absolute;
+      left: 9px;
+      fill: var(--text-muted);
+      width: 13px;
+      height: 13px;
+      pointer-events: none;
+    }
+
+    .btn-group {
+      display: flex;
+      background: var(--input-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      overflow: hidden;
+    }
+
+    .btn {
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      padding: 5px 10px;
+      font-size: 11.5px;
+      font-weight: 500;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      transition: all 0.15s ease;
+      outline: none;
+    }
+
+    .btn:hover {
+      background: var(--btn-hover);
+      color: var(--text-main);
+    }
+
+    .btn.active {
+      color: var(--accent-arango);
+      background: rgba(119, 197, 65, 0.15);
+      font-weight: 600;
+    }
+
+    .btn-icon {
+      padding: 5px 9px;
+      font-size: 13px;
+    }
+
+    /* Main Viewport & Radial Background Canvas */
+    .app-body {
+      width: 100%;
+      height: 100%;
+      position: relative;
+      overflow: hidden;
+    }
+
+    #network-canvas {
+      width: 100%;
+      height: 100%;
+      background: radial-gradient(circle at 62% 48%, #111a2f 0%, #070a13 72%, #04060b 100%);
+      cursor: grab;
+      transition: background 0.3s ease;
+    }
+
+    #network-canvas:active {
+      cursor: grabbing;
+    }
+
+    /* Minimalist Floating Legend */
+    .graph-legend {
+      position: absolute;
+      left: 20px;
+      bottom: 20px;
+      background: var(--legend-bg);
+      backdrop-filter: blur(10px);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      padding: 10px 14px;
+      font-size: 11px;
+      display: flex;
+      gap: 14px;
+      pointer-events: auto;
+      box-shadow: 0 8px 32px var(--shadow-color);
+      z-index: 15;
+      transition: all 0.25s ease;
+    }
+
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--text-main);
+      font-weight: 500;
+    }
+
+    .legend-ring {
+      width: 11px;
+      height: 11px;
+      border-radius: 50%;
+      border: 2.2px solid currentColor;
+      background: var(--bg-dark);
+      display: inline-block;
+      box-shadow: 0 0 6px currentColor;
+    }
+
+    /* Document Drawer (Slide-in Inspector) */
+    .doc-inspector {
+      width: 400px;
+      height: 100%;
+      background: var(--panel-bg);
+      backdrop-filter: blur(16px);
+      border-left: 1px solid var(--border-color);
+      display: flex;
+      flex-direction: column;
+      position: absolute;
+      right: 0;
+      top: 0;
+      bottom: 0;
+      transform: translateX(100%);
+      transition: transform 0.28s cubic-bezier(0.16, 1, 0.3, 1), background 0.25s ease;
+      box-shadow: -10px 0 40px var(--shadow-color);
+      z-index: 30;
+    }
+
+    .doc-inspector.open {
+      transform: translateX(0);
+    }
+
+    .inspector-header {
+      padding: 14px 18px;
+      background: var(--panel-header);
+      border-bottom: 1px solid var(--border-color);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .inspector-title {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+    }
+
+    .doc-badge {
+      font-size: 10.5px;
+      font-family: 'JetBrains Mono', monospace;
+      padding: 2px 7px;
+      border-radius: 4px;
+      font-weight: 600;
+    }
+
+    .inspector-header h2 {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text-main);
+    }
+
+    .close-btn {
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      cursor: pointer;
+      font-size: 17px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 4px 6px;
+      border-radius: 4px;
+      transition: all 0.15s;
+    }
+
+    .close-btn:hover {
+      color: var(--text-main);
+      background: var(--btn-hover);
+    }
+
+    .inspector-content {
+      flex: 1;
+      overflow-y: auto;
+      padding: 16px;
+    }
+
+    .section-label {
+      font-size: 10.5px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-muted);
+      margin-bottom: 7px;
+    }
+
+    /* Meta Properties Table */
+    .meta-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      background: var(--code-bg);
+      border-radius: 6px;
+      border: 1px solid var(--border-color);
+      overflow: hidden;
+      margin-bottom: 16px;
+    }
+
+    .meta-table tr {
+      border-bottom: 1px solid var(--border-color);
+    }
+    .meta-table tr:last-child {
+      border-bottom: none;
+    }
+
+    .meta-table td {
+      padding: 6px 10px;
+    }
+
+    .meta-key {
+      color: #0284c7;
+      font-weight: 600;
+      width: 65px;
+    }
+
+    [data-theme="dark"] .meta-key {
+      color: #38bdf8;
+    }
+
+    .meta-val {
+      color: var(--text-main);
+      word-break: break-all;
+    }
+
+    .def-card {
+      background: var(--code-bg);
+      border: 1px solid var(--border-color);
+      border-left: 3px solid var(--accent-arango);
+      border-radius: 6px;
+      padding: 9px 11px;
+      margin-bottom: 16px;
+      font-size: 11.5px;
+      line-height: 1.5;
+      color: var(--text-main);
+    }
+
+    /* JSON Data Block */
+    .json-block {
+      background: var(--code-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      padding: 12px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11.5px;
+      color: var(--text-main);
+      overflow-x: auto;
+      line-height: 1.6;
+      margin-bottom: 16px;
+    }
+
+    .json-key { color: #f43f5e; font-weight: 500; }
+    .json-str { color: #10b981; }
+    .json-num { color: #f59e0b; }
+    .json-bool { color: #8b5cf6; }
+
+    /* Connected Relations List */
+    .edges-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .edge-item {
+      background: var(--code-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      padding: 8px 10px;
+      font-size: 11.5px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+
+    .edge-item:hover {
+      border-color: #38bdf8;
+      background: rgba(56, 189, 248, 0.08);
+      transform: translateX(2px);
+    }
+
+    .edge-rel {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      font-weight: 600;
+      color: #0284c7;
+      background: rgba(56, 189, 248, 0.14);
+      border: 1px solid rgba(56, 189, 248, 0.3);
+      padding: 1px 6px;
+      border-radius: 4px;
+    }
+
+    [data-theme="dark"] .edge-rel {
+      color: #38bdf8;
+    }
+
+    .edge-target {
+      color: var(--text-main);
+      font-weight: 500;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Minimal Header Toolbar (No Green 'A' Box) -->
+  <header>
+    <div class="brand">
+      <div class="title-group">
+        <h1>
+          Sales &amp; Distribution Graph
+          <span class="tag">_graphs/rtm_network</span>
+        </h1>
+      </div>
+    </div>
+
+    <!-- Quick Graph Controls & Theme Switcher -->
+    <div class="toolbar">
+      <div class="search-box">
+        <svg viewBox="0 0 24 24"><path d="M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
+        <input type="text" id="searchInput" placeholder="Find node or collection...">
+      </div>
+
+      <div class="btn-group">
+        <button class="btn btn-icon" id="btnZoomIn" title="Zoom In">+</button>
+        <button class="btn btn-icon" id="btnZoomOut" title="Zoom Out">−</button>
+        <button class="btn btn-icon" id="btnFit" title="Fit to Screen">⛶</button>
+      </div>
+
+      <div class="btn-group">
+        <button class="btn active" id="btnTogglePhysics">
+          <span id="physicsStatusText">Physics: ON</span>
+        </button>
+      </div>
+
+      <!-- Light / Dark Theme Switch Button -->
+      <div class="btn-group">
+        <button class="btn" id="btnThemeToggle" title="Toggle Light / Dark Theme">
+          <span id="themeIcon">☀️</span>
+          <span id="themeText">Light</span>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Graph Canvas Body -->
+  <div class="app-body">
+    <div id="network-canvas"></div>
+
+    <!-- Minimal Legend -->
+    <div class="graph-legend">
+      <div class="legend-item">
+        <span class="legend-ring" style="color:#a855f7;"></span>
+        <span>Field Force</span>
+      </div>
+      <div class="legend-item">
+        <span class="legend-ring" style="color:#f59e0b;"></span>
+        <span>Territory &amp; Routes</span>
+      </div>
+      <div class="legend-item">
+        <span class="legend-ring" style="color:#0284c7;"></span>
+        <span>Distributor</span>
+      </div>
+      <div class="legend-item">
+        <span class="legend-ring" style="color:#10b981;"></span>
+        <span>Customer Outlet</span>
+      </div>
+      <div class="legend-item">
+        <span class="legend-ring" style="color:#f43f5e;"></span>
+        <span>Product / SKU</span>
+      </div>
+      <div class="legend-item">
+        <span class="legend-ring" style="color:#06b6d4;"></span>
+        <span>Audit &amp; Visits</span>
+      </div>
+      <div class="legend-item">
+        <span class="legend-ring" style="color:#84cc16;"></span>
+        <span>Orders &amp; SOQ</span>
+      </div>
+    </div>
+
+    <!-- Document Drawer (Opens on Node Click) -->
+    <aside class="doc-inspector" id="docInspector">
+      <div class="inspector-header">
+        <div class="inspector-title">
+          <span class="doc-badge" id="inspBadge">VERTEX</span>
+          <h2 id="inspTitle">Document Details</h2>
+        </div>
+        <button class="close-btn" id="btnCloseInspector" title="Close">✕</button>
+      </div>
+
+      <div class="inspector-content">
+        <div class="section-label">System Attributes</div>
+        <table class="meta-table">
+          <tr><td class="meta-key">_id</td><td class="meta-val" id="inspId">-</td></tr>
+          <tr><td class="meta-key">_key</td><td class="meta-val" id="inspKey">-</td></tr>
+          <tr><td class="meta-key">_rev</td><td class="meta-val" id="inspRev">-</td></tr>
+        </table>
+
+        <div class="section-label">Ontology Definition</div>
+        <div class="def-card" id="inspDef">-</div>
+
+        <div class="section-label">Document Payload (JSON)</div>
+        <pre class="json-block" id="inspJson">{}</pre>
+
+        <div class="section-label">Connected Relations (Edges)</div>
+        <div class="edges-list" id="inspEdges"></div>
+      </div>
+    </aside>
+  </div>
+
+  <!-- Graph Network Construction Script -->
+  <script>
+    /* =====================================================================
+       1. DATA: Sales & Distribution (RtM) Ontology Entities
+       ===================================================================== */
+    const VERTICES = [
+      {
+        id: "rep",
+        name: "FieldForceRep",
+        type: "Field Force",
+        group: "rep",
+        def: "The field seller / merchandiser executing sales orders, planograms, and outlet audits with GPS adherence.",
+        attributes: {
+          repId: "REP-9021",
+          ffType: "PreSales / DSD / Merchandiser",
+          depot: "Depot North-02",
+          handheldSystem: "SFA Handheld v4.2",
+          callRateTarget: "94.5%",
+          avgDropSize: "$420",
+          breakEvenDropSize: "$180",
+          routeAdherence: "96.8%"
+        }
+      },
+      {
+        id: "geo",
+        name: "GeographyNode / Territory",
+        type: "Territory / Beat",
+        group: "route",
+        def: "Commercial geography: Outlet → Route/Beat → Territory → Area → Region; each field-force type carries its own hierarchy.",
+        attributes: {
+          nodeId: "TERR-EAST-04",
+          hierarchyLevel: "Route / Beat 04",
+          salesArea: "Metro East Hub",
+          urbanRuralFlag: "Urban Metro",
+          assignedDepot: "Depot-East-Central",
+          transitLeadTimeHours: 6
+        }
+      },
+      {
+        id: "coverage",
+        name: "CoveragePlan (TCP / TCR)",
+        type: "Coverage Plan",
+        group: "route",
+        def: "Decides who visits which outlet how often. TCR is periodic capacity vs demand review consolidating workload from plans.",
+        attributes: {
+          planId: "TCP-2026-Q4",
+          outletUniverse: 12800,
+          callFrequency: "Bi-Weekly (P14 Grain)",
+          callTypeAssignment: "Physical Order & Execution Audit",
+          workloadMinutesPerVisit: 45,
+          capacityMinutesPerDay: 480,
+          approvalBody: "Commercial Strategy Board"
+        }
+      },
+      {
+        id: "distributor",
+        name: "Distributor / Wholesaler",
+        type: "Distributor",
+        group: "distributor",
+        def: "The indirect-RtM intermediary carrying the three sales flows: primary (sell-in), secondary (sell-out), and tertiary (to consumer).",
+        attributes: {
+          distributorId: "DIST-8041",
+          type: "Wholesaler / Tier-1 Primary Distributor",
+          marginStructure: "Front Margin + Rebate Incentive",
+          warehouses: ["Central DC", "East Hub Depot"],
+          servedOutletsCount: 1450,
+          creditLimitUsd: 250000,
+          pipelineStockDays: 21,
+          sellOutFeedStatus: "Active (Daily EDI/DSR)"
+        }
+      },
+      {
+        id: "outlet",
+        name: "CustomerOutlet",
+        type: "Customer Outlet",
+        group: "outlet",
+        def: "The demand-side counterparty at every level: Outlet → Delivery Point → Legal Customer → Retail Account.",
+        attributes: {
+          customerCode: "OUTLET-77209",
+          channelType: "General Trade / High-street Grocer",
+          volumeClass: "Class 8 (High Volume)",
+          ownershipType: "INDEP (Independent)",
+          creditPeriodDays: 14,
+          creditLimitUsd: 15000,
+          facingShare: "44.2%",
+          churnRisk: "Low"
+        }
+      },
+      {
+        id: "product",
+        name: "Product / SKU",
+        type: "Product / SKU",
+        group: "product",
+        def: "The sellable item and roll-ups: Category → Brand Family → Variant → Product → Trade SKU → Factory SKU.",
+        attributes: {
+          skuId: "SKU-BEV-500ML",
+          gtin: "08901030829141",
+          brandFamily: "Sparkling Hydration",
+          packType: "PET Bottle 500ml",
+          isSellable: true,
+          statCaseFactor: 1.0,
+          abcClassification: "Class-A Runner"
+        }
+      },
+      {
+        id: "assortment",
+        name: "AssortmentPlan (SAO / SAT)",
+        type: "Assortment Plan",
+        group: "product",
+        def: "Core range / must-stock lists by outlet cluster, target distribution by SKU; SAT is outlet-level compliance target.",
+        attributes: {
+          planId: "SAO-CORE-V2",
+          outletCluster: "General Trade & Modern Grocery",
+          coreRange: ["SKU-101 (500ml)", "SKU-102 (1L)", "SKU-205 (Multipack)"],
+          mustStockList: "Top 8 Mandatory Hero SKUs",
+          targetDistribution: "85% Weighted Distribution",
+          satCompliancePct: "91.2%"
+        }
+      },
+      {
+        id: "call",
+        name: "CallVisit",
+        type: "Visit Execution",
+        group: "execution",
+        def: "The atomic execution event: activities executing plans, surveys, stock count, and order capture with GPS verification.",
+        attributes: {
+          callId: "CALL-884210",
+          plannedFlag: true,
+          callType: "Scheduled Beat Visit",
+          activities: ["Stock Audit", "Planogram Check", "Order Capture"],
+          durationMinutes: 38,
+          gpsVerified: "Lat 22.5726° N, Long 88.3639° E",
+          outcome: "Productive (Order Placed)"
+        }
+      },
+      {
+        id: "audit",
+        name: "RetailAudit",
+        type: "Retail Audit",
+        group: "execution",
+        def: "Per product × outlet × date: isDistributed, isAvailable (OOS), facings, planogram compliance, observed RSP.",
+        attributes: {
+          auditId: "AUDIT-6712",
+          isDistributed: true,
+          isAvailable: true,
+          numFacings: 6,
+          oosStatus: "In-Stock (0% OOS)",
+          planogramCompliance: "96%",
+          rspObserved: "$4.50",
+          posmInventory: "Active Poster + Counter Display"
+        }
+      },
+      {
+        id: "soq",
+        name: "SuggestedOrder (SOQ)",
+        type: "Order Generation",
+        group: "order",
+        def: "Baseline forecast + collaborative-filtering order enhancement → suggested quantity; tracked via acceptance & execution.",
+        attributes: {
+          soqId: "SOQ-3091",
+          baselineForecastCases: 48,
+          enhancementLiftCases: 12,
+          suggestedQtyCases: 60,
+          acceptanceFlag: true,
+          executionRate: "98.5%",
+          forecastAccuracy: "88.4%"
+        }
+      },
+      {
+        id: "orders",
+        name: "SupplyOrders",
+        type: "Fulfillment Order",
+        group: "order",
+        def: "The transactional movement objects: sales orders, shipments with carrier OTIF, trailer loads, and 3-way matched invoices.",
+        attributes: {
+          salesOrderNo: "SO-994102",
+          movementType: "Direct Store Delivery (DSD)",
+          deliveryStatus: "Dispatched",
+          otifTargetMet: true,
+          invoiceMatched: "3-Way Cleared",
+          fulfillmentLeadDays: 1
+        }
+      },
+      {
+        id: "tci",
+        name: "TradeInvestment (TCI / CIS)",
+        type: "Trade Investment",
+        group: "investment",
+        def: "Customer front margin + back-margin buckets; outlet-level incentive schemes with PfP/PfC performance buckets.",
+        attributes: {
+          schemeId: "CIS-Q4-PERFORMANCE",
+          frontMarginPct: "4.5%",
+          backMarginBuckets: ["PfP-Volume", "PfC-OOS Compliance", "SAT-Compliance"],
+          sonaIndex: "1.18",
+          croiReturn: "1.34",
+          rewardLedger: "Accrual Ledger #442",
+          payoutStatus: "Approved"
+        }
+      }
+    ];
+
+    const EDGES = [
+      { from: "coverage", to: "call", label: "schedules" },
+      { from: "rep", to: "call", label: "executes" },
+      { from: "rep", to: "geo", label: "covers" },
+      { from: "assortment", to: "call", label: "deploys_via" },
+      { from: "assortment", to: "outlet", label: "sets_sat_target" },
+      { from: "assortment", to: "product", label: "defines_range" },
+      { from: "call", to: "audit", label: "captures" },
+      { from: "call", to: "soq", label: "generates" },
+      { from: "call", to: "outlet", label: "visits" },
+      { from: "distributor", to: "outlet", label: "supplies" },
+      { from: "distributor", to: "geo", label: "operates_in" },
+      { from: "soq", to: "orders", label: "converts_to" },
+      { from: "tci", to: "coverage", label: "incentive_workload" },
+      { from: "tci", to: "outlet", label: "enrols" },
+      { from: "audit", to: "tci", label: "measures_compliance" },
+      { from: "audit", to: "product", label: "audits_sku" },
+      { from: "product", to: "orders", label: "fulfilled_in" }
+    ];
+
+    /* Neon Ring Palette (Dark & Light adjusted for maximum vibrancy) */
+    const PALETTE_DARK = {
+      rep:         { border: "#a855f7", shadow: "rgba(168, 85, 247, 0.45)" },
+      route:       { border: "#f59e0b", shadow: "rgba(245, 158, 11, 0.45)" },
+      distributor: { border: "#38bdf8", shadow: "rgba(56, 189, 248, 0.45)" },
+      outlet:      { border: "#10b981", shadow: "rgba(16, 185, 129, 0.45)" },
+      product:     { border: "#f43f5e", shadow: "rgba(244, 63, 94, 0.45)" },
+      execution:   { border: "#06b6d4", shadow: "rgba(6, 182, 212, 0.45)" },
+      order:       { border: "#84cc16", shadow: "rgba(132, 204, 22, 0.45)" },
+      investment:  { border: "#eab308", shadow: "rgba(234, 179, 8, 0.45)" }
+    };
+
+    const PALETTE_LIGHT = {
+      rep:         { border: "#9333ea", shadow: "rgba(147, 51, 234, 0.25)" },
+      route:       { border: "#d97706", shadow: "rgba(217, 119, 6, 0.25)" },
+      distributor: { border: "#0284c7", shadow: "rgba(2, 132, 199, 0.25)" },
+      outlet:      { border: "#059669", shadow: "rgba(5, 150, 105, 0.25)" },
+      product:     { border: "#e11d48", shadow: "rgba(225, 29, 72, 0.25)" },
+      execution:   { border: "#0891b2", shadow: "rgba(8, 145, 178, 0.25)" },
+      order:       { border: "#65a30d", shadow: "rgba(101, 163, 13, 0.25)" },
+      investment:  { border: "#ca8a04", shadow: "rgba(202, 138, 4, 0.25)" }
+    };
+
+    /* =====================================================================
+       2. Vis.js Network Setup: Hollow Neon Ring Nodes (No Emoji)
+       ===================================================================== */
+    const container = document.getElementById('network-canvas');
+
+    function createNodes(isLight = false) {
+      const palette = isLight ? PALETTE_LIGHT : PALETTE_DARK;
+      const hollowBg = isLight ? '#ffffff' : '#070a13';
+      return VERTICES.map(v => {
+        const p = palette[v.group];
+        return {
+          id: v.id,
+          label: `<b>${v.name}</b>\n<i>${v.type}</i>`,
+          shape: 'dot',
+          size: 15,
+          borderWidth: 2.8,
+          borderWidthSelected: 4.5,
+          shadow: {
+            enabled: true,
+            color: p.shadow,
+            size: isLight ? 8 : 12,
+            x: 0,
+            y: 0
+          },
+          color: {
+            background: hollowBg,
+            border: p.border,
+            highlight: {
+              background: hollowBg,
+              border: isLight ? '#111827' : '#ffffff'
+            },
+            hover: {
+              background: hollowBg,
+              border: isLight ? '#111827' : '#ffffff'
+            }
+          },
+          font: {
+            multi: 'html',
+            face: 'Inter, sans-serif',
+            size: 11,
+            color: isLight ? '#111827' : '#ffffff',
+            strokeWidth: 4,
+            strokeColor: hollowBg,
+            vadjust: 6,
+            bold: {
+              color: isLight ? '#111827' : '#f8fafc',
+              size: 12,
+              face: 'Inter, sans-serif'
+            },
+            ital: {
+              color: isLight ? '#4b5563' : '#94a3b8',
+              size: 10,
+              face: 'Inter, sans-serif'
+            }
+          }
+        };
+      });
+    }
+
+    function createEdges(isLight = false) {
+      return EDGES.map((e, idx) => ({
+        id: 'e_' + idx,
+        from: e.from,
+        to: e.to,
+        label: e.label,
+        arrows: {
+          to: {
+            enabled: true,
+            scaleFactor: 0.72,
+            type: 'arrow'
+          }
+        },
+        color: {
+          color: isLight ? '#94a3af' : '#334155',
+          highlight: isLight ? '#2563eb' : '#38bdf8',
+          hover: isLight ? '#1d4ed8' : '#60a5fa'
+        },
+        font: {
+          color: isLight ? '#1e3a8a' : '#7dd3fc',
+          size: 10.5,
+          face: 'JetBrains Mono, monospace',
+          strokeWidth: 3.5,
+          strokeColor: isLight ? '#ffffff' : '#070a13',
+          align: 'middle'
+        },
+        smooth: {
+          type: 'curvedCW',
+          roundness: 0.15
+        },
+        width: 1.6,
+        selectionWidth: 3.2
+      }));
+    }
+
+    const nodesData = new vis.DataSet(createNodes(false));
+    const edgesData = new vis.DataSet(createEdges(false));
+
+    const networkOptions = {
+      physics: {
+        enabled: true,
+        solver: 'forceAtlas2Based',
+        forceAtlas2Based: {
+          gravitationalConstant: -75,
+          centralGravity: 0.01,
+          springLength: 170,
+          springConstant: 0.05,
+          damping: 0.45,
+          avoidOverlap: 0.65
+        },
+        stabilization: {
+          iterations: 160
+        }
+      },
+      interaction: {
+        hover: true,
+        tooltipDelay: 100,
+        selectable: true,
+        multiselect: false
+      }
+    };
+
+    const network = new vis.Network(container, { nodes: nodesData, edges: edgesData }, networkOptions);
+
+    /* =====================================================================
+       3. Light / Dark Theme Switcher Logic
+       ===================================================================== */
+    let currentTheme = 'dark';
+    const btnThemeToggle = document.getElementById('btnThemeToggle');
+    const themeIcon = document.getElementById('themeIcon');
+    const themeText = document.getElementById('themeText');
+
+    function applyTheme(theme) {
+      currentTheme = theme;
+      document.documentElement.setAttribute('data-theme', theme);
+      const isLight = theme === 'light';
+
+      // Update button state
+      themeIcon.textContent = isLight ? '🌙' : '☀️';
+      themeText.textContent = isLight ? 'Dark' : 'Light';
+
+      // Update canvas background (Clean pure white in light mode, no bluish tint)
+      const canvas = document.getElementById('network-canvas');
+      if (isLight) {
+        canvas.style.background = '#ffffff';
+        canvas.style.backgroundImage = 'radial-gradient(#e5e7eb 1px, transparent 1px)';
+        canvas.style.backgroundSize = '24px 24px';
+      } else {
+        canvas.style.background = 'radial-gradient(circle at 62% 48%, #111a2f 0%, #070a13 72%, #04060b 100%)';
+        canvas.style.backgroundImage = '';
+      }
+
+      // Update Vis.js nodes colors & labels
+      nodesData.update(createNodes(isLight));
+
+      // Update Vis.js edges colors & labels
+      edgesData.update(createEdges(isLight));
+    }
+
+    btnThemeToggle.addEventListener('click', () => {
+      const nextTheme = currentTheme === 'dark' ? 'light' : 'dark';
+      applyTheme(nextTheme);
+    });
+
+    /* =====================================================================
+       4. Inspector & Interactions
+       ===================================================================== */
+    const docInspector = document.getElementById('docInspector');
+    const inspTitle = document.getElementById('inspTitle');
+    const inspBadge = document.getElementById('inspBadge');
+    const inspId = document.getElementById('inspId');
+    const inspKey = document.getElementById('inspKey');
+    const inspRev = document.getElementById('inspRev');
+    const inspDef = document.getElementById('inspDef');
+    const inspJson = document.getElementById('inspJson');
+    const inspEdges = document.getElementById('inspEdges');
+    const btnCloseInspector = document.getElementById('btnCloseInspector');
+
+    function openInspector(nodeId) {
+      const v = VERTICES.find(item => item.id === nodeId);
+      if (!v) return;
+
+      docInspector.classList.add('open');
+      inspTitle.textContent = v.name;
+      inspBadge.textContent = v.type.toUpperCase();
+      
+      const palette = currentTheme === 'light' ? PALETTE_LIGHT : PALETTE_DARK;
+      const p = palette[v.group];
+      inspBadge.style.background = p.border + "22";
+      inspBadge.style.color = p.border;
+      inspBadge.style.border = `1px solid ${p.border}55`;
+
+      inspId.textContent = `${v.group}/${v.id}`;
+      inspKey.textContent = v.id;
+      inspRev.textContent = `_m3PqK${Math.floor(1000 + Math.random() * 9000)}--`;
+      inspDef.textContent = v.def;
+
+      inspJson.innerHTML = syntaxHighlight(JSON.stringify(v.attributes, null, 2));
+
+      inspEdges.innerHTML = '';
+      const connectedEdges = EDGES.filter(e => e.from === nodeId || e.to === nodeId);
+
+      if (connectedEdges.length === 0) {
+        inspEdges.innerHTML = '<span style="color:var(--text-muted); font-size:11px;">No connected relations.</span>';
+      } else {
+        connectedEdges.forEach(e => {
+          const isOut = e.from === nodeId;
+          const otherId = isOut ? e.to : e.from;
+          const otherNode = VERTICES.find(n => n.id === otherId);
+
+          const item = document.createElement('div');
+          item.className = 'edge-item';
+          item.innerHTML = `
+            <div>
+              <span style="color:${isOut ? '#0284c7' : '#d97706'}; font-weight:700; font-size:10.5px; margin-right:4px;">${isOut ? '→ OUT' : '← IN'}</span>
+              <span class="edge-target">${otherNode ? otherNode.name : otherId}</span>
+            </div>
+            <span class="edge-rel">${e.label}</span>
+          `;
+          item.addEventListener('click', () => {
+            network.selectNodes([otherId]);
+            openInspector(otherId);
+            network.focus(otherId, { scale: 1.15, animation: { duration: 250 } });
+          });
+          inspEdges.appendChild(item);
+        });
+      }
+    }
+
+    function closeInspector() {
+      docInspector.classList.remove('open');
+      network.unselectAll();
+    }
+
+    btnCloseInspector.addEventListener('click', closeInspector);
+
+    network.on('click', function(params) {
+      if (params.nodes.length > 0) {
+        openInspector(params.nodes[0]);
+      } else {
+        closeInspector();
+      }
+    });
+
+    // Zoom Controls
+    function zoom(factor) {
+      const scale = network.getScale();
+      network.moveTo({ scale: scale * factor, animation: { duration: 220 } });
+    }
+    document.getElementById('btnZoomIn').addEventListener('click', () => zoom(1.25));
+    document.getElementById('btnZoomOut').addEventListener('click', () => zoom(0.8));
+    document.getElementById('btnFit').addEventListener('click', () => network.fit({ animation: { duration: 300 } }));
+
+    // Physics Toggle
+    let isPhysicsOn = true;
+    const btnTogglePhysics = document.getElementById('btnTogglePhysics');
+    const physicsStatusText = document.getElementById('physicsStatusText');
+
+    btnTogglePhysics.addEventListener('click', () => {
+      isPhysicsOn = !isPhysicsOn;
+      network.setOptions({ physics: { enabled: isPhysicsOn } });
+      btnTogglePhysics.classList.toggle('active', isPhysicsOn);
+      physicsStatusText.textContent = isPhysicsOn ? "Physics: ON" : "Physics: OFF";
+    });
+
+    // Search
+    const searchInput = document.getElementById('searchInput');
+    searchInput.addEventListener('input', (e) => {
+      const query = e.target.value.toLowerCase().trim();
+      if (!query) {
+        network.unselectAll();
+        return;
+      }
+      const match = VERTICES.find(v => 
+        v.id.toLowerCase().includes(query) ||
+        v.name.toLowerCase().includes(query) ||
+        v.type.toLowerCase().includes(query)
+      );
+      if (match) {
+        network.selectNodes([match.id]);
+        network.focus(match.id, { scale: 1.25, animation: { duration: 250 } });
+        openInspector(match.id);
+      }
+    });
+
+    // Syntax Highlight for JSON
+    function syntaxHighlight(json) {
+      json = json.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      return json.replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g, function (match) {
+        let cls = 'json-num';
+        if (/^"/.test(match)) {
+          if (/:$/.test(match)) {
+            cls = 'json-key';
+          } else {
+            cls = 'json-str';
+          }
+        } else if (/true|false/.test(match)) {
+          cls = 'json-bool';
+        }
+        return '<span class="' + cls + '">' + match + '</span>';
+      });
+    }
+
+    network.once('stabilizationIterationsDone', function () {
+      network.fit();
+    });
+  </script>
+</body>
+</html>

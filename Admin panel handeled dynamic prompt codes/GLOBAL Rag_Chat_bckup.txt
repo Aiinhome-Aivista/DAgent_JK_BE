@@ -1,0 +1,1323 @@
+Sendly Logo
+Home
+Screen Share
+Local Drop
+Live Notepad
+Sendly Logo
+
+MAIN SERVICES
+Home Transfer
+Screen Share
+Local Drop (LAN P2P)
+Live Notepad
+DEV TOOLS
+Diff Checker
+JSON Formatter
+JSON Cracker
+SECURITY TOOLS
+Password Auditor
+Link Inspector
+EXPLORE & RESOURCES
+How It Works
+Blog & Articles
+Why Use Sendly
+Contact Support
+Sendly IconNotepad
+Collaborate on text instantly with multiple people. Zero accounts, syncs in real-time.
+
+LIVE
+2 CONNECTED
+Room Code:
+470913
+Click to copyCopied!
+
+
+
+
+
+
+
+H1
+H2
+—
+• List
+1. List
+
+Now you can upload files directly here! 📁
+
+
+
+
+
+Map
+
+#   - Auto chat history save after every answer
+
+import re, json, time, hashlib, math, requests, mysql.connector, threading, os
+from collections import defaultdict
+from flask import request, jsonify
+from database.config import MISTRAL_API_KEY, MISTRAL_MODEL, MYSQL_CONFIG
+try:
+    from utils.logger_service import log_system_error
+except Exception:
+    def log_system_error(*args, **kwargs): pass
+
+# ChromaDB persistent storage — vectors survive server restarts
+CHROMA_PERSIST_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "chroma_store"
+)
+os.makedirs(CHROMA_PERSIST_DIR, exist_ok=True)
+
+MISTRAL_URL        = "https://api.mistral.ai/v1/chat/completions"
+MAX_ROWS           = 300
+TOP_K              = 400
+CACHE_TTL          = 600
+MAX_CTX_CHARS      = 50000
+
+_CACHE   = {}
+_CLIENTS = {}
+_LOCKS   = {}
+
+_FOLLOWUP_CYCLE = ["What", "Where", "Why"]
+_TURN_COUNTER   = {}
+
+def _next_followup_type(session_id):
+    turn = _TURN_COUNTER.get(session_id, 0)
+    return _FOLLOWUP_CYCLE[turn % 3]
+
+def _advance_turn(session_id):
+    _TURN_COUNTER[session_id] = _TURN_COUNTER.get(session_id, 0) + 1
+
+def _followup_instruction(ftype):
+    instructions = {
+        "What": (
+            "follow_up_questions: Generate exactly 5 questions, ALL starting with 'What '. "
+            "Focus on WHAT specific data, values, counts, or details exist in the business data."
+        ),
+        "Where": (
+            "follow_up_questions: Generate exactly 5 questions, ALL starting with 'Where '. "
+            "Focus on WHERE data comes from, where patterns exist, where in the database."
+        ),
+        "Why": (
+            "follow_up_questions: Generate exactly 5 questions, ALL starting with 'Why '. "
+            "Focus on WHY patterns exist, why certain data looks the way it does, business reasoning."
+        )
+    }
+    return instructions.get(ftype, instructions["What"])
+
+GRAPH_KW  = {"graph","chart","plot","visualize","visualise","bar","pie","line","histogram","scatter"}
+REPORT_KW = {"report","summary report","generate report","make a report","create a report","write a report"}
+GREET_RE  = re.compile(r'^\s*(hi+|hello+|hey+|howdy|greetings|sup|yo+|hiya|good\s*(morning|afternoon|evening|night)|what\'?s\s*up)\s*[!?.]*\s*$', re.I)
+
+def _is_graph(q):  return bool(set(q.lower().split()) & GRAPH_KW)
+def _is_report(q): return any(k in q.lower() for k in REPORT_KW)
+def _is_greet(q):  return bool(GREET_RE.match(q.strip()))
+
+
+# ══════════════════════════════════════════════════════
+# OPTIMIZATION 1: Global models loaded once at startup
+# ══════════════════════════════════════════════════════
+
+_EMBED_MODEL   = None
+_CROSS_ENCODER = None
+_MODEL_LOCK    = threading.Lock()
+
+# OPTIMIZATION 2: Embedding cache
+_EMBED_CACHE   = {}
+
+
+def _get_embed_model():
+    global _EMBED_MODEL
+    if _EMBED_MODEL is None:
+        with _MODEL_LOCK:
+            if _EMBED_MODEL is None:
+                from sentence_transformers import SentenceTransformer
+                print("[RAG] Loading SentenceTransformer globally...")
+                _EMBED_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
+                print("[RAG] SentenceTransformer ready")
+    return _EMBED_MODEL
+
+
+def _get_cross_encoder():
+    global _CROSS_ENCODER
+    if _CROSS_ENCODER is None:
+        with _MODEL_LOCK:
+            if _CROSS_ENCODER is None:
+                from sentence_transformers.cross_encoder import CrossEncoder
+                print("[RAG] Loading CrossEncoder globally...")
+                _CROSS_ENCODER = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+                print("[RAG] CrossEncoder ready")
+    return _CROSS_ENCODER
+
+
+def _encode_texts(texts):
+    """OPTIMIZATION 2+3: Cache-aware batch embedding."""
+    model  = _get_embed_model()
+    result = [None] * len(texts)
+    uncached_idx   = []
+    uncached_texts = []
+
+    for i, t in enumerate(texts):
+        if t in _EMBED_CACHE:
+            result[i] = _EMBED_CACHE[t]
+        else:
+            uncached_idx.append(i)
+            uncached_texts.append(t)
+
+    if uncached_texts:
+        new_embeds = model.encode(uncached_texts, batch_size=128, show_progress_bar=False).tolist()
+        for idx, emb, txt in zip(uncached_idx, new_embeds, uncached_texts):
+            _EMBED_CACHE[txt] = emb
+            result[idx] = emb
+
+    return result
+
+
+# ══════════════════════════════════════════════════════
+# BM25
+# ══════════════════════════════════════════════════════
+
+class BM25:
+    def __init__(self, docs, k1=1.5, b=0.75):
+        self.k1, self.b = k1, b
+        self.docs = docs
+        self.N = len(docs)
+        self.tokenized = [self._tok(d) for d in docs]
+        self.avgdl = sum(len(t) for t in self.tokenized) / max(self.N, 1)
+        self.df = defaultdict(int)
+        for td in self.tokenized:
+            for w in set(td): self.df[w] += 1
+
+    def _tok(self, text):
+        return re.findall(r'\b\w+\b', text.lower())
+
+    def score(self, query, top_k):
+        q_terms = self._tok(query)
+        scores  = []
+        for i, td in enumerate(self.tokenized):
+            tf_map = defaultdict(int)
+            for w in td: tf_map[w] += 1
+            s = 0.0
+            for term in q_terms:
+                if term not in tf_map: continue
+                tf  = tf_map[term]
+                idf = math.log((self.N - self.df[term] + 0.5) / (self.df[term] + 0.5) + 1)
+                den = tf + self.k1 * (1 - self.b + self.b * len(td) / self.avgdl)
+                s  += idf * (tf * (self.k1 + 1)) / den
+            if s > 0: scores.append((i, s))
+        scores.sort(key=lambda x: -x[1])
+        return scores[:top_k]
+
+
+# ══════════════════════════════════════════════════════
+# DATA LOADERS
+# ══════════════════════════════════════════════════════
+
+def _local_conn(fn):
+    c = fn()
+    if not c: raise RuntimeError("Local DB failed")
+    return c
+
+
+def _load_all(session_id, get_fn):
+    chunks = []
+    chunks += _load_db(session_id, get_fn)
+    chunks += _load_sheets(session_id, get_fn)
+    chunks += _load_web(session_id, get_fn)
+    chunks += _load_analysis_report(session_id, get_fn)
+    return chunks
+
+
+def _load_analysis_report(session_id, get_fn):
+    chunks = []
+    local = cur = None
+    try:
+        local = _local_conn(get_fn)
+        cur   = local.cursor(dictionary=True)
+        cur.execute(
+            """SELECT topic, title, url, brief FROM saved_web_results
+               WHERE session_id=%s ORDER BY topic""",
+            (session_id,)
+        )
+        web_rows = cur.fetchall()
+        if web_rows:
+            from collections import defaultdict as _dd
+            by_topic = _dd(list)
+            for r in web_rows:
+                by_topic[r["topic"]].append(r)
+            for topic, items in by_topic.items():
+                lines = [f"[ANALYSIS_WEB] Web research topic: {topic} ({len(items)} results)"]
+                for item in items:
+                    lines.append(f"  Title: {item['title']}")
+                    if item.get("brief"):
+                        lines.append(f"  Brief: {str(item['brief'])[:400]}")
+                chunks.append(_chunk("\n".join(lines), kind="analysis_web", table=topic))
+            print(f"[RAG] analysis_web: {len(by_topic)} topics")
+        cur.execute(
+            """SELECT DISTINCT external_database, new_user_db, table_name
+               FROM external_db_sync_log
+               WHERE session_id=%s AND new_user_db IS NOT NULL AND new_user_db!=''
+               ORDER BY external_database, table_name""",
+            (session_id,)
+        )
+        sync_rows = cur.fetchall()
+        if sync_rows:
+            from collections import defaultdict as _dd2
+            by_db = _dd2(list)
+            for r in sync_rows:
+                by_db[r["external_database"]].append(r)
+            for ext_db, rows in by_db.items():
+                new_db = rows[0]["new_user_db"]
+                tables = [r["table_name"] for r in rows if r["table_name"]]
+                text = (
+                    f"[ANALYSIS_DB_META] Database analyzed: {ext_db} "
+                    f"(stored as: {new_db})\n"
+                    f"Tables found: {', '.join(tables)}\n"
+                    f"Total tables: {len(tables)}"
+                )
+                chunks.append(_chunk(text, kind="analysis_db_meta", db=new_db))
+            print(f"[RAG] analysis_db_meta: {len(by_db)} databases")
+    except Exception as e:
+        print(f"[RAG] analysis_report load error: {e}")
+    finally:
+        if cur:   cur.close()
+        if local: local.close()
+    return chunks
+
+
+def _load_db(session_id, get_fn):
+    chunks = []
+    local = cur = None
+    try:
+        local = _local_conn(get_fn)
+        cur   = local.cursor(dictionary=True)
+        cur.execute("""SELECT DISTINCT new_user_db FROM external_db_sync_log
+                       WHERE session_id=%s AND new_user_db IS NOT NULL AND new_user_db!=''""",
+                    (session_id,))
+        dbs = [r["new_user_db"] for r in cur.fetchall()]
+    finally:
+        if cur:   cur.close()
+        if local: local.close()
+
+    for db in dbs:
+        if not re.match(r'^\w+$', db): continue
+        conn = c2 = None
+        try:
+            conn = mysql.connector.connect(
+                host=MYSQL_CONFIG["host"], port=MYSQL_CONFIG["port"],
+                user=MYSQL_CONFIG["user"], password=MYSQL_CONFIG["password"],
+                database=db, connection_timeout=10)
+            c2 = conn.cursor(dictionary=True)
+            c2.execute("SHOW TABLES")
+            tables   = [list(r.values())[0] for r in c2.fetchall()]
+            all_rows = {}
+
+            for t in tables:
+                if not re.match(r'^\w+$', t): continue
+                try:
+                    c2.execute(f"SELECT * FROM `{t}` LIMIT %s", (MAX_ROWS,))
+                    rows = c2.fetchall()
+                    if not rows: continue
+                    
+                    if t == 'workspace_files':
+                        for r in rows:
+                            try:
+                                import json
+                                file_data = json.loads(r['file_data']) if isinstance(r.get('file_data'), str) else (r.get('file_data') or {})
+                                structured = file_data.get('structured_content')
+                                if structured:
+                                    paragraphs = structured.get('paragraphs', [])
+                                    if paragraphs:
+                                        all_rows['Document_Paragraphs'] = paragraphs
+                                    for idx, vtable in enumerate(structured.get('tables', [])):
+                                        base_vname = vtable.get('table_name', f"PDF_Table_{idx+1}")
+                                        vname = base_vname
+                                        v_counter = 1
+                                        while vname in all_rows:
+                                            vname = f"{base_vname} ({v_counter})"
+                                            v_counter += 1
+                                        vcols = vtable.get('headers', [])
+                                        
+                                        # Deduplicate headers
+                                        seen_cols = {}
+                                        dedup_cols = []
+                                        for c in vcols:
+                                            base = str(c).strip() if c else "Column"
+                                            if base in seen_cols:
+                                                seen_cols[base] += 1
+                                                dedup_cols.append(f"{base} ({seen_cols[base]})")
+                                            else:
+                                                seen_cols[base] = 1
+                                                dedup_cols.append(base)
+
+                                        vrows = []
+                                        for row_arr in vtable.get('rows', []):
+                                            row_dict = {}
+                                            for i, col in enumerate(dedup_cols):
+                                                row_dict[col] = row_arr[i] if i < len(row_arr) else ""
+                                            vrows.append(row_dict)
+                                        all_rows[vname] = vrows
+                            except Exception as e:
+                                print(f"Error parsing workspace_files json in RAG: {e}")
+                    else:
+                        all_rows[t] = rows
+                except Exception as e:
+                    print(f"[RAG] skip {t}: {e}")
+
+            for t, rows in all_rows.items():
+                if not rows: continue
+                cols = list(rows[0].keys())
+                chunks.append(_chunk(
+                    f"[SCHEMA] db:{db} table:{t} columns:{','.join(cols)} total_rows:{len(rows)}",
+                    db=db, table=t, kind="schema"))
+                lines = [
+                    f"[COUNT] db:{db} table:{t} has {len(rows)} rows total.",
+                    f"Number of {t}: {len(rows)}",
+                    f"Total {t} count: {len(rows)}"
+                ]
+                for col in cols[:10]:
+                    vals = list(dict.fromkeys(
+                        str(r[col]) for r in rows if r.get(col) is not None and str(r.get(col)).strip()))
+                    if vals:
+                        lines.append(f"All values of {col} in {t}: {', '.join(vals[:40])}")
+                chunks.append(_chunk("\n".join(lines), db=db, table=t, kind="count"))
+                for i, row in enumerate(rows, 1):
+                    parts = " | ".join(f"{k}:{v}" for k,v in row.items()
+                                       if v is not None and str(v).strip())
+                    chunks.append(_chunk(f"[ROW] db:{db} table:{t} row{i}: {parts}",
+                                         db=db, table=t, kind="row"))
+                print(f"[RAG] {db}.{t}: {len(rows)} rows → {len(rows)+2} chunks")
+
+            chunks += _build_joins(db, all_rows)
+        except Exception as e:
+            print(f"[RAG] db connect {db}: {e}")
+        finally:
+            if c2:   c2.close()
+            if conn: conn.close()
+    return chunks
+
+
+def _build_joins(db, all_rows):
+    chunks = []
+    user_tables = [t for t in all_rows if re.search(r'\busers?\b', t, re.I)]
+    for ut in user_tables:
+        u_rows = all_rows[ut]
+        if not u_rows: continue
+        ucols  = list(u_rows[0].keys())
+        id_col = next((c for c in ucols if c in ('id','user_id','uid')), ucols[0])
+        nm_col = next((c for c in ucols if re.search(r'\b(name|username)\b', c, re.I)), None)
+        for ur in u_rows:
+            uid   = str(ur.get(id_col,"")).strip()
+            uname = str(ur.get(nm_col, uid)).strip() if nm_col else uid
+            if not uid: continue
+            for at, a_rows in all_rows.items():
+                if at == ut or not a_rows: continue
+                acols   = list(a_rows[0].keys())
+                ref_col = next((c for c in acols if re.search(r'\buser_id\b|\buid\b|\bauthor\b', c, re.I)), None)
+                if not ref_col: continue
+                acts = [r for r in a_rows if str(r.get(ref_col,"")).strip() == uid]
+                if not acts: continue
+                detail = " || ".join(
+                    " | ".join(f"{k}:{v}" for k,v in r.items() if v is not None and str(v).strip())
+                    for r in acts[:15])
+                chunks.append(_chunk(
+                    f"[JOIN] db:{db} user:'{uname}' (id:{uid}) from:{ut} "
+                    f"has {len(acts)} record(s) in table:{at}. data: {detail}",
+                    db=db, table=f"{ut}+{at}", kind="join"))
+    return chunks
+
+
+def _load_sheets(session_id, get_fn):
+    chunks = []
+    local = cur = None
+    try:
+        local = _local_conn(get_fn)
+        cur   = local.cursor(dictionary=True)
+        cur.execute("SELECT table_name,sheet_url FROM sheet_scans WHERE session_id=%s", (session_id,))
+        for sc in cur.fetchall():
+            t = sc["table_name"]
+            if not re.match(r'^sheet_\w+$', t): continue
+            try:
+                cur.execute(f"SELECT * FROM `{t}` LIMIT %s", (MAX_ROWS,))
+                rows = cur.fetchall()
+                if not rows: continue
+                cols = [c for c in rows[0].keys() if c != "_row_id"]
+                chunks.append(_chunk(f"[SCHEMA] sheet:{t} url:{sc.get('sheet_url','')} columns:{','.join(cols)} rows:{len(rows)}", table=t, kind="schema"))
+                lines = [f"[COUNT] sheet:{t} has {len(rows)} rows total."]
+                for col in cols[:6]:
+                    vals = list(dict.fromkeys(str(r[col]) for r in rows if r.get(col) is not None))
+                    lines.append(f"All values of {col}: {', '.join(vals[:20])}")
+                chunks.append(_chunk("\n".join(lines), table=t, kind="count"))
+                for i, row in enumerate(rows, 1):
+                    parts = " | ".join(f"{k}:{v}" for k,v in row.items()
+                                       if k!="_row_id" and v is not None and str(v).strip())
+                    chunks.append(_chunk(f"[ROW] sheet:{t} row{i}: {parts}", table=t, kind="row"))
+            except Exception as e:
+                print(f"[RAG] sheet {t}: {e}")
+    except Exception as e:
+        print(f"[RAG] sheets: {e}")
+    finally:
+        if cur:   cur.close()
+        if local: local.close()
+    return chunks
+
+
+def _load_web(session_id, get_fn):
+    chunks = []
+    local = cur = None
+    try:
+        local = _local_conn(get_fn)
+        cur   = local.cursor(dictionary=True)
+        cur.execute("SELECT title,url,brief,topic FROM saved_web_results WHERE session_id=%s", (session_id,))
+        for r in cur.fetchall():
+            chunks.append(_chunk(
+                f"[WEB] title:{r['title']} url:{r['url']} topic:{r.get('topic','')} content:{r.get('brief','')}",
+                kind="web"))
+    except Exception as e:
+        print(f"[RAG] web: {e}")
+    finally:
+        if cur:   cur.close()
+        if local: local.close()
+    return chunks
+
+
+def _chunk(text, db="", table="", kind="row"):
+    return {"text": text, "db": db, "table": table, "kind": kind}
+
+
+# ══════════════════════════════════════════════════════
+# VECTOR STORE (ChromaDB)
+# ══════════════════════════════════════════════════════
+
+def _get_or_create_lock(session_id):
+    if session_id not in _LOCKS:
+        _LOCKS[session_id] = threading.Lock()
+    return _LOCKS[session_id]
+
+
+def _col_safe_count(col):
+    try:    return col.count()
+    except: return 0
+
+
+def _build_store(session_id, get_fn):
+    import chromadb
+    lock = _get_or_create_lock(session_id)
+    with lock:
+        now = time.time()
+        if session_id in _CACHE:
+            chunks, bm25, col, ts = _CACHE[session_id]
+            if now - ts < CACHE_TTL and _col_safe_count(col) > 0:
+                print(f"[RAG] cache hit — {len(chunks)} chunks")
+                return chunks, bm25, col
+            else:
+                _CACHE.pop(session_id, None)
+
+        print(f"[RAG] building store for {session_id[:8]}...")
+        all_chunks = _load_all(session_id, get_fn)
+        if not all_chunks:
+            return None, None, None
+
+        # OPTIMIZATION 4: Deduplicate chunks before indexing
+        seen_texts = set()
+        deduped    = []
+        for c in all_chunks:
+            if c["text"] not in seen_texts:
+                seen_texts.add(c["text"])
+                deduped.append(c)
+        removed = len(all_chunks) - len(deduped)
+        if removed > 0:
+            print(f"[RAG] deduped {removed} duplicates → {len(deduped)} unique chunks")
+        all_chunks = deduped
+
+        texts    = [c["text"] for c in all_chunks]
+        bm25_idx = BM25(texts)
+
+        # Batch encode using global model + cache
+        embeds = _encode_texts(texts)
+
+        col_name = "s_" + hashlib.md5(session_id.encode()).hexdigest()[:12]
+        if session_id not in _CLIENTS:
+            _CLIENTS[session_id] = chromadb.PersistentClient(path=CHROMA_PERSIST_DIR)
+        client = _CLIENTS[session_id]
+        try: client.delete_collection(col_name)
+        except: pass
+        col = client.create_collection(col_name)
+
+        for i in range(0, len(all_chunks), 500):
+            b = all_chunks[i:i+500]
+            col.add(
+                documents  = [c["text"]  for c in b],
+                embeddings = embeds[i:i+500],
+                metadatas  = [{"db":c["db"],"table":c["table"],"kind":c["kind"]} for c in b],
+                ids        = [f"c{i+j}" for j in range(len(b))]
+            )
+
+        _CLIENTS[session_id] = client
+        _CACHE[session_id]   = (all_chunks, bm25_idx, col, now)
+        print(f"[RAG] ✓ {len(all_chunks)} chunks indexed")
+        return all_chunks, bm25_idx, col
+
+
+# ══════════════════════════════════════════════════════
+# QUERY UNDERSTANDING
+# ══════════════════════════════════════════════════════
+
+def _understand(question, all_chunks):
+    q      = question.lower()
+    tokens = set(re.findall(r'\b\w{3,}\b', q))
+    known_tables = list(dict.fromkeys(c["table"] for c in all_chunks if c["table"]))
+
+    table_hints = []
+    for t in known_tables:
+        t_parts = set(re.findall(r'\b\w{3,}\b', t.lower()))
+        overlap = tokens & t_parts
+        if overlap: table_hints.append((t, len(overlap)))
+    table_hints.sort(key=lambda x: -x[1])
+    matched_tables = [t for t,_ in table_hints[:5]]
+
+    intent = "lookup"
+    if re.search(r'\bhow\s+many\b|\bcount\b|\btotal\b|\bnumber\s+of\b|\bhow\s+much\b', q):
+        intent = "count"
+    elif re.search(r'\blist\b|\ball\b|\beveryone\b|\bnames?\b|\bshow\s+(me\s+)?all\b', q):
+        intent = "list"
+    elif re.search(r'\bwho\b|\bwhich\s+user\b|\bwhose\b', q):
+        intent = "who"
+    elif re.search(r'\bcreated\s+by\b|\bbelongs?\s+to\b|\bby\s+whom\b|\bowned\s+by\b', q):
+        intent = "join"
+    elif re.search(r'\bwhat\s+is\b|\bwhat\s+are\b|\btell\s+me\b|\bfind\b|\bget\b', q):
+        intent = "lookup"
+
+    entities = re.findall(r"'([^']+)'|\"([^\"]+)\"", question)
+    entities = [e[0] or e[1] for e in entities]
+
+    queries = [question]
+    if intent == "count" and matched_tables:
+        for t in matched_tables[:3]:
+            queries += [f"COUNT {t} total rows", f"Number of {t}", f"how many {t}", f"[COUNT] {t}"]
+    elif intent == "list" and matched_tables:
+        for t in matched_tables[:2]:
+            queries += [f"All values of", f"list all {t}", f"[COUNT] {t}"]
+    elif intent == "join":
+        queries += ["[JOIN]"] + [f"user '{e}'" for e in entities]
+    elif entities:
+        queries += [f"'{e}'" for e in entities] + [f"{e}" for e in entities]
+
+    if not matched_tables:
+        for t in known_tables:
+            for tok in tokens:
+                if tok in t.lower() and len(tok) > 3:
+                    matched_tables.append(t); break
+        matched_tables = list(dict.fromkeys(matched_tables))[:5]
+
+    return {
+        "intent":      intent,
+        "table_hints": matched_tables,
+        "entities":    entities,
+        "queries":     list(dict.fromkeys(queries))
+    }
+
+
+# ══════════════════════════════════════════════════════
+# HYBRID RETRIEVAL (BM25 + Vector + Cross-Encoder Rerank)
+# ══════════════════════════════════════════════════════
+
+def _retrieve(all_chunks, bm25_idx, col, question, understanding):
+    intent   = understanding["intent"]
+    hints    = understanding["table_hints"]
+    queries  = understanding["queries"]
+    entities = understanding["entities"]
+
+    scores = defaultdict(float)
+
+    # BM25
+    for q in queries:
+        for idx, s in bm25_idx.score(q, top_k=80):
+            scores[idx] += s * 1.0
+
+    # OPTIMIZATION 3: Batch encode all queries at once
+    q_embeds = _encode_texts(queries)
+    per_q    = max(8, TOP_K // len(queries))
+    seen     = set()
+    for q_emb in q_embeds:
+        n = min(per_q, _col_safe_count(col))
+        if n == 0: continue
+        res = col.query(query_embeddings=[q_emb], n_results=n,
+                        include=["documents","metadatas"])
+        for doc, meta in zip(res["documents"][0], res["metadatas"][0]):
+            key = doc[:100]
+            if key in seen: continue
+            seen.add(key)
+            for i, c in enumerate(all_chunks):
+                if c["text"][:100] == key:
+                    scores[i] += 2.0; break
+
+    # Boosts
+    for i, c in enumerate(all_chunks):
+        if c["table"] in hints:                               scores[i] += 5.0
+        if intent == "count" and c["kind"] == "count":        scores[i] += 8.0
+        elif intent == "list" and c["kind"] == "count":       scores[i] += 6.0
+        elif intent == "join" and c["kind"] == "join":        scores[i] += 8.0
+        for ent in entities:
+            if ent.lower() in c["text"].lower():              scores[i] += 4.0
+
+    ranked = sorted(scores.items(), key=lambda x: -x[1])
+
+    forced = {i for i, c in enumerate(all_chunks)
+              if c["kind"] == "count" and c["table"] in hints}
+
+    candidate_indices = list(forced)
+    for i, _ in ranked:
+        if i not in forced: candidate_indices.append(i)
+        if len(candidate_indices) >= TOP_K: break
+
+    # OPTIMIZATION 5: Cross-encoder reranking top-300 → keep best 250
+    RERANK_TOP  = 300
+    RERANK_KEEP = 250
+    rerank_pool = candidate_indices[:RERANK_TOP]
+
+    if len(rerank_pool) > RERANK_KEEP:
+        try:
+            ce_model  = _get_cross_encoder()
+            pairs     = [(question, all_chunks[i]["text"][:512]) for i in rerank_pool]
+            ce_scores = ce_model.predict(pairs)
+            reranked  = sorted(zip(rerank_pool, ce_scores), key=lambda x: -x[1])
+            forced_in = [i for i in rerank_pool if i in forced]
+            reranked_nf = [i for i, _ in reranked if i not in forced]
+            rerank_pool = forced_in + reranked_nf[:RERANK_KEEP]
+            candidate_indices = rerank_pool + candidate_indices[RERANK_TOP:]
+            print(f"[RAG] cross-encoder reranked {RERANK_TOP} → kept {len(rerank_pool)}")
+        except Exception as e:
+            print(f"[RAG] cross-encoder skipped: {e}")
+
+    parts, total = [], 0
+    for i in candidate_indices:
+        txt   = all_chunks[i]["text"]
+        if total + len(txt) > MAX_CTX_CHARS: break
+        parts.append(txt)
+        total += len(txt)
+
+    return "\n\n".join(parts)
+
+
+# ══════════════════════════════════════════════════════
+# AUTO CHAT HISTORY SAVE
+# ══════════════════════════════════════════════════════
+
+# One-time flag — server startup এ একবার UNIQUE drop করবে
+_UNIQUE_FIXED = False
+
+def _ensure_no_unique_on_chat_id(get_fn):
+    """chat_id column এ UNIQUE constraint থাকলে drop করো (once per server start)."""
+    global _UNIQUE_FIXED
+    if _UNIQUE_FIXED:
+        return
+    conn = cur = None
+    try:
+        conn = get_fn()
+        cur  = conn.cursor()
+        # Check if UNIQUE index named 'chat_id' exists
+        cur.execute("""
+            SELECT INDEX_NAME FROM information_schema.STATISTICS
+            WHERE TABLE_SCHEMA = DATABASE()
+              AND TABLE_NAME   = 'session_chat_history'
+              AND INDEX_NAME   = 'chat_id'
+              AND NON_UNIQUE   = 0
+            LIMIT 1
+        """)
+        row = cur.fetchone()
+        if row:
+            cur.execute("ALTER TABLE session_chat_history DROP INDEX chat_id")
+            conn.commit()
+            print("[History] ✓ UNIQUE index on chat_id dropped — multiple rows per chat_id now allowed")
+        _UNIQUE_FIXED = True
+    except Exception as e:
+        print(f"[History] unique-fix skipped: {e}")
+        _UNIQUE_FIXED = True  # Don't retry on error
+    finally:
+        if cur:  cur.close()
+        if conn: conn.close()
+
+
+_HISTORY_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS session_chat_history (
+    id                  INT AUTO_INCREMENT PRIMARY KEY,
+    session_id          VARCHAR(100) NOT NULL,
+    user_id             INT          NOT NULL,
+    turn_index          INT          NOT NULL DEFAULT 0,
+    visit_number        INT          NOT NULL DEFAULT 1,
+    local_turn_index    INT          NOT NULL DEFAULT 0,
+    question            TEXT         NOT NULL,
+    answer              LONGTEXT     NOT NULL,
+    follow_up_questions JSON         DEFAULT NULL,
+    intent              VARCHAR(50)  DEFAULT NULL,
+    mode                VARCHAR(30)  DEFAULT 'answer',
+    login_token         VARCHAR(255) DEFAULT NULL,
+    chat_id             VARCHAR(64)  DEFAULT NULL,
+    visualizations      JSON         DEFAULT NULL,
+    created_at          DATETIME     DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_session      (session_id),
+    INDEX idx_user         (user_id),
+    INDEX idx_session_user (session_id, user_id),
+    INDEX idx_chat_id      (chat_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+"""
+
+# SQL to drop UNIQUE constraint on chat_id if it exists (run once)
+_FIX_UNIQUE_SQL = """
+ALTER TABLE session_chat_history
+DROP INDEX chat_id
+"""
+
+# ══════════════════════════════════════════════════
+# CHAT_ID MANAGER
+# ══════════════════════════════════════════════════
+
+def _resolve_chat_id(get_fn, session_id, user_id, source_chat_id):
+    """
+    CASE A — source_chat_id আছে + same day → same chat_id continue
+    CASE B — source_chat_id আছে + different day → new chat_id + copy source history
+    CASE C — source_chat_id নেই + today's chat exists → continue today's chat
+    CASE C — source_chat_id নেই + no today's chat → brand new chat_id
+    """
+    import uuid
+    from datetime import date
+
+    conn = cur = None
+    try:
+        conn = get_fn()
+        cur  = conn.cursor(dictionary=True)
+        cur.execute(_HISTORY_TABLE_SQL)
+        today = date.today()
+
+        if source_chat_id:
+            cur.execute("""
+                SELECT chat_id, created_at FROM session_chat_history
+                WHERE chat_id = %s AND user_id = %s
+                ORDER BY id DESC LIMIT 1
+            """, (source_chat_id, int(user_id)))
+            src = cur.fetchone()
+
+            if not src:
+                new_id = uuid.uuid4().hex[:32]
+                print(f"[ChatID] source not found → new {new_id[:8]}...")
+                return new_id, True
+
+            if src["created_at"].date() == today:
+                # CASE A
+                print(f"[ChatID] CASE A same day → {source_chat_id[:8]}...")
+                return source_chat_id, False
+
+            # CASE B — new day
+            new_id = uuid.uuid4().hex[:32]
+            print(f"[ChatID] CASE B new day → {new_id[:8]}... (from {source_chat_id[:8]}...)")
+            cur.execute("""
+                SELECT session_id, user_id, question, answer,
+                       follow_up_questions, intent, mode, login_token, visualizations
+                FROM session_chat_history
+                WHERE chat_id = %s AND user_id = %s ORDER BY turn_index ASC
+            """, (source_chat_id, int(user_id)))
+            for i, r in enumerate(cur.fetchall()):
+                cur.execute("""
+                    INSERT INTO session_chat_history
+                        (session_id,user_id,turn_index,visit_number,local_turn_index,
+                         question,answer,follow_up_questions,intent,mode,
+                         login_token,chat_id,visualizations,created_at)
+                    VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
+                """, (r["session_id"] or session_id, int(user_id), i, 1, i,
+                      r["question"], r["answer"], r["follow_up_questions"],
+                      r["intent"], r["mode"], r["login_token"],
+                      new_id, r["visualizations"]))
+            conn.commit()
+            print(f"[ChatID] copied history → {new_id[:8]}...")
+            return new_id, True
+
+        # CASE C — no source_chat_id
+        cur.execute("""
+            SELECT chat_id FROM session_chat_history
+            WHERE session_id = %s AND user_id = %s AND DATE(created_at) = %s
+            ORDER BY id DESC LIMIT 1
+        """, (session_id, int(user_id), today.isoformat()))
+        today_row = cur.fetchone()
+
+        if today_row:
+            print(f"[ChatID] CASE C today exists → {today_row['chat_id'][:8]}...")
+            return today_row["chat_id"], False
+
+        new_id = uuid.uuid4().hex[:32]
+        print(f"[ChatID] CASE C brand new → {new_id[:8]}...")
+        return new_id, True
+
+    except Exception as e:
+        print(f"[ChatID] error: {e}")
+        return uuid.uuid4().hex[:32], True
+    finally:
+        if cur:  cur.close()
+        if conn: conn.close()
+
+
+def _save_history(get_fn, session_id, user_id, question, answer,
+                  follow_ups, intent, mode,
+                  login_token=None, visualizations=None, chat_id=None):
+    if not user_id: return
+    from datetime import datetime
+    _ensure_no_unique_on_chat_id(get_fn)  # drop UNIQUE once if needed
+    conn = cur = None
+    try:
+        conn = get_fn()
+        cur  = conn.cursor(dictionary=True)
+
+        eid  = chat_id or session_id
+
+        cur.execute("""
+            SELECT turn_index, visit_number, local_turn_index, created_at, login_token
+            FROM session_chat_history
+            WHERE chat_id = %s AND user_id = %s
+            ORDER BY id DESC LIMIT 1
+        """, (eid, int(user_id)))
+        last = cur.fetchone()
+
+        if last:
+            turn   = last["turn_index"] + 1
+            diff   = datetime.now() - last["created_at"]
+            new_v  = (login_token is not None and last["login_token"] != login_token) or diff.total_seconds() > 3600
+            visit  = last["visit_number"] + (1 if new_v else 0)
+            local  = 0 if new_v else last["local_turn_index"] + 1
+        else:
+            turn = visit = local = 0
+
+        cur.execute("""
+            INSERT INTO session_chat_history
+                (session_id,user_id,turn_index,visit_number,local_turn_index,
+                 question,answer,follow_up_questions,intent,mode,
+                 login_token,chat_id,visualizations)
+            VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        """, (session_id, int(user_id), turn, visit, local,
+              question, answer,
+              json.dumps(follow_ups)     if follow_ups     else None,
+              intent or None, mode, login_token, eid,
+              json.dumps(visualizations) if visualizations else None))
+        conn.commit()
+        print(f"✅ [History] turn={turn} visit={visit} local={local} chat={eid[:8]}...")
+    except Exception as e:
+        print(f"❌ [History] save error: {e}")
+    finally:
+        if cur:  cur.close()
+        if conn: conn.close()
+
+# ══════════════════════════════════════════════════
+# SYSTEM PROMPT
+# ══════════════════════════════════════════════════
+
+SYS = """You are a senior data analyst and database expert with deep analytical reasoning capabilities.
+You have access to the user's actual database records as retrieved chunks.
+
+Chunk types:
+  [SCHEMA]           — table structure, column names, total row count
+  [COUNT]            — exact row counts AND all distinct values per column — PRIMARY source for counts/lists
+  [ROW]              — individual database records with all field values
+  [JOIN]             — pre-computed cross-table joins: user X has N records in table Y with details
+  [WEB]              — saved web content (raw)
+  [ANALYSIS_WEB]     — web research grouped by topic with titles and summaries
+  [ANALYSIS_DB_META] — database metadata: which databases and tables were analyzed
+
+DEEP ANALYSIS RULES:
+1. Read EVERY chunk exhaustively before forming your answer. Pay STRICT ATTENTION to the exact year, date, or context associated with each value.
+2. STRICT DATA INTEGRITY: DO NOT hallucinate or swap values between different rows, years, or entities. Ensure absolute alignment.
+3. For COUNT questions: find [COUNT] chunk with "Number of X: N" — this is authoritative.
+4. For LIST questions: find [COUNT] chunk "All values of column_name:" — gives complete list.
+5. For JOIN/relationship questions: find [JOIN] chunks — they show cross-table activity per user.
+6. For WHY questions: analyze patterns, dates, sequences, frequencies across chunks to infer reasons.
+7. For TREND questions: compare timestamps, sequences, values across [ROW] chunks.
+8. For COMPARISON questions: pull data from multiple tables and compare side by side.
+9. For DEEP questions: combine ROW + JOIN + COUNT chunks to give comprehensive multi-part answers.
+10. NEVER say "I could not find" if ANY relevant data exists — dig deeper into chunks.
+11. Always answer in full sentences with specifics — no vague responses.
+12. DO NOT include source citations in the answer text — keep answer clean.
+13. follow_up_questions MUST follow the EXACT format specified in the user prompt.
+14. Respond ONLY in valid JSON."""
+
+from model.llm_client import call_llm_chat
+
+def _mistral(system, user, retries=2):
+    if len(user) > 60000:
+        print("[LLM] prompt is very large, but proceeding without arbitrary truncation to preserve JSON instructions.")
+        
+    messages = [
+        {"role":"system","content":system},
+        {"role":"user","content":user}
+    ]
+    
+    for attempt in range(retries + 1):
+        try:
+            response = call_llm_chat(messages, json_mode=True, temperature=0.15)
+            if response:
+                return json.loads(response)
+            return None
+        except Exception as e:
+            print(f"[LLM] error attempt {attempt+1}: {e}")
+            if attempt == retries: return None
+            import time
+            time.sleep(1)
+    return None
+
+
+def _history(raw):
+    if not raw or not isinstance(raw, list): return ""
+    lines = [f"{str(t.get('role','user')).capitalize()}: {str(t.get('content',''))}"
+             for t in raw[-6:] if isinstance(t, dict)]
+    return ("Chat history:\n" + "\n".join(lines) + "\n\n") if lines else ""
+
+
+def _to_str(val):
+    if isinstance(val, str): return val
+    if isinstance(val, dict):
+        lines = []
+        for k, v in val.items():
+            if isinstance(v, list):
+                lines.append(f"{k}:")
+                for item in v:
+                    if isinstance(item, dict):
+                        lines.append("  • " + " | ".join(f"{ik}: {iv}" for ik, iv in item.items()))
+                    else:
+                        lines.append(f"  • {item}")
+            else:
+                lines.append(f"{k}: {v}")
+        return "\n".join(lines)
+    if isinstance(val, list):
+        lines = []
+        for item in val:
+            if isinstance(item, dict):
+                lines.append("• " + " | ".join(f"{k}: {v}" for k, v in item.items()))
+            else:
+                lines.append(f"• {item}")
+        return "\n".join(lines)
+    return str(val) if val else ""
+
+
+# ─────────────────────────────────────────────
+# VISUALIZATION SUPPORT
+# ─────────────────────────────────────────────
+
+def _normalize_visualizations(viz_list):
+    if not isinstance(viz_list, list):
+        return []
+    normalized = []
+    for v in viz_list:
+        if not isinstance(v, dict): continue
+        vtype = str(v.get("type","")).lower()
+        if vtype in ("bar","barchart","bar-chart"):   vtype = "bar_chart"
+        elif vtype in ("line","linechart"):            vtype = "line_chart"
+        elif vtype in ("pie","piechart"):              vtype = "pie_chart"
+        elif vtype in ("table","grid"):                vtype = "table"
+        item = {"type": vtype, "title": v.get("title","")}
+        if vtype in ("bar_chart","line_chart"):
+            item["xKey"] = v.get("xKey","")
+            item["yKey"] = v.get("yKey","")
+            item["data"] = v.get("data",[])
+        elif vtype == "pie_chart":
+            item["data"] = v.get("data",[])
+        elif vtype == "table":
+            item["columns"] = v.get("columns",[])
+            item["data"]    = v.get("data",[])
+        normalized.append(item)
+    return normalized
+
+
+def _safe_visualizations(vizs):
+    return [v for v in vizs if isinstance(v,dict) and v.get("type") and v.get("title")]
+
+def session_rag_chat_controller(get_connection_func):
+    data       = request.json or {}
+    session_id     = (data.get("session_id")     or "").strip()
+    question       = (data.get("question")       or "").strip()
+    history        = data.get("chat_history", [])
+    user_id        = data.get("user_id")
+    login_token    = data.get("login_token")
+    source_chat_id = (data.get("source_chat_id") or "").strip() or None
+
+    if not session_id:
+        return jsonify({"status":"failed","statusCode":400,
+                        "message":"session_id is required"}), 400
+
+    # ── Resolve active chat_id ──────────────────────────────────
+    active_chat_id = None
+    if user_id:
+        active_chat_id, _ = _resolve_chat_id(
+            get_connection_func, session_id, user_id, source_chat_id
+        )
+
+    # Greeting
+    if question and _is_greet(question):
+        suggested = []
+        if session_id in _CACHE:
+            chunks, _, _, _ = _CACHE[session_id]
+            sample = "\n".join(c["text"] for c in chunks if c["kind"] == "count")[:10000]
+            res = _mistral(
+                "Respond ONLY in valid JSON.",
+                f"Data summary:\n{sample}\n\n"
+                "Generate exactly 3 questions. Q1 starts with 'What ', Q2 starts with 'Where ', Q3 starts with 'Why '. "
+                "Use actual table names and values from the data. "
+                'Return ONLY: {"suggested_questions":["What ...?","Where ...?","Why ...?"]}'
+            )
+            if res: suggested = res.get("suggested_questions", [])
+        return jsonify({
+            "status":"success","statusCode":200,
+            "answer":"Hi! I'm your advanced business intelligence assistant. I have full access to your session databases. Ask me anything about your business data!",
+            "follow_up_questions": suggested,
+            "chat_id": active_chat_id
+        }), 200
+
+    # Build/get store
+    try:
+        all_chunks, bm25_idx, col = _build_store(session_id, get_connection_func)
+    except Exception as e:
+        log_system_error(session_id, "global_rag_store", f"Store error: {e}", error_type="store_error")
+        return jsonify({"status":"error","statusCode":500,
+                        "message":f"Store error: {e}"}), 500
+
+    if not all_chunks:
+        return jsonify({"status":"no_data","statusCode":200,
+                        "session_id":session_id,
+                        "message":"No data found for this session."}), 200
+
+    # Suggest mode
+    if not question:
+        count_chunks = [c["text"] for c in all_chunks if c["kind"]=="count"]
+        sample = "\n".join(count_chunks)[:15000]
+        res = _mistral(SYS, f"""
+Business data summary ({len(all_chunks)} total chunks):
+{sample}
+
+This is a business intelligence assistant. Generate exactly 5 "What" questions about the actual business data above.
+ALL 5 questions MUST start with "What ".
+Focus on business-relevant insights: counts, values, names, metrics.
+Reference actual table names, column names, and values from the data.
+
+Return ONLY: {{"suggested_questions":["What ...?","What ...?","What ...?"]}}
+""")
+        if not res:
+            log_system_error(session_id, "global_rag_suggest", "LLM failed in suggest mode", error_type="llm_error")
+            return jsonify({"status":"error","statusCode":500,"message":"LLM failed"}), 500
+        return jsonify({
+            "status":              "success",
+            "statusCode":          200,
+            "suggested_questions": res.get("suggested_questions",[]),
+            "chat_id":             active_chat_id
+        }), 200
+
+    # Understand + Retrieve
+    understanding = _understand(question, all_chunks)
+    context       = _retrieve(all_chunks, bm25_idx, col, question, understanding)
+    hist          = _history(history)
+    print(f"[RAG] intent={understanding['intent']} tables={understanding['table_hints']} entities={understanding['entities']}")
+
+    # Graph
+    if _is_graph(question):
+        ftype        = _next_followup_type(session_id)
+        followup_ins = _followup_instruction(ftype)
+        res = _mistral(SYS, f"""
+Retrieved business data:
+{context}
+
+{hist}Chart request: "{question}"
+
+Extract actual numeric/categorical values ONLY from the chunks.
+{followup_ins}
+Return ONLY:
+{{
+  "chart_type":"bar"|"line"|"pie"|"scatter",
+  "title":"...",
+  "labels":[...],
+  "datasets":[{{"label":"...","data":[...]}}],
+  "source_note":"...",
+  "follow_up_questions":["{ftype} ...?","{ftype} ...?","{ftype} ...?"]
+}}
+""")
+        if not res:
+            log_system_error(session_id, "global_rag_graph", "LLM failed in graph generation", error_type="llm_error")
+            return jsonify({"status":"error","statusCode":500,"message":"LLM failed"}), 500
+        _advance_turn(session_id)
+        fuq = res.get("follow_up_questions",[])
+        _save_history(get_connection_func, session_id, user_id,
+                      question, json.dumps(res.get("datasets",[])), fuq, understanding["intent"], "graph",
+                      login_token=login_token, chat_id=active_chat_id)
+        return jsonify({
+            "status":     "success",
+            "statusCode": 200,
+            "chart_data": {
+                "chart_type":  res.get("chart_type"),
+                "title":       res.get("title",""),
+                "labels":      res.get("labels",[]),
+                "datasets":    res.get("datasets",[]),
+                "source_note": res.get("source_note","")
+            },
+            "follow_up_questions": fuq,
+            "chat_id": active_chat_id
+        }), 200
+
+    # Report
+    if _is_report(question):
+        ftype        = _next_followup_type(session_id)
+        followup_ins = _followup_instruction(ftype)
+        res = _mistral(SYS, f"""
+You are a senior business analyst. Write a comprehensive report from the business data below.
+Retrieved data:
+{context}
+
+{hist}Report request: "{question}"
+
+Write an analytical business report using ONLY the chunks above.
+Be specific — use actual numbers, names, values from the data.
+{followup_ins}
+Return ONLY:
+{{
+  "report_title":"...",
+  "sections":[{{"heading":"...","content":"..."}}],
+  "key_findings":["Finding 1","Finding 2","Finding 3"],
+  "follow_up_questions":["{ftype} ...?","{ftype} ...?","{ftype} ...?"]
+}}
+""")
+        if not res:
+            log_system_error(session_id, "global_rag_report", "LLM failed in report generation", error_type="llm_error")
+            return jsonify({"status":"error","statusCode":500,"message":"LLM failed"}), 500
+        _advance_turn(session_id)
+        fuq = res.get("follow_up_questions",[])
+        _save_history(get_connection_func, session_id, user_id,
+                      question, res.get("report_title",""), fuq, understanding["intent"], "report",
+                      login_token=login_token, chat_id=active_chat_id)
+        return jsonify({
+            "status":     "success",
+            "statusCode": 200,
+            "report": {
+                "title":        res.get("report_title",""),
+                "sections":     res.get("sections",[]),
+                "key_findings": res.get("key_findings",[])
+            },
+            "follow_up_questions": fuq,
+            "chat_id": active_chat_id
+        }), 200
+
+    # Answer
+    ftype        = _next_followup_type(session_id)
+    followup_ins = _followup_instruction(ftype)
+
+    # Detect multi-part questions and add explicit instruction
+    q_parts = [p.strip() for p in re.split(r'[?]\s+(?=[A-WY-Z])', question) if len(p.strip()) > 8]
+    multi_hint = (
+        f"\nNOTE: This question has {len(q_parts)} parts. Address EACH part with a clear numbered heading."
+        if len(q_parts) > 1 else ""
+    )
+
+    res = _mistral(SYS, f"""
+You are an advanced business intelligence AI — like Claude or GPT — specialized in analyzing actual business database records.
+This is NOT a general chatbot. Every answer must be grounded in the business data provided below.
+
+Retrieved data chunks (read ALL carefully):
+{context}
+
+{hist}Business Question: "{question}"
+
+Detected intent: {understanding['intent']}
+Relevant tables: {understanding['table_hints']}
+
+{multi_hint}
+DEEP ANALYSIS PROTOCOL:
+1. Exhaustively scan every chunk — extract ALL relevant business facts. NEVER swap data between different years, rows, or categories.
+2. STRICT CONTEXT MATCHING: Ensure that any number you output exactly matches the year or category it was found with in the chunks.
+3. Counts/Totals → [COUNT] chunks are authoritative (e.g. "Number of recipe_users: 12").
+4. Complete lists → [COUNT] "All values of column:" lines.
+5. User/entity activity → [JOIN] chunks show cross-table relationships.
+6. Time patterns → compare timestamps in [ROW] chunks to find trends.
+7. Business logic → reason about WHY data looks the way it does.
+8. Write a COMPREHENSIVE, analyst-grade answer:
+   - Start with the direct answer to the question.
+   - Compare available years objectively. Avoid sweeping claims like "clear downward trend" unless explicitly verified across all requested years.
+   - Use the word "Actual" (not "projected" or "estimated") for actual cost/expenditure values from the data, regardless of the year.
+   - Do NOT explicitly state "No data for X was found" if a specific year is missing. Just provide the comparison for the years that are available in the context.
+   - Use bullet points (•) for lists of items.
+   - Use plain text paragraphs for explanations and reasoning.
+9. Do NOT include "(source:...)" tags in the answer text.
+10. {followup_ins}
+
+VISUALIZATION RULES:
+If the question involves comparison, distribution, ranking, trends, or category breakdown,
+generate up to 3 visualizations from: bar_chart, line_chart, pie_chart, table.
+Also generate at least 4 to 6 KPIs (if data supports it) to provide context.
+
+For KPIs:
+{{"type":"kpi","title":"...","value":"...","description":"...","trend":"up|down|neutral"}}
+
+For Charts:
+bar_chart: {{"type":"bar_chart","title":"...","xKey":"...","yKey":"...","data":[{{"<xKey>":"A","<yKey>":100}}]}}
+line_chart: {{"type":"line_chart","title":"...","xKey":"...","yKey":"...","data":[{{"<xKey>":"A","<yKey>":100}}]}}
+pie_chart: {{"type":"pie_chart","title":"...","data":[{{"name":"A","value":100}}]}}
+table:     {{"type":"table","title":"...","columns":[{{"key":"k","label":"L"}}],"data":[]}}
+
+Return ONLY valid JSON (answer must be a plain text string):
+{{"answer":"...","follow_up_questions":["{ftype} ...?","{ftype} ...?","{ftype} ...?"],"visualizations":[]}}
+""")
+    if not res:
+        log_system_error(session_id, "global_rag_answer", "LLM failed in answer generation", error_type="llm_error")
+        return jsonify({"status":"error","statusCode":500,"message":"LLM failed"}), 500
+
+    clean_answer = _to_str(res.get("answer",""))
+    clean_answer = re.sub(r'\s*\(source:[^)]*\)', '', clean_answer).strip()
+    clean_answer = re.sub(r'\s*\[source:[^\]]*\]', '', clean_answer).strip()
+
+    raw_fuq = res.get("follow_up_questions", [])
+    fuq = []
+    if isinstance(raw_fuq, list):
+        for q in raw_fuq:
+            if isinstance(q, dict):
+                fuq.append(str(q.get("question", list(q.values())[0] if q else "")))
+            else:
+                fuq.append(str(q))
+
+    visualizations = _safe_visualizations(
+        _normalize_visualizations(res.get("visualizations", []))
+    )
+    if "table" in question.lower():
+        visualizations = [v for v in visualizations if v.get("type") == "table"]
+
+    _advance_turn(session_id)
+    _save_history(get_connection_func, session_id, user_id,
+                  question, clean_answer, fuq, understanding["intent"], "answer",
+                  login_token=login_token, visualizations=visualizations,
+                  chat_id=active_chat_id)
+
+    return jsonify({
+        "status":              "success",
+        "statusCode":          200,
+        "answer":              clean_answer,
+        "follow_up_questions": fuq,
+        "visualizations":      visualizations,
+        "chat_id":             active_chat_id
+    }), 200
+Sendly is the modern way to transfer and collaborate securely.
+
+Why use Sendly?
+Product
+File Transfer
+Screen Share
+Local Drop
+Live Notepad
+Dev Tools
+Diff Checker
+JSON Formatter
+JSON Cracker
+Security Tools
+Password Auditor
+Link Inspector
+Help & Resources
+How it works
+Blog & Articles
+Contact Support
+Status
+© 2026 Sendly. All rights reserved.
+Terms of Service
+Privacy Policy
+Sendly is a neutral file transport platform. Transmission of copyrighted material, malware, or illegal content is strictly prohibited.
+
+Real-Time Collaborative Notepad — Share Text Instantly — Sendly
+Sendly Logo

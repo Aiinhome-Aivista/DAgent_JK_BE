@@ -1,0 +1,910 @@
+import hashlib
+import re
+import json
+import os
+import uuid
+# pyrefly: ignore [missing-import]
+import mysql.connector
+try:
+    import psycopg2
+    import psycopg2.extras
+    PSYCOPG2_AVAILABLE = True
+except ImportError:
+    PSYCOPG2_AVAILABLE = False
+    print("[Analysis] psycopg2 not installed — PostgreSQL support disabled")
+from flask import request, jsonify
+from database.config import MISTRAL_API_KEY, MISTRAL_MODEL, MYSQL_CONFIG
+from model.llm_client import call_llm_chat
+try:
+    from utils.logger_service import log_system_error
+except Exception:
+    def log_system_error(*args, **kwargs): pass
+
+# pyrefly: ignore [missing-import]
+from pyvis.network import Network
+# pyrefly: ignore [missing-import]
+from arango import ArangoClient
+from database.config import (
+    GRAPH_FOLDER, BASE_URL,
+    ARANGO_HOST, ARANGO_USER, ARANGO_PASS, ARANGO_DB
+)
+from database.kgraph_ontology_comparator import compare_kgraph_with_ontology
+
+MISTRAL_URL   = "https://api.mistral.ai/v1/chat/completions"
+MAX_CTX_CHARS = 80000
+
+
+# ══════════════════════════════════════════════════════
+# CACHE HELPERS
+# ══════════════════════════════════════════════════════
+
+def _hash_context(context: str) -> str:
+    """Return SHA-256 hex digest of the raw metadata context string."""
+    return hashlib.sha256(context.encode("utf-8")).hexdigest()
+
+
+def _load_cache(session_id: str, data_hash: str, conn) -> dict | None:
+    """
+    Return cached {report, graph_url, ontology_analysis} if session_id exists AND hash matches.
+    Returns None otherwise (miss or stale).
+    """
+    cursor = None
+    try:
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute("""
+            SELECT `report`, `graph_url`, `data_hash`
+            FROM `session_analysis_cache`
+            WHERE `session_id` = %s
+            LIMIT 1
+        """, (session_id,))
+        row = cursor.fetchone()
+        if row and row["data_hash"] == data_hash:
+            print(f"[Cache] HIT   session={session_id}")
+            return {"report": row["report"], "graph_url": row["graph_url"]}
+        if row:
+            print(f"[Cache] STALE session={session_id} — metadata changed, regenerating")
+        else:
+            print(f"[Cache] MISS  session={session_id} — first time")
+        return None
+    except Exception as e:
+        print(f"[Cache] load error: {e}")
+        return None
+    finally:
+        if cursor:
+            cursor.close()
+
+
+def _save_cache(session_id: str, data_hash: str,
+                report: str, graph_url: str,
+                topics: list, databases: list, conn) -> None:
+    """Upsert cache row for this session."""
+    cursor = None
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO `session_analysis_cache`
+                (`session_id`, `data_hash`, `report`, `graph_url`, `topics`, `databases`)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE
+                `data_hash`  = VALUES(`data_hash`),
+                `report`     = VALUES(`report`),
+                `graph_url`  = VALUES(`graph_url`),
+                `topics`     = VALUES(`topics`),
+                `databases`  = VALUES(`databases`),
+                `created_at` = CURRENT_TIMESTAMP
+        """, (session_id, data_hash, report, graph_url,
+              json.dumps(topics), json.dumps(databases)))
+        conn.commit()
+        print(f"[Cache] SAVED session={session_id}")
+    except Exception as e:
+        print(f"[Cache] save error: {e}")
+        try: conn.rollback()
+        except: pass
+    finally:
+        if cursor:
+            cursor.close()
+
+
+# ══════════════════════════════════════════════════════
+# CROSS-SOURCE RELATIONSHIP DETECTION (METADATA ONLY)
+# ══════════════════════════════════════════════════════
+
+def detect_cross_source_relationships(table_columns: dict, web_data: list, db_data: list) -> dict:
+    """
+    Ask Mistral to dynamically generate a business-focused Knowledge Graph
+    STRICTLY from schema metadata (table names, column names, keys).
+    No row data or transaction values are processed.
+    """
+    db_summary = {}
+    for db in db_data:
+        for tbl in db["tables"]:
+            db_summary[tbl["table_name"]] = {
+                "columns": tbl.get("columns", []),
+                "primary_keys": tbl.get("primary_keys", []),
+                "foreign_keys": tbl.get("foreign_keys", [])
+            }
+
+    web_summary = []
+    for w in web_data:
+        for item in w["items"]:
+            web_summary.append({
+                "topic": w["topic"],
+                "title": item["title"],
+                "brief": (item.get("brief") or "")[:200]
+            })
+
+    prompt = f"""
+You are an expert Enterprise Knowledge Graph Architect specializing in Sales & Distribution Route-to-Market (RtM) Ontologies.
+
+Analyze the uploaded database SCHEMA METADATA and generate a RICH, HIERARCHICAL, business-focused Knowledge Graph.
+The graph MUST reflect product taxonomy, geography, and sales distribution relationships visible in the schema.
+
+## DB Schema Metadata (Tables, Columns, Primary/Foreign Keys):
+{json.dumps(db_summary, indent=2)}
+
+## Web Data:
+{json.dumps(web_summary, indent=2)}
+
+---
+
+## MANDATORY GRAPH STRUCTURE (Map available tables/columns into these standard entity types):
+1. ProductCategory (e.g. Category, Segment)
+2. Construction (e.g. BIAS, RADIAL)
+3. TyreType / VehicleType (e.g. Truck, Bus, LCV, Passenger Car)
+4. SKU / Material / Product (SKU master tables)
+5. Customer / Outlet (Customer/Dealer masters)
+6. CustomerClass (Class A, B, C, D)
+7. AccountGroup (Dealer, OEM, Direct Account groups)
+8. Zone (Commercial zone)
+9. Region (State / Regional sales division)
+10. Territory / Beat (Sales territory / route)
+11. BillingChannel / DistributionChannel (Channel, Invoicing route)
+12. SupplyOrders / Invoices (Sales fact/order header/item tables)
+
+## OUTPUT FORMAT
+Return EXACTLY this JSON format (no markdown fences, no extra text):
+{{
+  "nodes": [
+    {{"id": "cat_node", "label": "ProductCategory", "type": "ProductCategory", "table_name": "category_master", "properties": {{}}}},
+    {{"id": "sku_node", "label": "SKU", "type": "SKU", "table_name": "sku_master", "properties": {{}}}},
+    {{"id": "cust_node", "label": "Customer", "type": "Customer", "table_name": "customer_master", "properties": {{}}}},
+    {{"id": "territory_node", "label": "Territory", "type": "Territory", "table_name": "territory_master", "properties": {{}}}},
+    {{"id": "order_node", "label": "SupplyOrders", "type": "SupplyOrders", "table_name": "sales_data", "properties": {{}}}}
+  ],
+  "edges": [
+    {{"from": "sku_node", "to": "cat_node", "label": "BELONGS_TO_CATEGORY", "properties": {{}}}},
+    {{"from": "cust_node", "to": "territory_node", "label": "LOCATED_IN", "properties": {{}}}},
+    {{"from": "order_node", "to": "cust_node", "label": "BILLED_TO", "properties": {{}}}},
+    {{"from": "order_node", "to": "sku_node", "label": "CONTAINS_ITEM", "properties": {{}}}}
+  ]
+}}
+
+## RULES
+1. Base nodes directly on the real tables and columns present in the schema metadata.
+2. Node IDs must be unique strings with no spaces (e.g. "node_customer").
+3. Edges must link valid node IDs.
+"""
+
+    messages = [{"role": "user", "content": prompt}]
+    try:
+        raw = call_llm_chat(messages, json_mode=True, temperature=0.1)
+        result = json.loads(raw)
+        result.setdefault("nodes", [])
+        result.setdefault("edges", [])
+        return result
+    except Exception as e:
+        print("[Graph] Business Knowledge Graph detection error:", e)
+        return {"nodes": [], "edges": []}
+
+
+# ══════════════════════════════════════════════════════
+# GRAPH GENERATOR
+# ══════════════════════════════════════════════════════
+
+def generate_session_graph(session_id: str, web_data: list, db_data: list, target_arango_db: str = None) -> tuple[dict, str]:
+    """
+    Builds the PyVis interactive visualization and syncs to ArangoDB.
+    Returns: (graph_data, graph_url)
+    """
+    net = Network(
+        height="850px",
+        width="100%",
+        bgcolor="#222222",
+        font_color="white",
+        directed=True
+    )
+
+    type_colors = {
+        "ProductCategory": "#ff4081",
+        "Construction":    "#e040fb",
+        "TyreType":        "#2979ff",
+        "SKU":             "#9ccc65",
+        "Customer":        "#ffc107",
+        "CustomerClass":   "#ff9800",
+        "AccountGroup":    "#ff5722",
+        "Zone":            "#ff6d00",
+        "Region":          "#fb8c00",
+        "Territory":       "#f57c00",
+        "BillingChannel":  "#00bfa5",
+        "SupplyOrders":    "#e91e63",
+        "Invoice":         "#e91e63",
+        "Entity":          "#b0bec5"
+    }
+
+    table_columns = {}
+    for db in db_data:
+        for table in db["tables"]:
+            table_columns[table["table_name"]] = table.get("columns", [])
+
+    graph_data = detect_cross_source_relationships(table_columns, web_data, db_data)
+    nodes = graph_data.get("nodes", [])
+    edges = graph_data.get("edges", [])
+
+    existing_ids = set()
+
+    for n in nodes:
+        node_id = str(n.get("id"))
+        if not node_id: continue
+        label = str(n.get("label", node_id))
+        ntype = str(n.get("type", "Entity"))
+        tbl_name = str(n.get("table_name", ""))
+
+        props = n.get("properties", {})
+        title_lines = [f"Type: {ntype}"]
+        if tbl_name:
+            title_lines.append(f"Table: {tbl_name}")
+        for k, v in props.items():
+            title_lines.append(f"{k}: {v}")
+        title = "\n".join(title_lines)
+
+        color = type_colors.get(ntype, "#b0bec5")
+        net.add_node(node_id, label=label, title=title, color=color, size=25, type=ntype, table_name=tbl_name)
+        existing_ids.add(node_id)
+
+    for e in edges:
+        from_node = str(e.get("from"))
+        to_node = str(e.get("to"))
+        label = str(e.get("label", ""))
+
+        if from_node in existing_ids and to_node in existing_ids:
+            props = e.get("properties", {})
+            title_lines = [f"{k}: {v}" for k, v in props.items()]
+            title = "\n".join(title_lines) if title_lines else label
+            net.add_edge(from_node, to_node, label=label, title=title, color="#ff5252", width=2)
+
+    os.makedirs(GRAPH_FOLDER, exist_ok=True)
+    html_filename = f"graph_{uuid.uuid4().hex[:8]}.html"
+    html_path     = os.path.join(GRAPH_FOLDER, html_filename)
+    net.save_graph(html_path)
+
+    # Sync to ArangoDB
+    try:
+        _sync_to_arango(session_id, net.nodes, net.edges, target_arango_db)
+    except Exception as e:
+        print(f"[ArangoDB] Sync failed (non-critical): {e}")
+
+    graph_url = f"{BASE_URL}/graphs/{html_filename}"
+    return graph_data, graph_url
+
+
+# ══════════════════════════════════════════════════════
+# ARANGODB SYNC
+# ══════════════════════════════════════════════════════
+
+def _safe_key(val: str) -> str:
+    return re.sub(r'[^a-zA-Z0-9_:.@()-]', '_', str(val))
+
+
+def _sync_to_arango(session_id: str, nodes: list, edges: list, target_arango_db: str = None):
+    client = ArangoClient(hosts=ARANGO_HOST)
+    sys_db = client.db('_system', username=ARANGO_USER, password=ARANGO_PASS)
+
+    db_name = target_arango_db or ARANGO_DB
+    if not sys_db.has_database(db_name):
+        sys_db.create_database(db_name)
+
+    db = client.db(db_name, username=ARANGO_USER, password=ARANGO_PASS)
+
+    nodes_col_name = "session_nodes"
+    edges_col_name = "session_edges"
+
+    if not db.has_collection(nodes_col_name):
+        db.create_collection(nodes_col_name)
+    if not db.has_collection(edges_col_name):
+        db.create_collection(edges_col_name, edge=True)
+
+    nodes_col = db.collection(nodes_col_name)
+    edges_col = db.collection(edges_col_name)
+
+    # Upsert nodes
+    for n in nodes:
+        key = _safe_key(n["id"])
+        doc = {
+            "_key":       key,
+            "session_id": session_id,
+            "label":      n.get("label", n["id"]),
+            "type":       n.get("type", "Entity"),
+            "table_name": n.get("table_name", ""),
+            "title":      n.get("title", ""),
+            "color":      n.get("color", "")
+        }
+        nodes_col.insert(doc, overwrite=True, silent=True)
+
+    # Upsert edges
+    for e in edges:
+        from_key = _safe_key(e["from"])
+        to_key   = _safe_key(e["to"])
+        edge_key = _safe_key(f"{from_key}_{to_key}_{e.get('label', '')}")
+        doc = {
+            "_key":       edge_key,
+            "_from":      f"{nodes_col_name}/{from_key}",
+            "_to":        f"{nodes_col_name}/{to_key}",
+            "session_id": session_id,
+            "label":      e.get("label", ""),
+            "title":      e.get("title", ""),
+            "color":      e.get("color", "")
+        }
+        edges_col.insert(doc, overwrite=True, silent=True)
+
+    print(f"[ArangoDB] Synced {len(nodes)} nodes, {len(edges)} edges to '{db_name}'")
+
+
+# ══════════════════════════════════════════════════════
+# DATA FETCHING — STRICTLY METADATA ONLY (NO ROW DATA)
+# ══════════════════════════════════════════════════════
+
+def _fetch_web_data(session_id: str, topics: list, conn) -> list:
+    if not topics:
+        return []
+    results = []
+    cursor = None
+    try:
+        cursor = conn.cursor(dictionary=True)
+        for topic in topics:
+            cursor.execute("""
+                SELECT `title`, `url`, `content` AS brief
+                FROM `web_search_history`
+                WHERE `session_id` = %s AND `topic` = %s
+                ORDER BY `id` DESC
+                LIMIT 5
+            """, (session_id, topic))
+            rows = cursor.fetchall()
+            results.append({
+                "source_type":  "web",
+                "topic":        topic,
+                "result_count": len(rows),
+                "items":        rows
+            })
+    except Exception as e:
+        print(f"[Analysis] web_data fetch error: {e}")
+    finally:
+        if cursor: cursor.close()
+    return results
+
+
+def _fetch_db_data(session_id: str, databases: list, conn) -> list:
+    """
+    STRICT METADATA-ONLY FETCH.
+    Reads: Database names, table names, column names, data types, primary & foreign keys.
+    NEVER reads or sends raw transaction rows, sales records, customer names, or amounts.
+    """
+    results = []
+    if not databases:
+        return results
+
+    # 1. MySQL Dynamic/External Databases
+    db_map = {}
+    cursor = None
+    try:
+        cursor = conn.cursor(dictionary=True)
+        placeholders = ", ".join(["%s"] * len(databases))
+        cursor.execute(f"""
+            SELECT `external_database`, `new_user_db`, `table_name`
+            FROM `session_sources`
+            WHERE `session_id` = %s
+              AND external_database IN ({placeholders})
+              AND new_user_db IS NOT NULL
+              AND new_user_db != ''
+        """, [session_id] + databases)
+        rows = cursor.fetchall()
+        for r in rows:
+            new_user_db = r["new_user_db"]
+            if new_user_db not in db_map:
+                db_map[new_user_db] = {"external_databases": [], "tables": []}
+            ext_db = r["external_database"]
+            if ext_db not in db_map[new_user_db]["external_databases"]:
+                db_map[new_user_db]["external_databases"].append(ext_db)
+            if r.get("table_name"):
+                db_map[new_user_db]["tables"].append(r["table_name"])
+    except Exception as e:
+        print(f"[Analysis] db_map error: {e}")
+    finally:
+        if cursor: cursor.close()
+
+    for new_db, db_info in db_map.items():
+        allowed_tables = db_info["tables"]
+        ext_dbs_str = ", ".join(db_info["external_databases"])
+
+        db_result = {
+            "source_type":       "database",
+            "external_database": ext_dbs_str,
+            "new_user_db":       new_db,
+            "tables":            []
+        }
+
+        ext_conn = ext_cur = None
+        try:
+            ext_conn = mysql.connector.connect(
+                host=MYSQL_CONFIG["host"],
+                port=MYSQL_CONFIG["port"],
+                user=MYSQL_CONFIG["user"],
+                password=MYSQL_CONFIG["password"],
+                database=new_db,
+                connection_timeout=10
+            )
+            ext_cur = ext_conn.cursor(dictionary=True)
+
+            if allowed_tables:
+                tables = allowed_tables
+            else:
+                ext_cur.execute("SHOW TABLES")
+                tables = [list(r.values())[0] for r in ext_cur.fetchall()]
+
+            for t in tables:
+                try:
+                    # Fetch column metadata without querying any data rows
+                    ext_cur.execute(f"DESCRIBE `{t}`")
+                    desc_rows = ext_cur.fetchall()
+                    cols = [r["Field"] for r in desc_rows]
+                    pks  = [r["Field"] for r in desc_rows if r.get("Key") == "PRI"]
+                    col_details = [{"name": r["Field"], "type": r["Type"], "is_primary_key": r.get("Key") == "PRI"} for r in desc_rows]
+
+                    db_result["tables"].append({
+                        "table_name":   t,
+                        "columns":      cols,
+                        "primary_keys": pks,
+                        "columns_detail": col_details
+                    })
+                except Exception as tbl_err:
+                    print(f"[Analysis] Metadata fetch error for table {t}: {tbl_err}")
+
+        except Exception as db_err:
+            print(f"[Analysis] MySQL metadata connect error for {new_db}: {db_err}")
+        finally:
+            if ext_cur:
+                try: ext_cur.close()
+                except: pass
+            if ext_conn:
+                try: ext_conn.close()
+                except: pass
+
+        results.append(db_result)
+
+    # 2. PostgreSQL (Metadata Only)
+    if PSYCOPG2_AVAILABLE:
+        pg_cursor = None
+        try:
+            pg_cursor = conn.cursor(dictionary=True)
+            pg_cursor.execute("""
+                SELECT credential, db_type
+                FROM database_credential
+                WHERE session_id = %s AND db_type IN ('postgresql', 'postgres')
+                ORDER BY connection_id DESC
+            """, (session_id,))
+            pg_cred_rows = pg_cursor.fetchall()
+            for cred_row in pg_cred_rows:
+                cred = json.loads(cred_row["credential"])
+                pg_conn = psycopg2.connect(
+                    host=cred["host"], port=cred.get("port", 5432),
+                    user=cred["user"], password=cred["password"],
+                    dbname=cred["database"], connect_timeout=10
+                )
+                with pg_conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as pcur:
+                    pcur.execute("""
+                        SELECT table_name, column_name, data_type
+                        FROM information_schema.columns
+                        WHERE table_schema = 'public'
+                        ORDER BY table_name, ordinal_position
+                    """)
+                    rows = pcur.fetchall()
+                    tbl_dict = {}
+                    for r in rows:
+                        tbl = r["table_name"]
+                        tbl_dict.setdefault(tbl, []).append(r["column_name"])
+                    
+                    pg_tables = [{"table_name": t, "columns": c} for t, c in tbl_dict.items()]
+                    results.append({
+                        "source_type": "database",
+                        "external_database": "PostgreSQL",
+                        "new_user_db": cred["database"],
+                        "tables": pg_tables
+                    })
+                pg_conn.close()
+        except Exception as pg_err:
+            print(f"[Analysis] PostgreSQL metadata fetch error: {pg_err}")
+        finally:
+            if pg_cursor:
+                try: pg_cursor.close()
+                except: pass
+
+    # 3. SAP HANA (Stored Metadata from MySQL)
+    hana_cursor = None
+    try:
+        hana_cursor = conn.cursor(dictionary=True)
+        hana_cursor.execute("""
+            SELECT DISTINCT schema_name, view_name, column_count, columns_detail
+            FROM sap_hana_view_metadata
+            WHERE session_id = %s
+        """, (session_id,))
+        hana_rows = hana_cursor.fetchall()
+        if hana_rows:
+            hana_tables = []
+            for hr in hana_rows:
+                cols = []
+                cols_raw = hr.get("columns_detail")
+                if isinstance(cols_raw, str):
+                    try:
+                        cols_json = json.loads(cols_raw)
+                        cols = [c["name"] for c in cols_json if "name" in c]
+                    except: pass
+                elif isinstance(cols_raw, list):
+                    cols = [c["name"] for c in cols_raw if "name" in c]
+
+                hana_tables.append({
+                    "table_name": f"{hr.get('schema_name', '')}.{hr['view_name']}",
+                    "columns": cols
+                })
+            results.append({
+                "source_type": "database",
+                "external_database": "SAP HANA",
+                "new_user_db": "sap_hana_metadata",
+                "tables": hana_tables
+            })
+    except Exception as hana_err:
+        print(f"[Analysis] SAP HANA metadata fetch error: {hana_err}")
+    finally:
+        if hana_cursor:
+            try: hana_cursor.close()
+            except: pass
+
+    return results
+
+
+# ══════════════════════════════════════════════════════
+# BUILD CONTEXT FOR LLM (METADATA + ONTOLOGY COMPARISON)
+# ══════════════════════════════════════════════════════
+
+def _build_context(web_data: list, db_data: list, ontology_analysis: dict) -> str:
+    """
+    Builds context containing exclusively:
+    1. Schema metadata (tables and columns)
+    2. Golden 12-Node Ontology Benchmark Comparison (Matched, Missing Gaps, Coverage Score)
+    No confidential raw row values or transaction totals are included.
+    """
+    parts = []
+
+    # 1. Ontology Benchmark Evaluation Block
+    score = ontology_analysis.get("completeness_score", 0)
+    matched_nodes = [f"- {v['name']} ({v['type']}): Mapped tables -> {', '.join(v['matched_imported_tables'])}" 
+                     for v in ontology_analysis.get("matched_vertices", [])]
+    missing_nodes = [f"- {v['name']} ({v['type']}): {v.get('definition', '')}" 
+                     for v in ontology_analysis.get("missing_vertices", [])]
+
+    ont_lines = [
+        "=== GOLDEN 12-NODE SALES & DISTRIBUTION ONTOLOGY GAP ANALYSIS ===",
+        f"Benchmark Completeness Score: {score}%",
+        f"Scope: {ontology_analysis.get('benchmark_scope', '12-Node Core RtM Ontology')}",
+        f"Total Benchmark Nodes: {ontology_analysis.get('total_ontology_nodes', 12)}",
+        f"Matched Capabilities: {ontology_analysis.get('matched_nodes_count', 0)}",
+        f"Missing Critical Capabilities (Gaps): {ontology_analysis.get('missing_nodes_count', 0)}",
+        "\n[MATCHED ENTITIES IN YOUR DATASET]:",
+        "\n".join(matched_nodes) if matched_nodes else "None",
+        "\n[MISSING CORE ONTOLOGY CAPABILITIES (GAPS)]:",
+        "\n".join(missing_nodes) if missing_nodes else "None",
+        f"\nVerified Inter-entity Join Relationships: {ontology_analysis.get('verified_relationships_count', 0)} / 17",
+        f"\nMissing Join Relationships: {ontology_analysis.get('missing_relationships_count', len(ontology_analysis.get('missing_relationships', [])))}",
+        "\n".join([f"- {r.get('from')} -> {r.get('label')} -> {r.get('to')} ({r.get('reason', '')})" for r in ontology_analysis.get("missing_relationships", [])]) if ontology_analysis.get("missing_relationships") else ""
+    ]
+    parts.append("\n".join(ont_lines))
+
+    # 2. Database Schema Structure
+    for d in db_data:
+        lines = [f"=== DATABASE SCHEMA: {d['external_database']} (ID: {d['new_user_db']}) ==="]
+        for tbl in d["tables"]:
+            lines.append(f"  Table: {tbl['table_name']}")
+            lines.append(f"    Columns ({len(tbl['columns'])}): {', '.join(tbl['columns'][:30])}")
+            if tbl.get("primary_keys"):
+                lines.append(f"    Primary Keys: {', '.join(tbl['primary_keys'])}")
+        parts.append("\n".join(lines))
+
+    # 3. Web Sources (if any)
+    for w in web_data:
+        lines = [f"=== WEB TOPIC: {w['topic']} ==="]
+        for item in w.get("items", []):
+            lines.append(f"  Title: {item.get('title')}")
+            if item.get("brief"):
+                lines.append(f"  Brief: {item['brief'][:200]}")
+        parts.append("\n".join(lines))
+
+    ctx = "\n\n".join(parts)
+    if len(ctx) > MAX_CTX_CHARS:
+        ctx = ctx[:MAX_CTX_CHARS] + "\n\n[... truncated ...]"
+    return ctx
+
+
+# ══════════════════════════════════════════════════════
+# MISTRAL — ONTOLOGY GAP & ARCHITECTURE SUMMARY
+# ══════════════════════════════════════════════════════
+
+def _call_mistral(context: str, ontology_analysis: dict, topics: list, databases: list) -> dict:
+    completeness = ontology_analysis.get("completeness_score", 0)
+    ai_analysis = ontology_analysis.get("ai_analysis") or {}
+
+    system = """You are a Principal Enterprise Solutions Architect and Supply Chain Route-to-Market (RtM) Data Strategist.
+Your task is to analyze the schema metadata and its comparison against the Golden Standard 12-Node Sales & Distribution Ontology Graph.
+
+CRITICAL INSTRUCTIONS:
+1. PURE METADATA & GAP ANALYSIS ONLY: Do NOT hallucinate, fabricate, or assume any financial numbers, sales amounts, invoice values, or transaction quantities.
+2. Focus strictly on:
+   - Schema Completeness Score against the 12-Node RtM Standard.
+   - Core capabilities identified in the dataset (Matched Nodes).
+   - Missing capabilities & operational blind spots (Missing Nodes).
+   - Practical, actionable roadmap detailing what additional tables, masters, or transactional files the organization must integrate to close the gaps.
+3. Respond ONLY in valid JSON with keys: "report", "follow_up_questions", "visualizations".
+"""
+
+    user = f"""
+Analyze this Knowledge Graph and Ontology Comparison Context:
+
+{context}
+
+Provide an executive, high-impact Enterprise Architecture & Gap Analysis Report formatted exactly as follows:
+
+TITLE: Route-to-Market (RtM) Knowledge Graph & Ontology Gap Analysis
+
+### 1. Executive Assessment
+Summarize the current schema maturity and readiness against the industry-standard 12-Node RtM Distribution Ontology. Mention the current completeness score ({completeness}%).
+
+### 2. Available Core Capabilities (Matched Entities)
+Detail the matched nodes present in the uploaded tables (e.g. Products, Customers, Billing Channels) and what analytics this schema currently supports.
+
+### 3. Critical Knowledge Gaps (Missing Nodes & Operational Blind Spots)
+Detail the missing nodes from the 12-Node benchmark (such as Field Force/Salesman, Beat/Route Coverage Plans, Retail Audit/Stock Availability, Trade Investment/Schemes). Explain specifically what business analytics the enterprise CANNOT perform due to these missing entities.
+
+### 4. Data Integration Roadmap (Actionable Next Steps)
+Provide prioritized, actionable recommendations specifying what files, tables, or ERP modules the user should connect next (e.g. Beat Visit logs, Sales Rep Master, Incentive Schemes) to elevate the Knowledge Graph to 100% completeness.
+
+Return ONLY this valid JSON:
+{{
+  "report": "<Complete markdown formatted report as outlined above>",
+  "follow_up_questions": [
+    "What master or transactional file can you upload for field force coverage?",
+    "Do you have distributor or retail audit logs available to track out-of-stock rates?",
+    "Would you like guidance on structuring the trade scheme / incentive tables?",
+    "Which regional or territory hierarchy table should be mapped next?",
+    "Should we generate Cypher queries for the existing matched entities?"
+  ],
+  "visualizations": [
+    {{
+      "type": "bar_chart",
+      "title": "Ontology Capability Coverage Breakdown",
+      "xKey": "category",
+      "yKey": "percentage",
+      "data": [
+        {{"category": "Matched Capabilities", "percentage": {completeness}}},
+        {{"category": "Missing Gaps", "percentage": {round(100 - completeness, 1)}}}
+      ]
+    }}
+  ]
+}}
+"""
+
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user}
+    ]
+
+    try:
+        raw = call_llm_chat(messages, json_mode=True, temperature=0.1)
+        res = json.loads(raw)
+        return res
+    except Exception as e:
+        print("[Analysis] Mistral ontology summary generation error:", e)
+        # Fallback structured report
+        return {
+            "report": f"""# Route-to-Market (RtM) Knowledge Graph & Ontology Gap Analysis
+
+### 1. Executive Assessment
+The current dataset achieves an **Ontology Completeness Score of {completeness}%** against the 12-Node Core Sales & Distribution (RtM) Benchmark.
+
+### 2. Available Capabilities
+- **Matched Nodes:** {ontology_analysis.get('matched_nodes_count', 0)} out of {ontology_analysis.get('total_ontology_nodes', 12)} standard nodes.
+- **Verified Relationships:** {ontology_analysis.get('verified_relationships_count', 0)} joins mapped.
+
+### 3. Critical Gaps & Operational Blind Spots
+- **Missing Capabilities:** {ontology_analysis.get('missing_nodes_count', 0)} entities missing.
+- Without Field Force (Rep) and Coverage Plan (TCP) data, sales beat adherence and salesperson call efficiency cannot be evaluated.
+- Without Retail Audit data, shelf availability and out-of-stock (OOS) conditions remain blind spots.
+
+### 4. Actionable Recommendations
+1. Integrate field sales / representative master and daily visit logs.
+2. Connect trade promotion and discount scheme tables.
+3. Import territory / beat hierarchy to complete geographic route mapping.""",
+            "follow_up_questions": [
+                "What file can be uploaded for salesman and beat planning?",
+                "Do you have promotion / rebate scheme tables to link?",
+                "Would you like to review the missing territory hierarchy?"
+            ],
+            "visualizations": [
+                {
+                    "type": "bar_chart",
+                    "title": "Ontology Capability Coverage Breakdown",
+                    "xKey": "category",
+                    "yKey": "percentage",
+                    "data": [
+                        {"category": "Matched Capabilities", "percentage": completeness},
+                        {"category": "Missing Gaps", "percentage": round(100 - completeness, 1)}
+                    ]
+                }
+            ]
+        }
+
+
+# ══════════════════════════════════════════════════════
+# MAIN CONTROLLER FUNCTION
+# ══════════════════════════════════════════════════════
+
+def session_analysis_controller(get_connection_func):
+    """
+    Metadata-only Session Analysis Controller with Golden Ontology Benchmark Comparison.
+    - Zero data leakage: No row data is queried or sent to LLM.
+    - Generates visual Knowledge Graph and syncs to ArangoDB.
+    - Benchmarks generated graph against Golden 12-Node RtM Ontology.
+    - Returns difference & gap analysis summary.
+    """
+    data       = request.json or {}
+    session_id = (data.get("session_id") or "").strip()
+    topics     = [t.strip() for t in (data.get("topics")    or []) if str(t).strip()]
+    databases  = [d.strip() for d in (data.get("databases") or []) if str(d).strip()]
+
+    if not session_id:
+        return jsonify({
+            "status": "failed", "statusCode": 400,
+            "message": "Field 'session_id' is required."
+        }), 400
+
+    if not topics and not databases:
+        databases = ["SAP HANA"]
+
+    conn = None
+    try:
+        conn = get_connection_func()
+
+        target_arango_db = None
+        try:
+            cursor = conn.cursor(dictionary=True)
+            cursor.execute("SELECT workspace_arango_db FROM workspaces WHERE session_id = %s", (session_id,))
+            row = cursor.fetchone()
+            if row and row.get("workspace_arango_db"):
+                target_arango_db = row["workspace_arango_db"]
+            cursor.close()
+        except Exception as e:
+            print(f"[Analysis] DB fetch target_arango_db error: {e}")
+
+        # 1. Fetch strictly metadata (No row data)
+        web_data = _fetch_web_data(session_id, topics, conn)
+        db_data  = _fetch_db_data(session_id, databases, conn)
+
+        has_web = bool(web_data)
+        has_db = any(len(d.get("tables", [])) > 0 for d in db_data)
+
+        if not has_web and not has_db:
+            return jsonify({
+                "status":     "no_data",
+                "statusCode": 200,
+                "message":    "আপনার ডাটাবেসে কোনো টেবিল বা মেটাডাটা নেই, দয়া করে আগে টেবিল আপলোড করুন।"
+            }), 200
+
+        # Build schema dictionary for ontology comparison
+        db_schema = {}
+        for d in db_data:
+            for tbl in d["tables"]:
+                db_schema[tbl["table_name"]] = {"columns": tbl.get("columns", [])}
+
+        # 2. Generate Knowledge Graph (Nodes & Edges) from metadata
+        graph_data, graph_url = generate_session_graph(session_id, web_data, db_data, target_arango_db)
+
+        # 3. Compare with Golden Standard 12-Node Sales Ontology
+        ontology_analysis = {}
+        try:
+            ontology_analysis = compare_kgraph_with_ontology(graph_data, db_schema)
+            print(f"[Analysis] Ontology comparison complete: Score = {ontology_analysis.get('completeness_score')}%")
+        except Exception as ont_e:
+            print(f"[Analysis] Ontology comparison error: {ont_e}")
+            ontology_analysis = {
+                "completeness_score": 0,
+                "benchmark_scope": "12-Node Core RtM Ontology",
+                "matched_nodes_count": 0,
+                "missing_nodes_count": 12,
+                "matched_vertices": [],
+                "missing_vertices": []
+            }
+
+        # Persist ontology_analysis to ArangoDB session_metadata (matching 0dbd934 k-graph compresion)
+        try:
+            db_name = target_arango_db or ARANGO_DB
+            a_client = ArangoClient(hosts=ARANGO_HOST)
+            a_db = a_client.db(db_name, username=ARANGO_USER, password=ARANGO_PASS)
+            if not a_db.has_collection("session_metadata"):
+                a_db.create_collection("session_metadata")
+            meta_col = a_db.collection("session_metadata")
+            meta_doc = {
+                "_key": "ontology_analysis",
+                "session_id": session_id,
+                "data": ontology_analysis
+            }
+            if meta_col.has("ontology_analysis"):
+                meta_col.update(meta_doc)
+            else:
+                meta_col.insert(meta_doc)
+            print(f"[Analysis] Persisted ontology_analysis to ArangoDB '{db_name}'.session_metadata")
+        except Exception as arango_meta_err:
+            print(f"[Analysis] Could not persist ontology_analysis to Arango: {arango_meta_err}")
+
+        # 4. Build context for caching and report generation
+        context   = _build_context(web_data, db_data, ontology_analysis)
+        data_hash = _hash_context(context)
+
+        # 5. Check cache
+        cached = _load_cache(session_id, data_hash, conn)
+        if cached:
+            return jsonify({
+                "status":            "success",
+                "statusCode":        200,
+                "report":            cached["report"],
+                "graph_url":         cached["graph_url"],
+                "ontology_analysis": ontology_analysis
+            }), 200
+
+        # 6. Generate AI Gap Analysis Report with Mistral
+        analysis = _call_mistral(context, ontology_analysis, topics, databases)
+
+        if not analysis:
+            return jsonify({
+                "status":            "partial",
+                "statusCode":        200,
+                "message":           "LLM analysis failed.",
+                "graph_url":         graph_url,
+                "ontology_analysis": ontology_analysis
+            }), 200
+
+        report = analysis.get("report", "")
+        if isinstance(report, dict):
+            report = json.dumps(report, ensure_ascii=False)
+        elif not isinstance(report, str):
+            report = str(report)
+
+        follow_up_questions = analysis.get("follow_up_questions", [])
+        visualizations      = analysis.get("visualizations", [])
+
+        # 7. Save to cache
+        _save_cache(session_id, data_hash, report, graph_url, topics, databases, conn)
+
+        return jsonify({
+            "status":              "success",
+            "statusCode":          200,
+            "report":              report,
+            "graph_url":           graph_url,
+            "ontology_analysis":   ontology_analysis,
+            "follow_up_questions": follow_up_questions,
+            "visualizations":      visualizations
+        }), 200
+
+    except Exception as e:
+        log_system_error(session_id, "session_analysis", str(e), error_type="analysis_error")
+        return jsonify({
+            "status": "error", "statusCode": 500,
+            "message": str(e)
+        }), 500
+    finally:
+        if conn: conn.close()
