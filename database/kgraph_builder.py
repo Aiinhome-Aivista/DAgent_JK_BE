@@ -313,6 +313,78 @@ def build_kgraph(allocated_db_name, db_host, db_user, db_pass, db_port,
         db_lock.release()
 
 
+
+def _resolve_arango_db_handle(allocated_db_name):
+    """Returns (db_handle, session_id, db_name) for an allocated workspace db."""
+    try:
+        from database.db_connection import get_db_connection
+        conn = get_db_connection()
+        session_id = None
+        target_arango_db = None
+        try:
+            with conn.cursor(dictionary=True) as cur:
+                cur.execute("SELECT session_id, workspace_arango_db FROM workspaces WHERE workspace_db = %s", (allocated_db_name,))
+                row = cur.fetchone()
+                if row:
+                    session_id = row.get("session_id")
+                    target_arango_db = row.get("workspace_arango_db")
+        finally:
+            if conn:
+                try: conn.close()
+                except Exception: pass
+
+        if not session_id:
+            return None, None, None
+
+        from arango import ArangoClient
+        from database.config import ARANGO_HOST, ARANGO_USER, ARANGO_PASS, ARANGO_DB
+
+        client = ArangoClient(hosts=ARANGO_HOST)
+        db_to_use = target_arango_db if target_arango_db else ARANGO_DB
+        sys_db = client.db('_system', username=ARANGO_USER, password=ARANGO_PASS)
+        if not sys_db.has_database(db_to_use):
+            sys_db.create_database(db_to_use)
+        db = client.db(db_to_use, username=ARANGO_USER, password=ARANGO_PASS)
+        return db, session_id, db_to_use
+    except Exception as e:
+        print(f"[KGRAPH] Failed to resolve ArangoDB handle for {allocated_db_name}: {e}")
+        return None, None, None
+
+
+def _get_stored_metadata_hash(db):
+    try:
+        if db and db.has_collection("session_metadata"):
+            col = db.collection("session_metadata")
+            if col.has("kgraph_metadata_state"):
+                doc = col.get("kgraph_metadata_state")
+                return doc.get("schema_hash")
+    except Exception as e:
+        print(f"[KGRAPH] Error reading stored metadata state: {e}")
+    return None
+
+
+def _save_stored_metadata_hash(db, session_id, schema_hash, tables_count, trigger_source):
+    try:
+        if db:
+            if not db.has_collection("session_metadata"):
+                db.create_collection("session_metadata")
+            col = db.collection("session_metadata")
+            from datetime import datetime
+            doc = {
+                "_key": "kgraph_metadata_state",
+                "session_id": session_id,
+                "schema_hash": schema_hash,
+                "tables_count": tables_count,
+                "updated_at": datetime.now().isoformat(),
+                "trigger_source": trigger_source
+            }
+            if col.has("kgraph_metadata_state"):
+                col.update(doc)
+            else:
+                col.insert(doc)
+    except Exception as e:
+        print(f"[KGRAPH] Failed to persist kgraph_metadata_state: {e}")
+
 def _build_kgraph_inner(allocated_db_name, db_host, db_user, db_pass, db_port,
                         force=False, trigger_source="unknown"):
     """Actual build logic — always called with the per-db lock already held."""
@@ -329,6 +401,38 @@ def _build_kgraph_inner(allocated_db_name, db_host, db_user, db_pass, db_port,
 
         # Schema hash — for logging / change-detection by callers.
         shash = _schema_hash(schema)
+
+        # ── Change Detection: If no metadata is changed, do NOT update K-Graph ──
+        if not force:
+            arango_db, session_id, target_arango_db = _resolve_arango_db_handle(allocated_db_name)
+            if arango_db:
+                stored_hash = _get_stored_metadata_hash(arango_db)
+                nodes_count = 0
+                edges_count = 0
+                try:
+                    if arango_db.has_collection("session_nodes"):
+                        nodes_count = next(arango_db.aql.execute("RETURN LENGTH(session_nodes)"), 0) or 0
+                    if arango_db.has_collection("session_edges"):
+                        edges_count = next(arango_db.aql.execute("RETURN LENGTH(session_edges)"), 0) or 0
+                except Exception:
+                    pass
+
+                # If metadata hash is identical AND existing graph already has nodes/edges:
+                if stored_hash and stored_hash == shash and nodes_count > 0:
+                    elapsed = round(time.time() - t0, 2)
+                    print(f"[KGRAPH] Metadata unchanged (schema_hash: {shash[:8]}...). "
+                          f"K-Graph will not be updated. Keeping existing graph as it is ({nodes_count} nodes, {edges_count} edges). "
+                          f"Trigger: {trigger_source} [{elapsed}s].")
+                    return {
+                        "status": "unchanged",
+                        "tables": len(schema),
+                        "schema_hash": shash,
+                        "nodes_count": nodes_count,
+                        "edges_count": edges_count,
+                        "message": "Metadata unchanged. Keeping existing K-Graph as it is.",
+                        "trigger_source": trigger_source,
+                        "elapsed_s": elapsed,
+                    }
 
         # ── LLM proposes the graph ──────────────────────────────────────────
         from database.prompt_loader import get_prompt
@@ -401,7 +505,7 @@ def _build_kgraph_inner(allocated_db_name, db_host, db_user, db_pass, db_port,
 
         # ── Sync to ArangoDB (Auto-backup and upsert) ────────
         try:
-            _sync_kgraph_to_arango(allocated_db_name, verified_graph)
+            _sync_kgraph_to_arango(allocated_db_name, verified_graph, shash=shash, trigger_source=trigger_source)
         except Exception as sync_e:
             print(f"[KGRAPH] ArangoDB sync failed: {sync_e}")
 
@@ -440,7 +544,7 @@ def _build_kgraph_inner(allocated_db_name, db_host, db_user, db_pass, db_port,
                 pass
 
 
-def _sync_kgraph_to_arango(allocated_db_name, verified_graph):
+def _sync_kgraph_to_arango(allocated_db_name, verified_graph, shash=None, trigger_source="unknown"):
     from database.db_connection import get_db_connection
     conn = get_db_connection()
     session_id = None
@@ -550,5 +654,8 @@ def _sync_kgraph_to_arango(allocated_db_name, verified_graph):
             if edges_col.has(edge_key): edges_col.update(doc)
             else: edges_col.insert(doc)
         except Exception: pass
+
+    if shash:
+        _save_stored_metadata_hash(db, session_id, shash, len(verified_graph.get("nodes", [])), trigger_source)
 
     print("[KGRAPH] ArangoDB sync completed.")

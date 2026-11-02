@@ -8,4 +8,10 @@ chroma_store
 *.xlsx
 /lib
 *.zip
-/local_models
+
+# Admin panel handled dynamic prompt codes exclusions
+Admin panel handeled dynamic prompt codes/*.html
+Admin panel handeled dynamic prompt codes/query.txt
+Admin panel handeled dynamic prompt codes/rag_fix.txt
+Admin panel handeled dynamic prompt codes/homeoanalysis.txt
+Admin panel handeled dynamic prompt codes/homeorag.txt

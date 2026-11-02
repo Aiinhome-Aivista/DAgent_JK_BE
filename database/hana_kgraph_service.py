@@ -483,7 +483,7 @@ def _resolve_arango_db(session_id):
     return ARANGO_DB
 
 
-def _sync_hana_kgraph_to_arango(session_id, connection_id, graph, schema):
+def _sync_hana_kgraph_to_arango(session_id, connection_id, graph, schema, schema_hash=None):
     from arango import ArangoClient  # type: ignore
     from database.config import ARANGO_HOST, ARANGO_USER, ARANGO_PASS
 
@@ -586,6 +586,29 @@ def _sync_hana_kgraph_to_arango(session_id, connection_id, graph, schema):
     except Exception as e:
         print(f"[HANA-KGRAPH] stale cleanup skipped: {e}")
 
+    if schema_hash:
+        try:
+            from datetime import datetime
+            if not db.has_collection("session_metadata"):
+                db.create_collection("session_metadata")
+            meta_col = db.collection("session_metadata")
+            state_key = f"hana_kgraph_state_{connection_id}"
+            state_doc = {
+                "_key": state_key,
+                "connection_id": int(connection_id),
+                "session_id": session_id,
+                "schema_hash": schema_hash,
+                "nodes_count": len(node_keys),
+                "edges_count": len(edge_keys),
+                "updated_at": datetime.now().isoformat()
+            }
+            if meta_col.has(state_key):
+                meta_col.update(state_doc)
+            else:
+                meta_col.insert(state_doc)
+        except Exception as me:
+            print(f"[HANA-KGRAPH] Warning saving metadata state: {me}")
+
     print(f"[HANA-KGRAPH] ArangoDB '{target_db}': {len(node_keys)} nodes, {len(edge_keys)} edges upserted.")
 
 
@@ -598,7 +621,17 @@ def _get_lock(connection_id, session_id):
         return _build_locks.setdefault(k, threading.Lock())
 
 
-def build_hana_kgraph_from_metadata(connection_id, session_id, user_id=None):
+
+def _compute_hana_schema_hash(schema):
+    import hashlib
+    sig = []
+    for v in sorted(schema):
+        cols = ",".join(f"{c['name']}:{c['type']}" for c in schema[v].get("columns", []))
+        fks = ",".join(str(fk) for fk in schema[v].get("foreign_keys", []))
+        sig.append(f"{v}|{cols}|{fks}")
+    return hashlib.md5("\n".join(sig).encode()).hexdigest()
+
+def build_hana_kgraph_from_metadata(connection_id, session_id, user_id=None, force=False):
     """Build the KG for one SAP HANA connection from stored metadata only."""
     lock = _get_lock(connection_id, session_id)
     if not lock.acquire(blocking=False):
@@ -617,6 +650,41 @@ def build_hana_kgraph_from_metadata(connection_id, session_id, user_id=None):
         schema = _metadata_to_schema(rows)
         payload = _schema_for_prompt(schema)
         print(f"[HANA-KGRAPH] metadata loaded for {len(schema)} views (no raw data).")
+        hana_shash = _compute_hana_schema_hash(schema)
+
+        # ── Change Detection: If no metadata is changed, do NOT update K-Graph ──
+        if not force:
+            try:
+                from arango import ArangoClient
+                from database.config import ARANGO_HOST, ARANGO_USER, ARANGO_PASS
+                target_db = _resolve_arango_db(session_id)
+                client = ArangoClient(hosts=ARANGO_HOST)
+                if client.db("_system", username=ARANGO_USER, password=ARANGO_PASS).has_database(target_db):
+                    db = client.db(target_db, username=ARANGO_USER, password=ARANGO_PASS)
+                    if db.has_collection("session_metadata"):
+                        meta_col = db.collection("session_metadata")
+                        state_key = f"hana_kgraph_state_{connection_id}"
+                        if meta_col.has(state_key):
+                            doc = meta_col.get(state_key)
+                            stored_hash = doc.get("schema_hash")
+                            cur_nodes = next(db.aql.execute("RETURN LENGTH(session_nodes)"), 0) if db.has_collection("session_nodes") else 0
+                            cur_edges = next(db.aql.execute("RETURN LENGTH(session_edges)"), 0) if db.has_collection("session_edges") else 0
+                            if stored_hash and stored_hash == hana_shash and cur_nodes > 0:
+                                elapsed = round(time.time() - t0, 2)
+                                print(f"[HANA-KGRAPH] Metadata unchanged (hash: {hana_shash[:8]}...). "
+                                      f"K-Graph will not be updated. Keeping existing graph as it is ({cur_nodes} nodes, {cur_edges} edges) [{elapsed}s].")
+                                set_hana_kgraph_status(connection_id, session_id, "ready", user_id=user_id)
+                                return {
+                                    "status": "unchanged",
+                                    "tables": len(schema),
+                                    "schema_hash": hana_shash,
+                                    "nodes": cur_nodes,
+                                    "edges": cur_edges,
+                                    "message": "Metadata unchanged. Keeping existing K-Graph as it is.",
+                                    "elapsed_s": elapsed
+                                }
+            except Exception as check_e:
+                print(f"[HANA-KGRAPH] metadata change check warning: {check_e}")
 
         llm_status, llm_graph = "ok", {}
         try:
@@ -647,7 +715,7 @@ def build_hana_kgraph_from_metadata(connection_id, session_id, user_id=None):
         except Exception as on_e:
             print(f"[HANA-KGRAPH] Ontology comparison failed: {on_e}")
 
-        _sync_hana_kgraph_to_arango(session_id, connection_id, graph, schema)
+        _sync_hana_kgraph_to_arango(session_id, connection_id, graph, schema, schema_hash=hana_shash)
 
         elapsed = round(time.time() - t0, 1)
         set_hana_kgraph_status(connection_id, session_id, "ready", user_id=user_id, counts=counts,

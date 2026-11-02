@@ -1038,7 +1038,7 @@ def _compute_core_kpis(cursor) -> dict:
                 {col_cust_name} AS Customer_Name,
                 ROUND(SUM(sd.{col_revenue})/10000000, 2) AS Revenue
             FROM `{sales_tbl}` sd
-            JOIN `{cust_tbl}` cm ON sd.{col_cust} = cm.KUNNR
+            JOIN `{cust_tbl}` cm ON (sd.{col_cust} = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(sd.{col_cust} AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))
             GROUP BY Customer_Name
             ORDER BY Revenue DESC
             LIMIT 1
@@ -1050,7 +1050,7 @@ def _compute_core_kpis(cursor) -> dict:
                 {col_cust_name} AS Customer_Name,
                 ROUND(SUM(sd.{col_revenue})/10000000, 2) AS Revenue
             FROM `{sales_tbl}` sd
-            JOIN `{cust_tbl}` cm ON sd.{col_cust} = cm.KUNNR
+            JOIN `{cust_tbl}` cm ON (sd.{col_cust} = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(sd.{col_cust} AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))
             GROUP BY Customer_Name
             ORDER BY Revenue DESC
             LIMIT 5
@@ -1063,7 +1063,7 @@ def _compute_core_kpis(cursor) -> dict:
                     {col_cust_name} AS Dealer_Name,
                     ROUND(SUM(sd.{col_revenue})/10000000, 2) AS Revenue
                 FROM `{sales_tbl}` sd
-                JOIN `{cust_tbl}` cm ON sd.{col_cust} = cm.KUNNR
+                JOIN `{cust_tbl}` cm ON (sd.{col_cust} = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(sd.{col_cust} AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))
                 WHERE cm.KTOKD LIKE '%DEAL%' OR cm.CH_TYPE LIKE '%DEAL%' OR cm.DLR_CATG IS NOT NULL OR cm.NAME1 IS NOT NULL
                 GROUP BY Dealer_Name
                 ORDER BY Revenue DESC
@@ -1074,7 +1074,7 @@ def _compute_core_kpis(cursor) -> dict:
             run("dealer_contribution_pct", f"""
                 SELECT ROUND(SUM(sd.{col_revenue}) * 100 / NULLIF((SELECT SUM({col_revenue}) FROM `{sales_tbl}`), 0), 2) AS Dealer_Contribution_Percentage
                 FROM `{sales_tbl}` sd
-                JOIN `{cust_tbl}` cm ON sd.{col_cust} = cm.KUNNR
+                JOIN `{cust_tbl}` cm ON (sd.{col_cust} = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(sd.{col_cust} AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))
                 WHERE cm.KTOKD LIKE '%DEAL%' OR cm.CH_TYPE LIKE '%DEAL%' OR cm.DLR_CATG IS NOT NULL
             """, required_tables=[sales_tbl, cust_tbl])
 
@@ -1082,7 +1082,7 @@ def _compute_core_kpis(cursor) -> dict:
             run("fleet_contribution_pct", f"""
                 SELECT ROUND(SUM(sd.{col_revenue}) * 100 / NULLIF((SELECT SUM({col_revenue}) FROM `{sales_tbl}`), 0), 2) AS Fleet_Contribution_Percentage
                 FROM `{sales_tbl}` sd
-                JOIN `{cust_tbl}` cm ON sd.{col_cust} = cm.KUNNR
+                JOIN `{cust_tbl}` cm ON (sd.{col_cust} = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(sd.{col_cust} AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))
                 WHERE cm.KTOKD LIKE '%FLEET%' OR cm.CH_TYPE LIKE '%FLEET%' OR cm.KDGRP LIKE '%FLEET%'
             """, required_tables=[sales_tbl, cust_tbl])
 
@@ -1090,7 +1090,7 @@ def _compute_core_kpis(cursor) -> dict:
             run("oem_contribution_pct", f"""
                 SELECT ROUND(SUM(sd.{col_revenue}) * 100 / NULLIF((SELECT SUM({col_revenue}) FROM `{sales_tbl}`), 0), 2) AS OEM_Contribution_Percentage
                 FROM `{sales_tbl}` sd
-                JOIN `{cust_tbl}` cm ON sd.{col_cust} = cm.KUNNR
+                JOIN `{cust_tbl}` cm ON (sd.{col_cust} = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(sd.{col_cust} AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))
                 WHERE cm.KTOKD LIKE '%OEM%' OR cm.CH_TYPE LIKE '%OEM%' OR cm.KDGRP LIKE '%OEM%'
             """, required_tables=[sales_tbl, cust_tbl])
         else:
@@ -1101,7 +1101,7 @@ def _compute_core_kpis(cursor) -> dict:
                         {col_cust_name} AS Dealer_Name,
                         ROUND(SUM(sd.{col_revenue})/10000000, 2) AS Revenue
                     FROM `{sales_tbl}` sd
-                    JOIN `{cust_tbl}` cm ON sd.{col_cust} = cm.KUNNR
+                    JOIN `{cust_tbl}` cm ON (sd.{col_cust} = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(sd.{col_cust} AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))
                     JOIN `{ag_tbl}` ag ON cm.acc_grp = ag.KTOKD
                     WHERE ag.account_group_name = 'Dealer'
                     GROUP BY Dealer_Name
@@ -1113,7 +1113,7 @@ def _compute_core_kpis(cursor) -> dict:
                 run("dealer_contribution_pct", f"""
                     SELECT ROUND(SUM(sd.{col_revenue}) * 100 / NULLIF((SELECT SUM({col_revenue}) FROM `{sales_tbl}`), 0), 2) AS Dealer_Contribution_Percentage
                     FROM `{sales_tbl}` sd
-                    JOIN `{cust_tbl}` cm ON sd.{col_cust} = cm.KUNNR
+                    JOIN `{cust_tbl}` cm ON (sd.{col_cust} = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(sd.{col_cust} AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))
                     JOIN `{ag_tbl}` ag ON cm.acc_grp = ag.KTOKD
                     WHERE ag.account_group_name = 'Dealer'
                 """, required_tables=[sales_tbl, cust_tbl, ag_tbl])
@@ -1122,7 +1122,7 @@ def _compute_core_kpis(cursor) -> dict:
                 run("fleet_contribution_pct", f"""
                     SELECT ROUND(SUM(sd.{col_revenue}) * 100 / NULLIF((SELECT SUM({col_revenue}) FROM `{sales_tbl}`), 0), 2) AS Fleet_Contribution_Percentage
                     FROM `{sales_tbl}` sd
-                    JOIN `{cust_tbl}` cm ON sd.{col_cust} = cm.KUNNR
+                    JOIN `{cust_tbl}` cm ON (sd.{col_cust} = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(sd.{col_cust} AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))
                     JOIN `{ag_tbl}` ag ON cm.acc_grp = ag.KTOKD
                     WHERE ag.account_group_name = 'Fleet'
                 """, required_tables=[sales_tbl, cust_tbl, ag_tbl])
@@ -1131,7 +1131,7 @@ def _compute_core_kpis(cursor) -> dict:
                 run("oem_contribution_pct", f"""
                     SELECT ROUND(SUM(sd.{col_revenue}) * 100 / NULLIF((SELECT SUM({col_revenue}) FROM `{sales_tbl}`), 0), 2) AS OEM_Contribution_Percentage
                     FROM `{sales_tbl}` sd
-                    JOIN `{cust_tbl}` cm ON sd.{col_cust} = cm.KUNNR
+                    JOIN `{cust_tbl}` cm ON (sd.{col_cust} = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(sd.{col_cust} AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))
                     JOIN `{ag_tbl}` ag ON cm.acc_grp = ag.KTOKD
                     WHERE ag.account_group_name = 'OEM'
                 """, required_tables=[sales_tbl, cust_tbl, ag_tbl])
@@ -1143,7 +1143,7 @@ def _compute_core_kpis(cursor) -> dict:
                 ROUND(SUM(sd.{col_revenue})/10000000, 2) AS Revenue,
                 ROUND(SUM(sd.{col_revenue}) * 100 / NULLIF((SELECT SUM({col_revenue}) FROM `{sales_tbl}`), 0), 2) AS Contribution_Percentage
             FROM `{sales_tbl}` sd
-            JOIN `{cust_tbl}` cm ON sd.{col_cust} = cm.KUNNR
+            JOIN `{cust_tbl}` cm ON (sd.{col_cust} = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(sd.{col_cust} AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))
             GROUP BY Customer_Name
             ORDER BY Contribution_Percentage DESC
             LIMIT 5
@@ -1164,7 +1164,7 @@ def _compute_core_kpis(cursor) -> dict:
                     COALESCE(zm.NAME, tm.P_ZONE, rm.zone_code, 'Unmapped Zone') AS Zone,
                     ROUND(SUM(sd.{col_revenue})/10000000, 2) AS Revenue
                 FROM `{sales_tbl}` sd
-                JOIN `{cust_tbl}` cm ON sd.{col_cust} = cm.KUNNR
+                JOIN `{cust_tbl}` cm ON (sd.{col_cust} = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(sd.{col_cust} AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))
                 {join_terr}
                 {join_reg}
                 {join_zone}
@@ -1180,7 +1180,7 @@ def _compute_core_kpis(cursor) -> dict:
                     COALESCE(rm.region_name, cm.REGIO, 'Unmapped Region') AS region_name,
                     ROUND(SUM(sd.{col_revenue})/10000000, 2) AS Revenue
                 FROM `{sales_tbl}` sd
-                JOIN `{cust_tbl}` cm ON sd.{col_cust} = cm.KUNNR
+                JOIN `{cust_tbl}` cm ON (sd.{col_cust} = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(sd.{col_cust} AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))
                 {join_terr}
                 {join_reg}
                 GROUP BY region_name
@@ -1195,7 +1195,7 @@ def _compute_core_kpis(cursor) -> dict:
                     ROUND(SUM(sd.{col_revenue})/10000000, 2) AS Revenue,
                     ROUND(SUM(sd.{col_revenue}) * 100 / NULLIF((SELECT SUM({col_revenue}) FROM `{sales_tbl}`), 0), 2) AS Contribution_Percentage
                 FROM `{sales_tbl}` sd
-                JOIN `{cust_tbl}` cm ON sd.{col_cust} = cm.KUNNR
+                JOIN `{cust_tbl}` cm ON (sd.{col_cust} = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(sd.{col_cust} AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))
                 {join_terr}
                 {join_reg}
                 GROUP BY region_name
@@ -1210,7 +1210,7 @@ def _compute_core_kpis(cursor) -> dict:
                     COALESCE(tm.NAME, cm.BZIRK, 'Unmapped Territory') AS territory_name,
                     ROUND(SUM(sd.{col_revenue})/10000000, 2) AS Revenue
                 FROM `{sales_tbl}` sd
-                JOIN `{cust_tbl}` cm ON sd.{col_cust} = cm.KUNNR
+                JOIN `{cust_tbl}` cm ON (sd.{col_cust} = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(sd.{col_cust} AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))
                 JOIN `{terr_tbl}` tm ON cm.BZIRK = tm.BZIRK
                 GROUP BY territory_name
                 ORDER BY Revenue DESC
@@ -1223,7 +1223,7 @@ def _compute_core_kpis(cursor) -> dict:
                     COALESCE(tm.NAME, cm.BZIRK, 'Unmapped Territory') AS territory_name,
                     ROUND(SUM(sd.{col_revenue})/10000000, 2) AS Revenue
                 FROM `{sales_tbl}` sd
-                JOIN `{cust_tbl}` cm ON sd.{col_cust} = cm.KUNNR
+                JOIN `{cust_tbl}` cm ON (sd.{col_cust} = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(sd.{col_cust} AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))
                 JOIN `{terr_tbl}` tm ON cm.BZIRK = tm.BZIRK
                 WHERE tm.NAME IS NOT NULL
                 GROUP BY territory_name
@@ -1237,7 +1237,7 @@ def _compute_core_kpis(cursor) -> dict:
                     COALESCE(tm.NAME, cm.BZIRK, 'Unmapped Territory') AS territory_name,
                     ROUND(SUM(sd.{col_revenue})/10000000, 2) AS Revenue
                 FROM `{sales_tbl}` sd
-                JOIN `{cust_tbl}` cm ON sd.{col_cust} = cm.KUNNR
+                JOIN `{cust_tbl}` cm ON (sd.{col_cust} = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(sd.{col_cust} AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))
                 JOIN `{terr_tbl}` tm ON cm.BZIRK = tm.BZIRK
                 WHERE tm.NAME IS NOT NULL
                 GROUP BY territory_name
@@ -1258,7 +1258,7 @@ def _compute_core_kpis(cursor) -> dict:
                 END AS Zone,
                 ROUND(SUM(sd.{col_revenue})/10000000, 2) AS Revenue
             FROM `{sales_tbl}` sd
-            JOIN `{cust_tbl}` cm ON sd.{col_cust} = cm.KUNNR
+            JOIN `{cust_tbl}` cm ON (sd.{col_cust} = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(sd.{col_cust} AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))
             JOIN `{terr_tbl}` tm ON CAST(cm.territory AS CHAR) = tm.territory_code
             JOIN `{reg_tbl}` rm ON tm.region_code = CAST(rm.region AS CHAR)
             GROUP BY rm.zone
@@ -1272,7 +1272,7 @@ def _compute_core_kpis(cursor) -> dict:
                 COALESCE(rm.region_name, 'Unmapped Region') AS region_name,
                 ROUND(SUM(sd.{col_revenue})/10000000, 2) AS Revenue
             FROM `{sales_tbl}` sd
-            JOIN `{cust_tbl}` cm ON sd.{col_cust} = cm.KUNNR
+            JOIN `{cust_tbl}` cm ON (sd.{col_cust} = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(sd.{col_cust} AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))
             JOIN `{terr_tbl}` tm ON CAST(cm.territory AS CHAR) = tm.territory_code
             JOIN `{reg_tbl}` rm ON tm.region_code = CAST(rm.region AS CHAR)
             GROUP BY region_name
@@ -1286,7 +1286,7 @@ def _compute_core_kpis(cursor) -> dict:
                 COALESCE(tm.territory_name, 'Unmapped Territory') AS territory_name,
                 ROUND(SUM(sd.{col_revenue})/10000000, 2) AS Revenue
             FROM `{sales_tbl}` sd
-            JOIN `{cust_tbl}` cm ON sd.{col_cust} = cm.KUNNR
+            JOIN `{cust_tbl}` cm ON (sd.{col_cust} = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(sd.{col_cust} AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))
             JOIN `{terr_tbl}` tm ON CAST(cm.territory AS CHAR) = tm.territory_code
             GROUP BY territory_name
             ORDER BY Revenue DESC
@@ -1299,7 +1299,7 @@ def _compute_core_kpis(cursor) -> dict:
                 COALESCE(tm.territory_name, 'Unmapped Territory') AS territory_name,
                 ROUND(SUM(sd.{col_revenue})/10000000, 2) AS Revenue
             FROM `{sales_tbl}` sd
-            JOIN `{cust_tbl}` cm ON sd.{col_cust} = cm.KUNNR
+            JOIN `{cust_tbl}` cm ON (sd.{col_cust} = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(sd.{col_cust} AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))
             JOIN `{terr_tbl}` tm ON CAST(cm.territory AS CHAR) = tm.territory_code
             WHERE tm.territory_name IS NOT NULL
             GROUP BY territory_name
@@ -1314,7 +1314,7 @@ def _compute_core_kpis(cursor) -> dict:
                 ROUND(SUM(sd.{col_revenue})/10000000, 2) AS Revenue,
                 ROUND(SUM(sd.{col_revenue}) * 100 / NULLIF((SELECT SUM({col_revenue}) FROM `{sales_tbl}`), 0), 2) AS Contribution_Percentage
             FROM `{sales_tbl}` sd
-            JOIN `{cust_tbl}` cm ON sd.{col_cust} = cm.KUNNR
+            JOIN `{cust_tbl}` cm ON (sd.{col_cust} = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(sd.{col_cust} AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))
             JOIN `{terr_tbl}` tm ON CAST(cm.territory AS CHAR) = tm.territory_code
             JOIN `{reg_tbl}` rm ON tm.region_code = CAST(rm.region AS CHAR)
             GROUP BY region_name
@@ -1326,7 +1326,7 @@ def _compute_core_kpis(cursor) -> dict:
         run("weak_territory", f"""
             SELECT COALESCE(tm.territory_name, 'Unmapped Territory') AS territory_name, ROUND(SUM(sd.{col_revenue})/10000000, 2) AS Revenue
             FROM `{sales_tbl}` sd
-            JOIN `{cust_tbl}` cm ON sd.{col_cust} = cm.KUNNR
+            JOIN `{cust_tbl}` cm ON (sd.{col_cust} = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(sd.{col_cust} AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))
             JOIN `{terr_tbl}` tm ON CAST(cm.territory AS CHAR) = tm.territory_code
             WHERE tm.territory_name IS NOT NULL
             GROUP BY territory_name
@@ -1337,7 +1337,7 @@ def _compute_core_kpis(cursor) -> dict:
 
     # ---------- 6. Distribution Analysis ----------
     run("distribution_revenue", f"""
-        SELECT COALESCE(sd.{col_channel}, 'Unmapped Channel') AS distribution_name, ROUND(SUM(sd.{col_revenue})/10000000, 2) AS Revenue
+        SELECT CASE CAST(sd.{col_channel} AS CHAR) WHEN '10' THEN 'Replacement' WHEN '20' THEN 'OEM' WHEN '30' THEN 'STU' WHEN '40' THEN 'DEF' ELSE COALESCE(sd.{col_channel}, 'Other') END AS distribution_name, ROUND(SUM(sd.{col_revenue})/10000000, 2) AS Revenue
         FROM `{sales_tbl}` sd
         GROUP BY distribution_name
         ORDER BY Revenue DESC
@@ -1345,7 +1345,7 @@ def _compute_core_kpis(cursor) -> dict:
 
 
     run("distribution_quantity", f"""
-        SELECT COALESCE(sd.{col_channel}, 'Unmapped Channel') AS distribution_name, ROUND(SUM(sd.{col_qty}), 2) AS Quantity
+        SELECT CASE CAST(sd.{col_channel} AS CHAR) WHEN '10' THEN 'Replacement' WHEN '20' THEN 'OEM' WHEN '30' THEN 'STU' WHEN '40' THEN 'DEF' ELSE COALESCE(sd.{col_channel}, 'Other') END AS distribution_name, ROUND(SUM(sd.{col_qty}), 2) AS Quantity
         FROM `{sales_tbl}` sd
         GROUP BY distribution_name
         ORDER BY Quantity DESC
@@ -1354,7 +1354,7 @@ def _compute_core_kpis(cursor) -> dict:
 
     run("distribution_contribution_pct", f"""
         SELECT
-            COALESCE(sd.{col_channel}, 'Unmapped Channel') AS distribution_name,
+            CASE CAST(sd.{col_channel} AS CHAR) WHEN '10' THEN 'Replacement' WHEN '20' THEN 'OEM' WHEN '30' THEN 'STU' WHEN '40' THEN 'DEF' ELSE COALESCE(sd.{col_channel}, 'Other') END AS distribution_name,
             ROUND(SUM(sd.{col_revenue})/10000000, 2) AS Revenue,
             ROUND(SUM(sd.{col_revenue}) * 100 / NULLIF((SELECT SUM({col_revenue}) FROM `{sales_tbl}`), 0), 2) AS Contribution_Percentage
         FROM `{sales_tbl}` sd
@@ -1395,7 +1395,7 @@ def _compute_core_kpis(cursor) -> dict:
             SELECT
                 CASE WHEN (
                     SELECT SUM(sd.{col_revenue}) FROM `{sales_tbl}` sd
-                    JOIN `{cust_tbl}` cm ON sd.{col_cust} = cm.KUNNR
+                    JOIN `{cust_tbl}` cm ON (sd.{col_cust} = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(sd.{col_cust} AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))
                     {join_ag}
                     WHERE {cond_dealer}
                 ) > (SELECT SUM({col_revenue})*0.60 FROM `{sales_tbl}`)
@@ -1409,17 +1409,33 @@ def _compute_core_kpis(cursor) -> dict:
         col_tgt_qty  = "ORG_PLAN"
         col_tgt_terr = "TERR_CODE"
         col_tgt_cat  = "CAT_CODE"
+        col_tgt_val_expr = f"st.{col_tgt_val}"
+        col_tgt_qty_expr = f"st.{col_tgt_qty}"
 
 
         try:
             cursor.execute(f"SELECT * FROM `{target_tbl}` LIMIT 0")
             cursor.fetchall()
             tcols_lower = {desc[0].lower() for desc in cursor.description}
-            if "plan_value" in tcols_lower:
+            if "rev_plan_val" in tcols_lower and "plan_value" in tcols_lower:
+                col_tgt_val_expr = "COALESCE(NULLIF(st.REV_PLAN_VAL, 0), NULLIF(st.PLAN_VALUE, 0), 0)"
+                col_tgt_val = "REV_PLAN_VAL"
+            elif "rev_plan_val" in tcols_lower:
+                col_tgt_val_expr = "st.REV_PLAN_VAL"
+                col_tgt_val = "REV_PLAN_VAL"
+            elif "plan_value" in tcols_lower:
+                col_tgt_val_expr = "st.PLAN_VALUE"
                 col_tgt_val = "PLAN_VALUE"
             elif "target_value" in tcols_lower:
                 col_tgt_val = "target_value"
-            if "org_plan" in tcols_lower:
+            if "rev_plan" in tcols_lower and "org_plan" in tcols_lower:
+                col_tgt_qty_expr = "COALESCE(NULLIF(st.REV_PLAN, 0), NULLIF(st.ORG_PLAN, 0), 0)"
+                col_tgt_qty = "REV_PLAN"
+            elif "rev_plan" in tcols_lower:
+                col_tgt_qty_expr = "st.REV_PLAN"
+                col_tgt_qty = "REV_PLAN"
+            elif "org_plan" in tcols_lower:
+                col_tgt_qty_expr = "st.ORG_PLAN"
                 col_tgt_qty = "ORG_PLAN"
             elif "target_qty" in tcols_lower:
                 col_tgt_qty = "target_qty"
@@ -1437,19 +1453,19 @@ def _compute_core_kpis(cursor) -> dict:
 
         run("target_performance", f"""
             SELECT
-                ROUND(SUM(st.{col_tgt_val})/10000000, 2) AS Total_Target_Value,
+                ROUND(SUM({col_tgt_val_expr})/10000000, 2) AS Total_Target_Value,
                 ROUND((SELECT SUM({col_revenue}) FROM `{sales_tbl}`)/10000000, 2) AS Total_Actual_Revenue,
-                ROUND(((SELECT SUM({col_revenue}) FROM `{sales_tbl}`) * 100) / NULLIF(SUM(st.{col_tgt_val}), 0), 2) AS Overall_Achievement_Percentage,
-                ROUND((SUM(st.{col_tgt_val}) - (SELECT SUM({col_revenue}) FROM `{sales_tbl}`))/10000000, 2) AS Target_Shortfall_Value
+                ROUND(((SELECT SUM({col_revenue}) FROM `{sales_tbl}`) * 100) / NULLIF(SUM({col_tgt_val_expr}), 0), 2) AS Overall_Achievement_Percentage,
+                ROUND((SUM({col_tgt_val_expr}) - (SELECT SUM({col_revenue}) FROM `{sales_tbl}`))/10000000, 2) AS Target_Shortfall_Value
             FROM `{target_tbl}` st
         """, required_tables=[target_tbl, sales_tbl])
 
 
         run("target_vs_actual_quantity", f"""
             SELECT
-                ROUND(SUM(st.{col_tgt_qty}), 2) AS Total_Target_Quantity,
+                ROUND(SUM({col_tgt_qty_expr}), 2) AS Total_Target_Quantity,
                 ROUND((SELECT SUM({col_qty}) FROM `{sales_tbl}`), 2) AS Total_Actual_Quantity,
-                ROUND(((SELECT SUM({col_qty}) FROM `{sales_tbl}`) * 100) / NULLIF(SUM(st.{col_qty}), 0), 2) AS Quantity_Achievement_Percentage
+                ROUND(((SELECT SUM({col_qty}) FROM `{sales_tbl}`) * 100) / NULLIF(SUM({col_tgt_qty_expr}), 0), 2) AS Quantity_Achievement_Percentage
             FROM `{target_tbl}` st
         """, required_tables=[target_tbl, sales_tbl])
 
@@ -1458,16 +1474,16 @@ def _compute_core_kpis(cursor) -> dict:
             run("territory_target_shortfall", f"""
                 SELECT
                     COALESCE(tm.NAME, st.{col_tgt_terr}, 'Unmapped Territory') AS territory_name,
-                    ROUND(SUM(st.{col_tgt_val})/10000000, 2) AS Target_Value,
+                    ROUND(SUM({col_tgt_val_expr})/10000000, 2) AS Target_Value,
                     ROUND(COALESCE(act.Actual_Revenue, 0)/10000000, 2) AS Actual_Revenue,
-                    ROUND((COALESCE(act.Actual_Revenue, 0) * 100) / NULLIF(SUM(st.{col_tgt_val}), 0), 2) AS Achievement_Percentage,
-                    ROUND((SUM(st.{col_tgt_val}) - COALESCE(act.Actual_Revenue, 0))/10000000, 2) AS Shortfall_Value
+                    ROUND((COALESCE(act.Actual_Revenue, 0) * 100) / NULLIF(SUM({col_tgt_val_expr}), 0), 2) AS Achievement_Percentage,
+                    ROUND((SUM({col_tgt_val_expr}) - COALESCE(act.Actual_Revenue, 0))/10000000, 2) AS Shortfall_Value
                 FROM `{target_tbl}` st
                 LEFT JOIN `{terr_tbl}` tm ON st.{col_tgt_terr} = tm.BZIRK
                 LEFT JOIN (
                     SELECT cm.BZIRK, SUM(sd.{col_revenue}) AS Actual_Revenue
                     FROM `{sales_tbl}` sd
-                    JOIN `{cust_tbl}` cm ON sd.{col_cust} = cm.KUNNR
+                    JOIN `{cust_tbl}` cm ON (sd.{col_cust} = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(sd.{col_cust} AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))
                     GROUP BY cm.BZIRK
                 ) act ON st.{col_tgt_terr} = act.BZIRK
                 GROUP BY territory_name, act.Actual_Revenue
@@ -1478,7 +1494,7 @@ def _compute_core_kpis(cursor) -> dict:
             run("territory_target_shortfall", f"""
                 SELECT
                     COALESCE(st.{col_tgt_terr}, 'Unmapped Territory') AS territory_name,
-                    ROUND(SUM(st.{col_tgt_val})/10000000, 2) AS Target_Value
+                    ROUND(SUM({col_tgt_val_expr})/10000000, 2) AS Target_Value
                 FROM `{target_tbl}` st
                 GROUP BY territory_name
                 ORDER BY Target_Value DESC
@@ -1490,8 +1506,8 @@ def _compute_core_kpis(cursor) -> dict:
             run("category_target_achievement", f"""
                 SELECT
                     COALESCE(cat.CAT_DESC, cat.SHORT_DESC, st.{col_tgt_cat}, 'Unmapped Category') AS category_name,
-                    ROUND(SUM(st.{col_tgt_val})/10000000, 2) AS Target_Value,
-                    ROUND(SUM(st.{col_tgt_qty}), 2) AS Target_Quantity
+                    ROUND(SUM({col_tgt_val_expr})/10000000, 2) AS Target_Value,
+                    ROUND(SUM({col_tgt_qty_expr}), 2) AS Target_Quantity
                 FROM `{target_tbl}` st
                 LEFT JOIN `{cat_tbl}` cat ON st.{col_tgt_cat} = cat.CAT_CODE
                 GROUP BY category_name

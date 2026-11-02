@@ -482,9 +482,9 @@ PROVIDER_HANDLERS = {
 def call_llm_chat(messages: list, json_mode: bool = False, temperature: float = 0.3, scenario: str = None) -> str:
     # --- DEBUG LOG FOR ALL LLM CALLS ---
     system_msg = next((m["content"] for m in messages if m.get("role") == "system"), None)
-    if system_msg:
-        print(f"\n{'='*60}\n[LLM CLIENT] SYSTEM PROMPT BEING SENT:\n{'-'*60}\n{system_msg}\n{'='*60}\n")
-    # -----------------------------------
+    # if system_msg:
+    #     print(f"\n{'='*60}\n[LLM CLIENT] SYSTEM PROMPT BEING SENT:\n{'-'*60}\n{system_msg}\n{'='*60}\n")
+    # # -----------------------------------
 
     if scenario is None:
         scenario = get_current_scenario()

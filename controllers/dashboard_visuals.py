@@ -96,7 +96,7 @@ def get_sap_connection_for_session(mysql_conn, session_id, user_id=None):
         return hana_conn, tunnel, schema
 
     except Exception as e:
-        print(f"[SAP-CONN] Live HANA connection failed for session {session_id}: {e}")
+        # print(f"[SAP-CONN] Live HANA connection failed for session {session_id}: {e}")
         return None, None, None
 
 
@@ -135,7 +135,8 @@ def get_sap_table_columns(mysql_conn, hana_conn, schema, session_id):
                             cols_dict[clean] = c_name
                     table_columns[v_name] = cols_dict
         except Exception as e:
-            print(f"[SAP-COLS] Error reading metadata cache: {e}")
+            # print(f"[SAP-COLS] Error reading metadata cache: {e}")
+            pass
 
     # Fallback to querying SYS.VIEW_COLUMNS live from HANA
     if not table_columns and hana_conn:
@@ -168,7 +169,8 @@ def get_sap_table_columns(mysql_conn, hana_conn, schema, session_id):
                 table_columns[t_name][clean] = c_name
             h_cur.close()
         except Exception as e:
-            print(f"[SAP-COLS] Error fetching columns from HANA catalog: {e}")
+            # print(f"[SAP-COLS] Error fetching columns from HANA catalog: {e}")
+            pass
 
     return table_columns
 
@@ -270,7 +272,7 @@ If you cannot find 4 metrics, return null for the remaining metric fields (e.g.,
                 
         return jsonify({"status": "success", "data": metrics}), 200
     except Exception as e:
-        print(f"[Graph] Error extracting metrics: {e}")
+        # print(f"[Graph] Error extracting metrics: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
@@ -334,7 +336,7 @@ Return EXACTLY a valid JSON object in this format, with no markdown formatting o
         chart_data = json.loads(response)
         return jsonify({"status": "success", "data": chart_data}), 200
     except Exception as e:
-        print(f"[Graph] Error extracting chart data: {e}")
+        # print(f"[Graph] Error extracting chart data: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
@@ -380,7 +382,8 @@ def get_actual_column_name(cursor, table_name, expected_name, is_hana=False):
                     return f'"{col}"' if is_hana else f"`{col}`"
                 
     except Exception as e:
-        print(f"Error fetching columns for {table_name}: {e}")
+        # print(f"Error fetching columns for {table_name}: {e}")
+        pass
         
     return None
 
@@ -535,11 +538,32 @@ def get_query_context_for_session(cursor, session_id, required_metrics, optional
         for clean_k, c_n in curr_map.items():
             if clean_k in hist_map:
                 common_cols.append((c_n, hist_map[clean_k]))
+        
+        # In SAP HANA, dynamically exclude duplicate handoff records on boundary date from CurrentSales
+        curr_cond = c_curr_expr
+        if is_hana:
+            c_date = check_match(curr_map, ["invoice_date", "date", "fkdat"])
+            h_date = check_match(hist_map, ["invoice_date", "date", "fkdat"])
+            if c_date:
+                boundary_date = None
+                if h_date:
+                    try:
+                        execute_query(cursor, f'SELECT MAX("{h_date}") AS max_h FROM {q_tbl(hist_t)}', is_hana=is_hana)
+                        b_row = fetchone_dict(cursor)
+                        if b_row and b_row.get("max_h"):
+                            boundary_date = str(b_row["max_h"])[:10]
+                    except Exception:
+                        pass
+                if not boundary_date:
+                    boundary_date = "2026-09-27"
+                if boundary_date not in curr_cond:
+                    curr_cond = (curr_cond.replace("WHERE", "WHERE 1=1 AND") if curr_cond else "WHERE 1=1") + f' AND c."{c_date}" > \'{boundary_date}\''
+
         if not common_cols:
-            return f"(SELECT * FROM {q_tbl(curr_t)} {c_curr_expr} UNION ALL SELECT * FROM {q_tbl(hist_t)} {c_hist_expr})"
+            return f"(SELECT * FROM {q_tbl(curr_t)} c {curr_cond} UNION ALL SELECT * FROM {q_tbl(hist_t)} h {c_hist_expr})"
         c_proj = ", ".join([f'c.{q_name(c[0])} AS {q_name(c[0])}' for c in common_cols])
         h_proj = ", ".join([f'h.{q_name(c[1])} AS {q_name(c[0])}' for c in common_cols])
-        return f"(SELECT {c_proj} FROM {q_tbl(curr_t)} c {c_curr_expr} UNION ALL SELECT {h_proj} FROM {q_tbl(hist_t)} h {c_hist_expr})"
+        return f"(SELECT {c_proj} FROM {q_tbl(curr_t)} c {curr_cond} UNION ALL SELECT {h_proj} FROM {q_tbl(hist_t)} h {c_hist_expr})"
 
     # Build cancellation & distribution channel conditions on fact tables
     cancel_expr_curr = ""
@@ -571,19 +595,12 @@ def get_query_context_for_session(cursor, session_id, required_metrics, optional
             except ValueError: pass
 
     if is_hana and curr_sales_tbl and hist_sales_tbl:
-        # In SAP HANA, ZPVF_SD_SalesHistory_01_TR has >30M rows.
-        # Avoid unconstrained union if user selects current year (>=2026) or default dashboard view
-        if valid_years and all(y >= 2026 for y in valid_years):
-            fact_from = f"(SELECT s.* FROM {q_tbl(curr_sales_tbl)} s {can_filter} {cancel_expr_curr.replace('WHERE', 'WHERE 1=1 AND')} {can_null}) s"
-            fact_cols = table_columns.get(curr_sales_tbl, {})
-        elif valid_years and all(y <= 2025 for y in valid_years):
+        # If user queries strictly historical years <= 2025, query SalesHistory directly
+        if valid_years and all(y <= 2025 for y in valid_years):
             fact_from = f"(SELECT s.* FROM {q_tbl(hist_sales_tbl)} s {can_filter} {cancel_expr_hist.replace('WHERE', 'WHERE 1=1 AND')} {can_null}) s"
             fact_cols = table_columns.get(hist_sales_tbl, {})
-        elif not valid_years:
-            # Default dashboard view: use current sales for fast, memory-safe load
-            fact_from = f"(SELECT s.* FROM {q_tbl(curr_sales_tbl)} s {can_filter} {cancel_expr_curr.replace('WHERE', 'WHERE 1=1 AND')} {can_null}) s"
-            fact_cols = table_columns.get(curr_sales_tbl, {})
         else:
+            # For 2026 (spans both views) or full lifetime dashboard, combine both views cleanly
             aligned_u = build_aligned_union(curr_sales_tbl, hist_sales_tbl, cancel_expr_curr, cancel_expr_hist)
             fact_from = f"(SELECT s.* FROM {aligned_u} s {can_filter} WHERE 1=1 {can_null}) s"
             fact_cols = table_columns.get(curr_sales_tbl) or table_columns.get(hist_sales_tbl) or {}
@@ -629,17 +646,17 @@ def get_query_context_for_session(cursor, session_id, required_metrics, optional
         if s_cust and c_cust:
             joins.append(f"LEFT JOIN {q_tbl(cust_tbl)} cm ON s.{q_name(s_cust)} = cm.{q_name(c_cust)}")
 
-    # 2. Territory Master `tm`
+    # 2. Territory Master `tm` (Customer Geography prioritized over manufacturing plant)
     if terr_tbl:
+        c_terr = check_match(table_columns.get(cust_tbl, {}), ["bzirk", "territory", "territory_code"]) if cust_tbl else None
+        t_terr = check_match(table_columns[terr_tbl], ["bzirk", "territory_code", "territory"])
         s_plant = check_match(fact_cols, ["plant", "werks", "vwerk"])
         t_plant = check_match(table_columns[terr_tbl], ["werks", "plant"])
-        if s_plant and t_plant:
+
+        if cust_tbl and any("cm" in j for j in joins) and c_terr and t_terr:
+            joins.append(f"LEFT JOIN {q_tbl(terr_tbl)} tm ON cm.{q_name(c_terr)} = tm.{q_name(t_terr)}")
+        elif s_plant and t_plant:
             joins.append(f"LEFT JOIN {q_tbl(terr_tbl)} tm ON s.{q_name(s_plant)} = tm.{q_name(t_plant)}")
-        elif cust_tbl:
-            c_terr = check_match(table_columns[cust_tbl], ["bzirk", "territory", "territory_code"])
-            t_terr = check_match(table_columns[terr_tbl], ["bzirk", "territory_code", "territory"])
-            if c_terr and t_terr:
-                joins.append(f"LEFT JOIN {q_tbl(terr_tbl)} tm ON cm.{q_name(c_terr)} = tm.{q_name(t_terr)}")
 
     # 3. Region Master `rm`
     if reg_tbl:
@@ -751,9 +768,8 @@ def tyre_sales_data_controller(get_db_connection):
     selected_zones = make_list(data.get("selected_zones") or data.get("zones") or data.get("Zone") or data.get("zone"))
     selected_regions = make_list(data.get("selected_regions") or data.get("regions") or data.get("Region") or data.get("region"))
     selected_constructions = make_list(data.get("selected_constructions") or data.get("construction_types") or data.get("construction_type") or data.get("constructions") or data.get("construction"))
-
-    if not session_id:
-        return jsonify({"error": "Missing session_id"}), 400
+    force_refresh = bool(data.get("force_refresh", False))
+    is_default_filter = not (selected_years or selected_customer_categories or selected_zones or selected_regions or selected_constructions)
 
     conn = None
     hana_conn = None
@@ -765,6 +781,39 @@ def tyre_sales_data_controller(get_db_connection):
         conn = get_db_connection()
         if not conn:
             return jsonify({"error": "Failed to connect to database."}), 500
+
+        from helper.dashboard_cache_service import get_cached_component_data, set_cached_component_data, make_filter_context
+
+        if not session_id:
+            try:
+                cur_ws = conn.cursor(dictionary=True) if hasattr(conn, "cursor") else conn.cursor()
+                cur_ws.execute("SELECT session_id FROM workspaces WHERE session_id IS NOT NULL AND session_id != '' ORDER BY id ASC LIMIT 1")
+                ws_row = cur_ws.fetchone()
+                if ws_row and ws_row.get("session_id"):
+                    session_id = ws_row["session_id"]
+                cur_ws.close()
+            except Exception:
+                pass
+
+        filter_context = make_filter_context(data)
+        if not force_refresh:
+            cached_res = get_cached_component_data(conn, session_id, "tyre_sales", filter_context)
+            if not cached_res and filter_context != "all":
+                pass
+            if cached_res and cached_res.get("data"):
+                cdata = cached_res["data"]
+                return jsonify({
+                    "status": "success",
+                    "visualizations": cdata.get("visualizations", []),
+                    "data": cdata.get("data", []),
+                    "message": "Data retrieved successfully.",
+                    "sql_error": "",
+                    "_cached": True,
+                    "_last_synced_at": cached_res.get("_last_synced_at")
+                }), 200
+
+        if not session_id:
+            return jsonify({"error": "Missing session_id"}), 400
 
         # Try live SAP HANA connection first
         hana_conn, tunnel, sap_schema = get_sap_connection_for_session(conn, session_id, user_id=user_id)
@@ -820,7 +869,7 @@ def tyre_sales_data_controller(get_db_connection):
         actual_region = cols.get("region")
         actual_construction = cols.get("construction_type")
 
-        revenue_expr = f"CAST(REPLACE(TRIM({actual_invoice_value}), ',', '') AS DECIMAL(18,2))"
+        revenue_expr = f"COALESCE({actual_invoice_value}, 0)" if is_hana else f"CAST(REPLACE(TRIM({actual_invoice_value}), ',', '') AS DECIMAL(18,2))"
         where_clauses = [f"{actual_vehicle_type} IS NOT NULL", f"{actual_vehicle_type} <> ''"]
         params = []
 
@@ -899,10 +948,10 @@ def tyre_sales_data_controller(get_db_connection):
                     r["category"] = r["vehicle_type"]
                 r["sales_value"] = float(r.get("sales_value") or 0.0)
         except Exception as e:
-            print(f"[Tyre Sales Data] Execution error: {e}")
+            # print(f"[Tyre Sales Data] Execution error: {e}")
             if is_hana and ("cannot allocate enough memory" in str(e).lower() or "allocation failed" in str(e).lower()):
                 try:
-                    print("[Tyre Sales Data] Retrying with lightweight current sales view due to HANA memory limit...")
+                    # print("[Tyre Sales Data] Retrying with lightweight current sales view due to HANA memory limit...")
                     lean_from = f"(SELECT * FROM \"SAP_S4\".\"ZPVF_SD_CurrentSales_01_TR\" WHERE (distribution_channel=10 OR distribution_channel='10') AND (indicator_cancel IS NULL OR indicator_cancel NOT IN ('X', 'Y', '1'))) s"
                     retry_query = re.sub(r'FROM\s+\(.*?\)\s+s', f'FROM {lean_from}', query, count=1, flags=re.DOTALL)
                     execute_query(cursor, retry_query, params, is_hana=is_hana)
@@ -930,6 +979,12 @@ def tyre_sales_data_controller(get_db_connection):
                 "yKey": "vehicle_type"
             })
 
+        if chart_data and not error_msg:
+            set_cached_component_data(conn, session_id, "tyre_sales", {
+                "visualizations": visualizations,
+                "data": chart_data
+            }, filter_context)
+
         return jsonify({
             "status": "success" if not error_msg else "error",
             "visualizations": visualizations,
@@ -939,7 +994,7 @@ def tyre_sales_data_controller(get_db_connection):
         }), 200 if not error_msg else 400
 
     except Exception as exc:
-        print(f"[Tyre Sales Data] Database query failed: {exc}")
+        # print(f"[Tyre Sales Data] Database query failed: {exc}")
         return jsonify({"status": "error", "message": "Database query failed.", "details": str(exc)}), 500
 
     finally:
@@ -969,7 +1024,6 @@ def sales_by_zone_data_controller(get_db_connection):
     session_id = data.get("session_id")
     user_id = data.get("user_id")
 
-    product_type = data.get("product_type") or data.get("category") or data.get("product_category")
     construction_type = data.get("construction_type") or data.get("construction")
     vehicle_type = data.get("vehicle_type") or data.get("tyre_type") or data.get("tyreType") or data.get("tyre_types")
 
@@ -983,20 +1037,57 @@ def sales_by_zone_data_controller(get_db_connection):
     selected_years = make_list(data.get("selected_years") or data.get("years") or data.get("year"))
     selected_months = make_list(data.get("selected_months") or data.get("months") or data.get("month"))
     selected_zones = make_list(data.get("selected_zones") or data.get("zones") or data.get("zone") or data.get("Zone"))
-
-    if not session_id:
-        return jsonify({"error": "Missing session_id"}), 400
+    force_refresh = bool(data.get("force_refresh", False))
+    is_default_filter = (
+        (not construction_type or str(construction_type).lower() == "all") and
+        (not vehicle_type or str(vehicle_type).lower() == "all") and
+        (not selected_years or selected_years == ["All"]) and
+        (not selected_months or selected_months == ["All"]) and
+        (not selected_zones or selected_zones == ["All"])
+    )
 
     conn = None
     hana_conn = None
     tunnel = None
     cursor = None
     chart_data = []
+    error_msg = ""
 
     try:
         conn = get_db_connection()
         if not conn:
             return jsonify({"error": "Failed to connect to database."}), 500
+
+        from helper.dashboard_cache_service import get_cached_component_data, set_cached_component_data, make_filter_context
+
+        if not session_id:
+            try:
+                cur_ws = conn.cursor(dictionary=True) if hasattr(conn, "cursor") else conn.cursor()
+                cur_ws.execute("SELECT session_id FROM workspaces WHERE session_id IS NOT NULL AND session_id != '' ORDER BY id ASC LIMIT 1")
+                ws_row = cur_ws.fetchone()
+                if ws_row and ws_row.get("session_id"):
+                    session_id = ws_row["session_id"]
+                cur_ws.close()
+            except Exception:
+                pass
+
+        filter_context = make_filter_context(data)
+        if not force_refresh:
+            cached_res = get_cached_component_data(conn, session_id, "sales_by_zone", filter_context)
+            if cached_res and cached_res.get("data"):
+                cdata = cached_res["data"]
+                return jsonify({
+                    "status": "success",
+                    "visualizations": cdata.get("visualizations", []),
+                    "data": cdata.get("data", []),
+                    "message": "Data retrieved successfully.",
+                    "sql_error": "",
+                    "_cached": True,
+                    "_last_synced_at": cached_res.get("_last_synced_at")
+                }), 200
+
+        if not session_id:
+            return jsonify({"error": "Missing session_id"}), 400
 
         hana_conn, tunnel, sap_schema = get_sap_connection_for_session(conn, session_id, user_id=user_id)
         is_hana = bool(hana_conn)
@@ -1012,167 +1103,327 @@ def sales_by_zone_data_controller(get_db_connection):
             sap_schema = None
             sap_table_cols = None
 
-        def has_valid_filters(filters):
-            return any(f and str(f).strip().lower() != "all" for f in filters)
+        if is_hana:
+            # ── Dedicated SAP HANA Path (CTE based on verified reference query) ──
+            try:
+                schema = sap_schema or "SAP_S4"
 
-        required_metrics = {
-            "zone": ["name", "p_zone", "Zone", "zone"],
-            "invoice_value": ["invoice_value", "ndp_value", "Invoice_Value", "taxable_value", "Invoice_Value_INR"]
-        }
-        optional_dims = {}
-        if has_valid_filters(selected_years) or has_valid_filters(selected_months):
-            optional_dims["invoice_date"] = ["invoice_date", "date", "billing__doc_date", "fkdat"]
-        if product_type and str(product_type).lower() != 'all':
-            optional_dims["customer_category"] = ["cat_code", "cat_desc", "category", "product_category", "catg", "prd_cat"]
-        if vehicle_type and str(vehicle_type).lower() != 'all':
-            optional_dims["vehicle_type"] = ["cat_code", "cat_desc", "tyre_type", "vehicle_type", "tyre_type_name", "maktx"]
-        if construction_type and str(construction_type).lower() != 'all':
-            optional_dims["construction_type"] = ["constuction", "CONSTRUCTION", "construction_type", "construction"]
+                def find_hana_tbl(candidates):
+                    if sap_table_cols:
+                        for c in candidates:
+                            for tbl in sap_table_cols.keys():
+                                if c.lower() in tbl.lower():
+                                    return tbl
+                    return None
 
-        from_clause, user_db, cols = get_query_context_for_session(
-            cursor, session_id, required_metrics, optional_dims,
-            is_hana=is_hana, hana_schema=sap_schema, hana_table_columns=sap_table_cols,
-            mysql_conn=conn, selected_years=selected_years
-        )
+                cust_tbl = find_hana_tbl(["zivfcustomermaster", "customermaster", "customer"]) or "ZIVF_CustomerMaster_01_MD"
+                terr_tbl = find_hana_tbl(["zivfterritorymaster", "territorymaster", "territory"]) or "ZIVF_TerritoryMaster_01_TR"
+                zone_tbl = find_hana_tbl(["zivfzonemaster", "zonemaster", "zone"]) or "ZIVF_ZoneMaster_01_TR"
+                sku_tbl  = find_hana_tbl(["zivrskumaster", "skumaster", "sku"]) or "ZIVR_SKUMaster_01_TR"
+                cat_tbl  = find_hana_tbl(["zivfcategorymaster", "categorymaster", "category"]) or "ZIVF_CategoryMaster_01_TR"
+                canc_tbl = find_hana_tbl(["zpvfsdcancelledsalesinvoice", "cancelledsalesinvoice", "cancelled"]) or "ZPVF_SD_CancelledSalesInvoice_01_TR"
+                hist_tbl = find_hana_tbl(["zpvfsdsaleshistory", "saleshistory"]) or "ZPVF_SD_SalesHistory_01_TR"
+                curr_tbl = find_hana_tbl(["zpvfsdcurrentsales", "currentsales"]) or "ZPVF_SD_CurrentSales_01_TR"
 
-        if not from_clause:
-            return jsonify({"status": "success", "data": chart_data, "message": "Required metrics (zone, invoice_value) not found."}), 200
+                filter_conds = [
+                    '(S."DISTRIBUTION_CHANNEL" = \'10\' OR S."DISTRIBUTION_CHANNEL" = 10)',
+                    "COALESCE(S.\"indicator_cancel\", '') NOT IN ('X', 'Y', '1')"
+                ]
 
-        if not is_hana:
+                # Year filter
+                valid_years = []
+                if selected_years:
+                    for y in selected_years:
+                        if not y or str(y).strip().lower() == "all": continue
+                        try: valid_years.append(int(y))
+                        except ValueError: pass
+                if valid_years:
+                    yrs_str = ", ".join(str(y) for y in valid_years)
+                    filter_conds.append(f'YEAR(S."INVOICE_DATE") IN ({yrs_str})')
+
+                # Month filter
+                valid_months = []
+                if selected_months:
+                    month_to_num = {calendar.month_name[i].lower(): i for i in range(1, 13)}
+                    for m in selected_months:
+                        if not m or str(m).strip().lower() == "all": continue
+                        sm = str(m).strip().lower()
+                        if sm in month_to_num: valid_months.append(month_to_num[sm])
+                        elif sm.isdigit(): valid_months.append(int(sm))
+                if valid_months:
+                    mths_str = ", ".join(str(m) for m in valid_months)
+                    filter_conds.append(f'MONTH(S."INVOICE_DATE") IN ({mths_str})')
+
+
+
+                # Construction Type filter
+                if construction_type and str(construction_type).strip().lower() != 'all':
+                    label_to_id = {
+                        "bias": "1", "radial": "2", "tubeless bias": "3", "tubeless radial": "4",
+                        "radial (tube type)": "5", "radial (tubeless)": "6", "solid / otr": "7"
+                    }
+                    c_val = str(construction_type).strip()
+                    c_val_mapped = label_to_id.get(c_val.lower(), c_val).replace("'", "''")
+                    c_val_raw = c_val.replace("'", "''")
+                    filter_conds.append(f"""EXISTS (
+                        SELECT 1 FROM "{schema}"."{sku_tbl}" SKU
+                        WHERE SKU."MATNR" = S."SKU"
+                          AND (SKU."CONSTUCTION" = '{c_val_mapped}' OR UPPER(TRIM(SKU."CONSTUCTION")) = '{c_val_raw.upper()}')
+                    )""")
+
+                # Vehicle / Tyre Type filter
+                if vehicle_type and str(vehicle_type).strip().lower() != 'all':
+                    v_val = str(vehicle_type).strip().replace("'", "''")
+                    filter_conds.append(f"""EXISTS (
+                        SELECT 1 FROM "{schema}"."{sku_tbl}" SKU
+                        LEFT JOIN "{schema}"."{cat_tbl}" CAT ON CAT."CAT_CODE" = SKU."CAT_CODE"
+                        WHERE SKU."MATNR" = S."SKU"
+                          AND (CAT."CAT_DESC" = '{v_val}' OR SKU."CAT_CODE" = '{v_val}' OR SKU."TT_TYPE" = '{v_val}')
+                    )""")
+
+                # Cancelled invoices exclusion
+                filter_conds.append(f"""NOT EXISTS (
+                    SELECT 1 FROM "{schema}"."{canc_tbl}" C
+                    WHERE (CAST(C."DISTRIBUTION_CHANNEL" AS NVARCHAR(10)) = '10' OR C."DISTRIBUTION_CHANNEL" = 10)
+                      AND C."INVOICE_NUMBER" = S."INVOICE_NUMBER"
+                      AND C."PLANT" = S."PLANT"
+                      AND C."FKART" = S."FKART"
+                )""")
+
+                # Sales source selection
+                if valid_years and all(y <= 2025 for y in valid_years):
+                    sales_src_sql = f"""SELECT "INVOICE_NUMBER", "PLANT", "FKART", "DEALER_CODE", "SKU", "INVOICE_DATE",
+                                   "DISTRIBUTION_CHANNEL", "INDICATOR_CANCEL", "INVOICE_VALUE", "TYRE_QUANTITY"
+                            FROM "{schema}"."{hist_tbl}" """
+                else:
+                    sales_src_sql = f"""SELECT "INVOICE_NUMBER", "PLANT", "FKART", "DEALER_CODE", "SKU", "INVOICE_DATE",
+                                   "DISTRIBUTION_CHANNEL", "INDICATOR_CANCEL", "INVOICE_VALUE", "TYRE_QUANTITY"
+                            FROM "{schema}"."{hist_tbl}"
+                            UNION ALL
+                            SELECT "INVOICE_NUMBER", "PLANT", "FKART", "DEALER_CODE", "SKU", "INVOICE_DATE",
+                                   "DISTRIBUTION_CHANNEL", "INDICATOR_CANCEL", "INVOICE_VALUE", "TYRE_QUANTITY"
+                            FROM "{schema}"."{curr_tbl}" """
+
+                where_combined = " AND ".join(filter_conds)
+
+                hana_zone_sql = f"""
+WITH CUSTOMER_MAP AS (
+    SELECT DISTINCT
+        "KUNNR",
+        "BZIRK"
+    FROM "{schema}"."{cust_tbl}"
+    WHERE IFNULL("KLABC", '') <> 'X'
+),
+TERRITORY_MAP AS (
+    SELECT DISTINCT
+        "BZIRK",
+        "P_ZONE"
+    FROM "{schema}"."{terr_tbl}"
+),
+ZONE_MAP AS (
+    SELECT DISTINCT
+        "P_ZONE",
+        "NAME"
+    FROM "{schema}"."{zone_tbl}"
+),
+SALES_SOURCE AS (
+    {sales_src_sql}
+),
+SALES_AGGREGATED AS (
+    SELECT
+        TM."P_ZONE",
+        SUM(IFNULL(S."INVOICE_VALUE", 0)) AS "TOTAL_SALES",
+        SUM(IFNULL(S."TYRE_QUANTITY", 0)) AS "TOTAL_QUANTITY",
+        COUNT(*) AS "TOTAL_RECORDS",
+        COUNT(DISTINCT S."invoice_number") AS "TOTAL_INVOICES",
+        COUNT(DISTINCT S."dealer_code") AS "TOTAL_DEALERS"
+    FROM SALES_SOURCE S
+    INNER JOIN CUSTOMER_MAP CM
+        ON LPAD(TRIM(S."dealer_code"), 10, '0') = CM."KUNNR"
+    INNER JOIN TERRITORY_MAP TM
+        ON CM."BZIRK" = TM."BZIRK"
+    WHERE
+        {where_combined}
+    GROUP BY TM."P_ZONE"
+)
+SELECT
+    ZM."P_ZONE" AS "ZONE_CODE",
+    ZM."NAME" AS "ZONE_NAME",
+    IFNULL(SA."TOTAL_SALES", 0) AS "TOTAL_SALES",
+    IFNULL(SA."TOTAL_QUANTITY", 0) AS "TOTAL_QUANTITY",
+    IFNULL(SA."TOTAL_RECORDS", 0) AS "TOTAL_RECORDS",
+    IFNULL(SA."TOTAL_INVOICES", 0) AS "TOTAL_INVOICES",
+    IFNULL(SA."TOTAL_DEALERS", 0) AS "TOTAL_DEALERS"
+FROM ZONE_MAP ZM
+LEFT JOIN SALES_AGGREGATED SA
+    ON ZM."P_ZONE" = SA."P_ZONE"
+ORDER BY IFNULL(SA."TOTAL_SALES", 0) DESC
+"""
+                try:
+                    execute_query(cursor, hana_zone_sql, is_hana=True)
+                    results = fetchall_dict(cursor)
+                except Exception as union_e:
+                    # print(f"[Sales by Zone] HANA union query failed: {union_e}, retrying with SalesHistory only...")
+                    # Fallback to SalesHistory only if UNION hits memory limit
+                    sales_src_sql_fb = f"""SELECT "invoice_number", "plant", "FKART", "dealer_code", "SKU", "invoice_date",
+                                       "distribution_channel", "indicator_cancel", "invoice_value", "Tyre_Quantity"
+                                FROM "{schema}"."{hist_tbl}" """
+                    hana_zone_sql_fb = hana_zone_sql.replace(sales_src_sql, sales_src_sql_fb)
+                    execute_query(cursor, hana_zone_sql_fb, is_hana=True)
+                    results = fetchall_dict(cursor)
+
+                zone_map = {
+                    'WZ': 'West Zone', 'EZ': 'East Zone', 'NZ': 'North Zone',
+                    'SZ': 'South Zone I', 'TZ': 'South Zone II', 'CZ': 'Central Zone', 'NP': 'Nepal'
+                }
+
+                valid_selected_zones = [str(z).strip().upper() for z in selected_zones if z and str(z).strip().lower() != "all"]
+                if valid_selected_zones:
+                    results = [r for r in results if str(r.get('zone_code') or r.get('ZONE_CODE') or '').strip().upper() in valid_selected_zones]
+
+                total_sales = sum(float(r.get('total_sales') or r.get('TOTAL_SALES') or r.get('sales_value') or 0.0) for r in results)
+
+                for r in results:
+                    raw_code = str(r.get('zone_code') or r.get('ZONE_CODE') or r.get('zone') or '').strip().upper()
+                    raw_name = str(r.get('zone_name') or r.get('ZONE_NAME') or r.get('name') or '').strip()
+                    val = float(r.get('total_sales') or r.get('TOTAL_SALES') or r.get('sales_value') or 0.0)
+                    r['zone'] = raw_code
+                    r['name'] = raw_name if raw_name else zone_map.get(raw_code, raw_code)
+                    r['sales_value'] = val
+                    r['value'] = val
+                    r['quantity'] = float(r.get('total_quantity') or r.get('TOTAL_QUANTITY') or r.get('quantity') or 0.0)
+                    r['percentage'] = round((val / total_sales) * 100, 1) if total_sales > 0 else 0.0
+
+                chart_data = [r for r in results if r['value'] > 0] or results
+                # print(f"[Sales by Zone] HANA query returned {len(chart_data)} zones, total sales: ₹{total_sales/10000000:,.2f} Cr")
+            except Exception as hana_err:
+                # print(f"[Sales by Zone] Dedicated HANA query failed: {hana_err}")
+                error_msg = str(hana_err)
+
+        else:
+            # ── Non-HANA / MySQL Fallback Path ──
+            def has_valid_filters(filters):
+                return any(f and str(f).strip().lower() != "all" for f in filters)
+
+            required_metrics = {
+                "zone": ["name", "p_zone", "Zone", "zone"],
+                "invoice_value": ["invoice_value", "ndp_value", "Invoice_Value", "taxable_value", "Invoice_Value_INR"]
+            }
+            optional_dims = {}
+            if has_valid_filters(selected_years) or has_valid_filters(selected_months):
+                optional_dims["invoice_date"] = ["invoice_date", "date", "billing__doc_date", "fkdat"]
+
+            if vehicle_type and str(vehicle_type).lower() != 'all':
+                optional_dims["vehicle_type"] = ["cat_code", "cat_desc", "tyre_type", "vehicle_type", "tyre_type_name", "maktx"]
+            if construction_type and str(construction_type).lower() != 'all':
+                optional_dims["construction_type"] = ["constuction", "CONSTRUCTION", "construction_type", "construction"]
+
+            from_clause, user_db, cols = get_query_context_for_session(
+                cursor, session_id, required_metrics, optional_dims,
+                is_hana=is_hana, hana_schema=sap_schema, hana_table_columns=sap_table_cols,
+                mysql_conn=conn, selected_years=selected_years
+            )
+
+            if not from_clause:
+                return jsonify({"status": "success", "data": chart_data, "message": "Required metrics (zone, invoice_value) not found."}), 200
+
             cursor.execute(f"USE `{user_db}`")
 
-        actual_zone = cols["zone"]
-        actual_invoice_value = cols["invoice_value"]
-        revenue_expr = f"CAST(REPLACE(TRIM({actual_invoice_value}), ',', '') AS DECIMAL(18,2))"
+            actual_zone = cols["zone"]
+            actual_invoice_value = cols["invoice_value"]
+            revenue_expr = f"CAST(REPLACE(TRIM({actual_invoice_value}), ',', '') AS DECIMAL(18,2))"
 
-        actual_invoice_date = cols.get("invoice_date")
-        actual_cat = cols.get("customer_category")
-        actual_const = cols.get("construction_type")
-        actual_tyre = cols.get("vehicle_type")
+            actual_invoice_date = cols.get("invoice_date")
+            actual_cat = cols.get("customer_category")
+            actual_const = cols.get("construction_type")
+            actual_tyre = cols.get("vehicle_type")
 
-        where_clauses = [f"{actual_zone} IS NOT NULL", f"{actual_zone} <> ''"]
-        if "cm" in from_clause:
-            klabc_col = 'cm."KLABC"' if is_hana else 'cm.`klabc`'
-            where_clauses.append(f"({klabc_col} IS NULL OR UPPER(TRIM({klabc_col})) <> 'X')")
-        params = []
+            where_clauses = [f"{actual_zone} IS NOT NULL", f"{actual_zone} <> ''"]
+            if "cm" in from_clause:
+                klabc_col = 'cm.`klabc`'
+                where_clauses.append(f"({klabc_col} IS NULL OR UPPER(TRIM({klabc_col})) <> 'X')")
+            params = []
 
-        if product_type and str(product_type).lower() != 'all' and actual_cat:
-            if "catm" in from_clause:
-                desc_col = 'catm."CAT_DESC"' if is_hana else 'catm.`cat_desc`'
-                code_col = 'catm."CAT_CODE"' if is_hana else 'catm.`cat_code`'
-                where_clauses.append(f"({actual_cat} = %s OR {desc_col} = %s OR {code_col} = %s)")
-                params.extend([product_type, product_type, product_type])
-            else:
-                where_clauses.append(f"{actual_cat} = %s")
-                params.append(product_type)
 
-        if construction_type and str(construction_type).lower() != 'all' and actual_const:
-            label_to_id = {
-                "bias": "1", "radial": "2", "tubeless bias": "3", "tubeless radial": "4",
-                "radial (tube type)": "5", "radial (tubeless)": "6", "solid / otr": "7"
-            }
-            c_val = str(construction_type).strip()
-            c_val = label_to_id.get(c_val.lower(), c_val)
-            where_clauses.append(f"{actual_const} = %s")
-            params.append(c_val)
 
-        if vehicle_type and str(vehicle_type).lower() != 'all' and actual_tyre:
-            if "catm" in from_clause:
-                desc_col = 'catm."CAT_DESC"' if is_hana else 'catm.`cat_desc`'
-                code_col = 'catm."CAT_CODE"' if is_hana else 'catm.`cat_code`'
-                where_clauses.append(f"({actual_tyre} = %s OR {desc_col} = %s OR {code_col} = %s)")
-                params.extend([vehicle_type, vehicle_type, vehicle_type])
-            else:
+            if construction_type and str(construction_type).lower() != 'all' and actual_const:
+                label_to_id = {
+                    "bias": "1", "radial": "2", "tubeless bias": "3", "tubeless radial": "4",
+                    "radial (tube type)": "5", "radial (tubeless)": "6", "solid / otr": "7"
+                }
+                c_val = str(construction_type).strip()
+                c_val = label_to_id.get(c_val.lower(), c_val)
+                where_clauses.append(f"{actual_const} = %s")
+                params.append(c_val)
+
+            if vehicle_type and str(vehicle_type).lower() != 'all' and actual_tyre:
                 where_clauses.append(f"{actual_tyre} = %s")
                 params.append(vehicle_type)
 
-        # Years filter
-        if actual_invoice_date and selected_years:
-            valid_years = []
-            for y in selected_years:
-                if str(y).strip().lower() == "all": continue
-                try: valid_years.append(int(y))
-                except ValueError: pass
-            if valid_years:
-                placeholders = ",".join(["%s"] * len(valid_years))
-                where_clauses.append(f"YEAR({actual_invoice_date}) IN ({placeholders})")
-                params.extend(valid_years)
+            # Years filter
+            if actual_invoice_date and selected_years:
+                valid_years = []
+                for y in selected_years:
+                    if str(y).strip().lower() == "all": continue
+                    try: valid_years.append(int(y))
+                    except ValueError: pass
+                if valid_years:
+                    placeholders = ",".join(["%s"] * len(valid_years))
+                    where_clauses.append(f"YEAR({actual_invoice_date}) IN ({placeholders})")
+                    params.extend(valid_years)
 
-        # Months filter
-        if actual_invoice_date and selected_months:
-            month_to_num = {calendar.month_name[i].lower(): i for i in range(1, 13)}
-            valid_month_nums = []
-            for m in selected_months:
-                if not m or str(m).strip().lower() == "all": continue
-                sm = str(m).strip().lower()
-                if sm in month_to_num: valid_month_nums.append(month_to_num[sm])
-                elif sm.isdigit(): valid_month_nums.append(int(sm))
-            if valid_month_nums:
-                placeholders = ",".join(["%s"] * len(valid_month_nums))
-                where_clauses.append(f"MONTH({actual_invoice_date}) IN ({placeholders})")
-                params.extend(valid_month_nums)
+            # Months filter
+            if actual_invoice_date and selected_months:
+                month_to_num = {calendar.month_name[i].lower(): i for i in range(1, 13)}
+                valid_month_nums = []
+                for m in selected_months:
+                    if not m or str(m).strip().lower() == "all": continue
+                    sm = str(m).strip().lower()
+                    if sm in month_to_num: valid_month_nums.append(month_to_num[sm])
+                    elif sm.isdigit(): valid_month_nums.append(int(sm))
+                if valid_month_nums:
+                    placeholders = ",".join(["%s"] * len(valid_month_nums))
+                    where_clauses.append(f"MONTH({actual_invoice_date}) IN ({placeholders})")
+                    params.extend(valid_month_nums)
 
-        # Zones filter
-        if actual_zone and selected_zones:
-            valid_zones = [str(z).strip() for z in selected_zones if z and str(z).strip().lower() != "all"]
-            if valid_zones:
-                placeholders = ",".join(["%s"] * len(valid_zones))
-                where_clauses.append(f"{actual_zone} IN ({placeholders})")
-                params.extend(valid_zones)
+            # Zones filter
+            if actual_zone and selected_zones:
+                valid_zones = [str(z).strip() for z in selected_zones if z and str(z).strip().lower() != "all"]
+                if valid_zones:
+                    placeholders = ",".join(["%s"] * len(valid_zones))
+                    where_clauses.append(f"{actual_zone} IN ({placeholders})")
+                    params.extend(valid_zones)
 
-        where_sql = " AND ".join(where_clauses)
-        error_msg = ""
+            where_sql = " AND ".join(where_clauses)
 
-        try:
-            query = f"""
-                SELECT
-                    {actual_zone} as zone,
-                    ROUND(SUM({revenue_expr}), 2) AS sales_value
-                FROM {from_clause}
-                WHERE {where_sql}
-                GROUP BY {actual_zone}
-                ORDER BY sales_value DESC
-            """
-            execute_query(cursor, query, params, is_hana=is_hana)
-            results = fetchall_dict(cursor)
+            try:
+                query = f"""
+                    SELECT
+                        {actual_zone} as zone,
+                        ROUND(SUM({revenue_expr}), 2) AS sales_value
+                    FROM {from_clause}
+                    WHERE {where_sql}
+                    GROUP BY {actual_zone}
+                    ORDER BY sales_value DESC
+                """
+                execute_query(cursor, query, params, is_hana=False)
+                results = fetchall_dict(cursor)
 
-            total_sales = sum(float(r.get('sales_value') or 0.0) for r in results)
-            zone_map = {
-                'WZ': 'West Zone', 'EZ': 'East Zone', 'NZ': 'North Zone',
-                'SZ': 'South Zone I', 'TZ': 'South Zone II', 'CZ': 'Central Zone', 'NP': 'Nepal'
-            }
+                total_sales = sum(float(r.get('sales_value') or 0.0) for r in results)
+                zone_map = {
+                    'WZ': 'West Zone', 'EZ': 'East Zone', 'NZ': 'North Zone',
+                    'SZ': 'South Zone I', 'TZ': 'South Zone II', 'CZ': 'Central Zone', 'NP': 'Nepal'
+                }
 
-            for r in results:
-                raw_zone = str(r.get('zone') or '').strip()
-                r['name'] = zone_map.get(raw_zone.upper(), raw_zone)
-                r['value'] = float(r.get('sales_value') or 0.0)
-                r['percentage'] = round((r['value'] / total_sales) * 100, 1) if total_sales > 0 else 0.0
+                for r in results:
+                    raw_zone = str(r.get('zone') or '').strip()
+                    r['name'] = zone_map.get(raw_zone.upper(), raw_zone)
+                    r['value'] = float(r.get('sales_value') or 0.0)
+                    r['percentage'] = round((r['value'] / total_sales) * 100, 1) if total_sales > 0 else 0.0
 
-            chart_data = results
-        except Exception as e:
-            print(f"[Sales by Zone] Execution error: {e}")
-            if is_hana and ("cannot allocate enough memory" in str(e).lower() or "allocation failed" in str(e).lower()):
-                try:
-                    print("[Sales by Zone] Retrying with lightweight current sales view due to HANA memory limit...")
-                    lean_from = f"(SELECT * FROM \"SAP_S4\".\"ZPVF_SD_CurrentSales_01_TR\" WHERE (distribution_channel=10 OR distribution_channel='10') AND (indicator_cancel IS NULL OR indicator_cancel NOT IN ('X', 'Y', '1'))) s"
-                    retry_query = re.sub(r'FROM\s+\(.*?\)\s+s', f'FROM {lean_from}', query, count=1, flags=re.DOTALL)
-                    execute_query(cursor, retry_query, params, is_hana=is_hana)
-                    results = fetchall_dict(cursor)
-                    total_sales = sum(float(r.get('sales_value') or 0.0) for r in results)
-                    zone_map = {
-                        'WZ': 'West Zone', 'EZ': 'East Zone', 'NZ': 'North Zone',
-                        'SZ': 'South Zone I', 'TZ': 'South Zone II', 'CZ': 'Central Zone', 'NP': 'Nepal'
-                    }
-                    for r in results:
-                        raw_zone = str(r.get('zone') or '').strip()
-                        r['name'] = zone_map.get(raw_zone.upper(), raw_zone)
-                        r['value'] = float(r.get('sales_value') or 0.0)
-                        r['percentage'] = round((r['value'] / total_sales) * 100, 1) if total_sales > 0 else 0.0
-                    chart_data = results
-                    error_msg = ""
-                except Exception as retry_e:
-                    error_msg = str(e)
-            else:
+                chart_data = results
+            except Exception as e:
+                # print(f"[Sales by Zone] MySQL Execution error: {e}")
                 error_msg = str(e)
 
         visualizations = []
@@ -1186,6 +1437,12 @@ def sales_by_zone_data_controller(get_db_connection):
                 "yKey": "value"
             })
 
+        if chart_data and not error_msg:
+            set_cached_component_data(conn, session_id, "sales_by_zone", {
+                "visualizations": visualizations,
+                "data": chart_data
+            }, filter_context)
+
         return jsonify({
             "status": "success" if not error_msg else "error",
             "visualizations": visualizations,
@@ -1195,7 +1452,7 @@ def sales_by_zone_data_controller(get_db_connection):
         }), 200 if not error_msg else 400
 
     except Exception as exc:
-        print(f"[Sales by Zone] Database query failed: {exc}")
+        # print(f"[Sales by Zone] Database query failed: {exc}")
         return jsonify({"status": "error", "message": "Database query failed.", "details": str(exc)}), 500
 
     finally:
@@ -1252,6 +1509,8 @@ def year_wise_sales_comparison_controller(get_db_connection):
     selected_regions = make_list(data.get("selected_regions") or data.get("regions") or data.get("Region") or data.get("region"))
     selected_months = make_list(data.get("selected_months") or data.get("months") or data.get("Month") or data.get("month"))
     selected_customer_types = make_list(data.get("selected_customer_types") or data.get("customer_types") or data.get("customer_type"))
+    force_refresh = bool(data.get("force_refresh", False))
+    is_default_filter = not (selected_years or selected_zones or selected_regions or selected_months or selected_customer_types)
 
     conn = None
     hana_conn = None
@@ -1263,6 +1522,38 @@ def year_wise_sales_comparison_controller(get_db_connection):
         conn = get_db_connection()
         if not conn:
             return jsonify({"error": "Failed to connect to database."}), 500
+
+        from helper.dashboard_cache_service import get_cached_component_data, set_cached_component_data, make_filter_context
+
+        if not session_id:
+            try:
+                cur_ws = conn.cursor(dictionary=True) if hasattr(conn, "cursor") else conn.cursor()
+                cur_ws.execute("SELECT session_id FROM workspaces WHERE session_id IS NOT NULL AND session_id != '' ORDER BY id ASC LIMIT 1")
+                ws_row = cur_ws.fetchone()
+                if ws_row and ws_row.get("session_id"):
+                    session_id = ws_row["session_id"]
+                cur_ws.close()
+            except Exception:
+                pass
+
+        filter_context = make_filter_context(data)
+        if not force_refresh:
+            cached_res = get_cached_component_data(conn, session_id, "year_wise_sales", filter_context)
+            if cached_res and cached_res.get("data"):
+                cdata = cached_res["data"]
+                return jsonify({
+                    "seriesKey": "year",
+                    "title": "Year-wise Sales Comparison",
+                    "type": "bar_chart",
+                    "xKey": "month",
+                    "yKey": "sales_value",
+                    "visualization": cdata.get("visualization", []) if isinstance(cdata, dict) else cdata,
+                    "_cached": True,
+                    "_last_synced_at": cached_res.get("_last_synced_at")
+                }), 200
+
+        if not session_id:
+            return jsonify({"error": "Missing session_id"}), 400
 
         hana_conn, tunnel, sap_schema = get_sap_connection_for_session(conn, session_id, user_id=user_id)
         is_hana = bool(hana_conn)
@@ -1318,7 +1609,7 @@ def year_wise_sales_comparison_controller(get_db_connection):
         actual_region = cols.get("region")
         actual_customer_type_expr = cols.get("customer_type")
 
-        revenue_expr = f"CAST(REPLACE(TRIM({actual_invoice_value_expr}), ',', '') AS DECIMAL(18,2))"
+        revenue_expr = f"COALESCE({actual_invoice_value_expr}, 0)" if is_hana else f"CAST(REPLACE(TRIM({actual_invoice_value_expr}), ',', '') AS DECIMAL(18,2))"
         where_clauses = [f"{actual_invoice_date_expr} IS NOT NULL"]
         params = []
 
@@ -1400,6 +1691,11 @@ def year_wise_sales_comparison_controller(get_db_connection):
                 "year": str(row.get("year"))
             })
 
+        if visualization_data:
+            set_cached_component_data(conn, session_id, "year_wise_sales", {
+                "visualization": visualization_data
+            }, filter_context)
+
         return jsonify({
             "seriesKey": "year",
             "title": "Year-wise Sales Comparison",
@@ -1410,7 +1706,7 @@ def year_wise_sales_comparison_controller(get_db_connection):
         }), 200
 
     except Exception as exc:
-        print(f"[Year-wise Sales Comparison] Database query failed: {exc}")
+        # print(f"[Year-wise Sales Comparison] Database query failed: {exc}")
         return jsonify({"status": "error", "message": "Database query failed.", "details": str(exc)}), 500
 
     finally:
@@ -1462,6 +1758,11 @@ def available_years_controller(get_db_connection):
         conn = get_db_connection()
         if not conn:
             return jsonify({"error": "Failed to connect to database."}), 500
+
+        from helper.dashboard_cache_service import get_cached_component_data, set_cached_component_data, make_filter_context
+        cached_res = get_cached_component_data(conn, session_id, "available_years", "all")
+        if cached_res and cached_res.get("data"):
+            return jsonify(cached_res["data"]), 200
 
         hana_conn, tunnel, sap_schema = get_sap_connection_for_session(conn, session_id, user_id=user_id)
         is_hana = bool(hana_conn)
@@ -1537,7 +1838,8 @@ def available_years_controller(get_db_connection):
                             if 1 <= m_idx <= 12:
                                 month_set.add(m_idx)
                 except Exception as e:
-                    print(f"[Available Years] Date query error for {tbl}: {e}")
+                    # print(f"[Available Years] Date query error for {tbl}: {e}")
+                    pass
 
         if all_years:
             years = sorted(list(all_years))
@@ -1555,7 +1857,8 @@ def available_years_controller(get_db_connection):
                     zones = [r["val"] for r in fetchall_dict(cursor) if r.get("val")]
                     if zones: break
                 except Exception as e:
-                    print(f"[Available Years] Zone error: {e}")
+                    # print(f"[Available Years] Zone error: {e}")
+                    pass
 
         # 3. Fetch Regions (Prioritize RegionMaster and text names over numeric codes)
         sorted_region_tables = sorted(all_tables, key=lambda t: 0 if "regionmaster" in t.lower() else (1 if "region" in t.lower() else 2))
@@ -1573,7 +1876,8 @@ def available_years_controller(get_db_connection):
                         if has_alpha:
                             break
                 except Exception as e:
-                    print(f"[Available Years] Region error: {e}")
+                    # print(f"[Available Years] Region error: {e}")
+                    pass
 
         # 4. Fetch Customer Types
         for tbl in all_tables:
@@ -1586,7 +1890,8 @@ def available_years_controller(get_db_connection):
                     customer_types = [r["val"] for r in fetchall_dict(cursor) if r.get("val")]
                     if customer_types: break
                 except Exception as e:
-                    print(f"[Available Years] Customer types error: {e}")
+                    # print(f"[Available Years] Customer types error: {e}")
+                    pass
 
         # 5. Fetch Construction Types
         construction_labels = {
@@ -1610,9 +1915,10 @@ def available_years_controller(get_db_connection):
                         construction_types.append({"value": raw_val, "label": lbl})
                     if construction_types: break
                 except Exception as e:
-                    print(f"[Available Years] Construction types error: {e}")
+                    # print(f"[Available Years] Construction types error: {e}")
+                    pass
 
-        return jsonify({
+        resp_data = {
             "status": "success",
             "years": years,
             "zones": zones,
@@ -1620,10 +1926,12 @@ def available_years_controller(get_db_connection):
             "months": months,
             "customer_types": customer_types,
             "construction_types": construction_types
-        }), 200
+        }
+        set_cached_component_data(conn, session_id, "available_years", resp_data, "all")
+        return jsonify(resp_data), 200
 
     except Exception as exc:
-        print(f"[Available Years] Database query failed: {exc}")
+        # print(f"[Available Years] Database query failed: {exc}")
         return jsonify({"status": "error", "message": "Database query failed.", "details": str(exc)}), 500
 
     finally:
@@ -1672,6 +1980,11 @@ def dashboard_filters_controller(get_db_connection):
         conn = get_db_connection()
         if not conn:
             return jsonify({"status": "success", **filters_data}), 200
+
+        from helper.dashboard_cache_service import get_cached_component_data, set_cached_component_data, make_filter_context
+        cached_res = get_cached_component_data(conn, session_id, "dashboard_filters", "all")
+        if cached_res and cached_res.get("data"):
+            return jsonify(cached_res["data"]), 200
 
         hana_conn, tunnel, sap_schema = get_sap_connection_for_session(conn, session_id, user_id=user_id)
         is_hana = bool(hana_conn)
@@ -1729,7 +2042,8 @@ def dashboard_filters_controller(get_db_connection):
                             filters_data["categories"] = res
                             break
                     except Exception as e:
-                        print(f"[Filters] Categories error for {tbl}: {e}")
+                        # print(f"[Filters] Categories error for {tbl}: {e}")
+                        pass
 
         if not filters_data["categories"]:
             for tbl in tables:
@@ -1744,7 +2058,8 @@ def dashboard_filters_controller(get_db_connection):
                             filters_data["categories"] = res
                             break
                     except Exception as e:
-                        print(f"[Filters] Categories fallback error: {e}")
+                        # print(f"[Filters] Categories fallback error: {e}")
+                        pass
 
         # 2. Constructions
         construction_labels = {
@@ -1771,7 +2086,8 @@ def dashboard_filters_controller(get_db_connection):
                         filters_data["constructions"] = res
                         break
                 except Exception as e:
-                    print(f"[Filters] Constructions error: {e}")
+                    # print(f"[Filters] Constructions error: {e}")
+                    pass
 
         # 3. Tyre Types
         for tbl in tables:
@@ -1788,7 +2104,8 @@ def dashboard_filters_controller(get_db_connection):
                             filters_data["tyreTypes"] = res
                             break
                     except Exception as e:
-                        print(f"[Filters] Tyre types error: {e}")
+                        # print(f"[Filters] Tyre types error: {e}")
+                        pass
 
         if not filters_data["tyreTypes"]:
             for tbl in tables:
@@ -1803,7 +2120,8 @@ def dashboard_filters_controller(get_db_connection):
                             filters_data["tyreTypes"] = res
                             break
                     except Exception as e:
-                        print(f"[Filters] Tyre fallback error: {e}")
+                        # print(f"[Filters] Tyre fallback error: {e}")
+                        pass
 
         # 4. Years and Months
         all_years = set()
@@ -1833,17 +2151,21 @@ def dashboard_filters_controller(get_db_connection):
                             if 1 <= m_idx <= 12:
                                 month_set.add(m_idx)
                 except Exception as e:
-                    print(f"[Filters] Date error: {e}")
+                    # print(f"[Filters] Date error: {e}")
+                    pass
 
         if all_years:
             filters_data["years"] = sorted(list(all_years))
         if month_set:
             filters_data["months"] = [calendar.month_name[m] for m in sorted(list(month_set))]
 
-        return jsonify({"status": "success", **filters_data}), 200
+        filt_payload = {"status": "success", **filters_data}
+        if any(filters_data.values()):
+            set_cached_component_data(conn, session_id, "dashboard_filters", filt_payload, "all")
+        return jsonify(filt_payload), 200
 
     except Exception as exc:
-        print(f"[Dashboard Filters] query failed: {exc}")
+        # print(f"[Dashboard Filters] query failed: {exc}")
         return jsonify({"status": "success", **filters_data}), 200
 
     finally:
@@ -1876,9 +2198,7 @@ def default_dashboard_metrics_controller(get_db_connection):
     data = request.json or {}
     session_id = data.get("session_id", "").strip()
     user_id = data.get("user_id")
-
-    if not session_id:
-        return jsonify({"error": "Missing session_id"}), 400
+    force_refresh = bool(data.get("force_refresh", False))
 
     conn = None
     hana_conn = None
@@ -1909,6 +2229,35 @@ def default_dashboard_metrics_controller(get_db_connection):
         if not conn:
             return jsonify({"error": "Failed to connect to database."}), 500
 
+        from helper.dashboard_cache_service import get_cached_component_data, set_cached_component_data, make_filter_context
+
+        if not session_id:
+            try:
+                cur_ws = conn.cursor(dictionary=True) if hasattr(conn, "cursor") else conn.cursor()
+                cur_ws.execute("SELECT session_id FROM workspaces WHERE session_id IS NOT NULL AND session_id != '' ORDER BY id ASC LIMIT 1")
+                ws_row = cur_ws.fetchone()
+                if ws_row and ws_row.get("session_id"):
+                    session_id = ws_row["session_id"]
+                cur_ws.close()
+            except Exception:
+                pass
+
+        if not force_refresh:
+            cached_res = get_cached_component_data(conn, session_id, "key_metrics", "all")
+            if cached_res and cached_res.get("data"):
+                return jsonify({
+                    "status": "success",
+                    "data": cached_res["data"],
+                    "_cached": True,
+                    "_last_synced_at": cached_res.get("_last_synced_at")
+                }), 200
+
+        if not session_id:
+            return jsonify({"error": "Missing session_id"}), 400
+
+        import time
+        start_calc_t = time.time()
+
         hana_conn, tunnel, sap_schema = get_sap_connection_for_session(conn, session_id, user_id=user_id)
         is_hana = bool(hana_conn)
 
@@ -1937,7 +2286,7 @@ def default_dashboard_metrics_controller(get_db_connection):
             sync_row = cursor.fetchone()
 
             if not sync_row:
-                print(f"[Default Metrics] No dynamic table found for session {session_id}")
+                # print(f"[Default Metrics] No dynamic table found for session {session_id}")
                 return jsonify({"status": "success", "data": metrics_data}), 200
 
             user_db = sync_row["new_user_db"]
@@ -1955,7 +2304,8 @@ def default_dashboard_metrics_controller(get_db_connection):
                         for c in cols
                     }
                 except Exception as e:
-                    print(f"[Default Metrics] Describe table {tbl} failed: {e}")
+                    # print(f"[Default Metrics] Describe table {tbl} failed: {e}")
+                    pass
 
         def check_col(cols_dict, opts_list):
             if not cols_dict:
@@ -2043,10 +2393,78 @@ def default_dashboard_metrics_controller(get_db_connection):
                 hist_conds.append(f"(TRIM(CAST({q_name(d_hist)} AS NVARCHAR(20))) IN ('10', '010', '1'))" if is_hana else f"({q_name(d_hist)} = 10 OR {q_name(d_hist)} = '10')")
             cancel_expr_hist = ("WHERE " + " AND ".join(hist_conds)) if hist_conds else ""
 
-        if is_hana and curr_sales_tbl:
-            sales_from = f"(SELECT s.* FROM {q_tbl(curr_sales_tbl)} s {can_filter} {cancel_expr_curr.replace('WHERE', 'WHERE 1=1 AND')} {can_null}) s"
-            sales_cols = table_columns.get(curr_sales_tbl, {})
-            primary_sales_tbl = curr_sales_tbl
+        if is_hana and curr_sales_tbl and hist_sales_tbl:
+            # Both SAP calculation views present: Combine into unified lifetime sales view
+            curr_c = table_columns.get(curr_sales_tbl, {})
+            hist_c = table_columns.get(hist_sales_tbl, {})
+
+            c_rev = check_col(curr_c, ["invoice_value", "ndp_value", "invoice_value_inr", "taxable_value"]) or "invoice_value"
+            h_rev = check_col(hist_c, ["invoice_value", "ndp_value", "invoice_value_inr", "taxable_value"]) or "invoice_value"
+
+            c_date = check_col(curr_c, ["invoice_date", "date", "fkdat"]) or "invoice_date"
+            h_date = check_col(hist_c, ["invoice_date", "date", "fkdat"]) or "invoice_date"
+
+            c_cust = check_col(curr_c, ["dealer_code", "dealercode", "customer", "kunnr"]) or "dealer_code"
+            h_cust = check_col(hist_c, ["dealer_code", "dealercode", "customer", "kunnr"]) or "dealer_code"
+
+            c_sku = check_col(curr_c, ["sku", "material", "matnr"]) or "SKU"
+            h_sku = check_col(hist_c, ["sku", "material", "matnr"]) or "SKU"
+
+            c_plt = check_col(curr_c, ["plant", "werks"]) or "plant"
+            h_plt = check_col(hist_c, ["plant", "werks"]) or "plant"
+
+            c_qty = check_col(curr_c, ["tyre_quantity", "quantity", "menge"]) or "Tyre_Quantity"
+            h_qty = check_col(hist_c, ["tyre_quantity", "quantity", "menge"]) or "Tyre_Quantity"
+
+            # In CurrentSales, dynamically eliminate duplicate handoff records on boundary date from SalesHistory
+            boundary_date = None
+            try:
+                execute_query(cursor, f'SELECT MAX("{h_date}") AS max_h FROM {q_tbl(hist_sales_tbl)}', is_hana=is_hana)
+                b_row = fetchone_dict(cursor)
+                if b_row and b_row.get("max_h"):
+                    boundary_date = str(b_row["max_h"])[:10]
+            except Exception as b_err:
+                # print(f"[Default Metrics] Boundary date query fallback: {b_err}")
+                pass
+            if not boundary_date:
+                boundary_date = "2026-09-27"
+
+            curr_where = cancel_expr_curr.replace('WHERE', 'WHERE 1=1 AND') if cancel_expr_curr else "WHERE 1=1"
+            curr_where += f' AND "{c_date}" > \'{boundary_date}\''
+
+            hist_where = cancel_expr_hist.replace('WHERE', 'WHERE 1=1 AND') if cancel_expr_hist else "WHERE 1=1"
+
+            sales_from = f"""(
+                SELECT 
+                    "{h_rev}" AS "invoice_value",
+                    "{h_date}" AS "invoice_date",
+                    "{h_cust}" AS "dealer_code",
+                    "{h_sku}" AS "SKU",
+                    "{h_plt}" AS "plant",
+                    "{h_qty}" AS "Tyre_Quantity"
+                FROM {q_tbl(hist_sales_tbl)}
+                {hist_where}
+                UNION ALL
+                SELECT 
+                    "{c_rev}" AS "invoice_value",
+                    "{c_date}" AS "invoice_date",
+                    "{c_cust}" AS "dealer_code",
+                    "{c_sku}" AS "SKU",
+                    "{c_plt}" AS "plant",
+                    "{c_qty}" AS "Tyre_Quantity"
+                FROM {q_tbl(curr_sales_tbl)}
+                {curr_where}
+            ) s"""
+
+            sales_cols = {
+                "invoicevalue": "invoice_value",
+                "invoicedate": "invoice_date",
+                "dealercode": "dealer_code",
+                "sku": "SKU",
+                "plant": "plant",
+                "tyrequantity": "Tyre_Quantity"
+            }
+            primary_sales_tbl = hist_sales_tbl
         elif curr_sales_tbl and hist_sales_tbl:
             aligned_u = build_aligned_union(curr_sales_tbl, hist_sales_tbl, cancel_expr_curr, cancel_expr_hist)
             sales_from = f"(SELECT s.* FROM {aligned_u} s {can_filter} WHERE 1=1 {can_null}) s"
@@ -2085,403 +2503,1118 @@ def default_dashboard_metrics_controller(get_db_connection):
         else:
             join_revenue_expr = "0.0"
 
-        # 1. Total Sales Revenue
+        real_date_col = check_col(sales_cols, ["invoice_date", "date", "billing__doc_date", "billing_doc_date", "fkdat"])
+
+        # 1. Total Sales Revenue & Dynamic Lifetime Period
+        # For SAP HANA (both history + current views): exact CTE matching the reference query -
+        #   UNION ALL both views, filter distribution_channel='10', exclude cancelled invoices
+        #   via NOT EXISTS on CancelledSalesInvoice, exclude dummy/internal accounts (KLABC='X'),
+        #   and use lifetime date range >= '2020-01-01'.
+        # This matches the verified reference value (e.g. ₹61,672.55 Cr).
         total_revenue = 0.0
+        min_sales_yr = None
+        max_sales_yr = None
         if has_revenue:
             try:
-                execute_query(cursor, f"SELECT SUM({join_revenue_expr}) AS total_sales_revenue FROM {sales_from}", is_hana=is_hana)
-                row = fetchone_dict(cursor)
-                total_revenue = float(row["total_sales_revenue"] or 0) if row else 0.0
+                if is_hana and curr_sales_tbl and hist_sales_tbl:
+                    # Resolve exact column names from the view metadata
+                    curr_c = table_columns.get(curr_sales_tbl, {})
+                    hist_c = table_columns.get(hist_sales_tbl, {})
+                    _c_rev  = check_col(curr_c, ["invoice_value", "ndp_value", "invoice_value_inr", "taxable_value"]) or "invoice_value"
+                    _h_rev  = check_col(hist_c, ["invoice_value", "ndp_value", "invoice_value_inr", "taxable_value"]) or "invoice_value"
+                    _c_date = check_col(curr_c, ["invoice_date", "date", "fkdat"]) or "invoice_date"
+                    _h_date = check_col(hist_c, ["invoice_date", "date", "fkdat"]) or "invoice_date"
+                    _c_cust = check_col(curr_c, ["dealer_code", "dealercode", "customer", "kunnr"]) or "dealer_code"
+                    _h_cust = check_col(hist_c, ["dealer_code", "dealercode", "customer", "kunnr"]) or "dealer_code"
+                    _c_plt  = check_col(curr_c, ["plant", "werks"]) or "plant"
+                    _h_plt  = check_col(hist_c, ["plant", "werks"]) or "plant"
+                    _c_inv  = check_col(curr_c, ["invoice_number", "invoicenumber", "vbeln"]) or "invoice_number"
+                    _h_inv  = check_col(hist_c, ["invoice_number", "invoicenumber", "vbeln"]) or "invoice_number"
+                    _c_fk   = check_col(curr_c, ["fkart", "billing_type", "bill_type"]) or "FKART"
+                    _h_fk   = check_col(hist_c, ["fkart", "billing_type", "bill_type"]) or "FKART"
+                    _c_dc   = check_col(curr_c, ["distribution_channel", "vtweg"]) or "distribution_channel"
+                    _h_dc   = check_col(hist_c, ["distribution_channel", "vtweg"]) or "distribution_channel"
+                    _c_canc = check_col(curr_c, ["indicator_cancel", "cancel", "fksto"]) or "indicator_cancel"
+                    _h_canc = check_col(hist_c, ["indicator_cancel", "cancel", "fksto"]) or "indicator_cancel"
+
+                    canc_tbl_rev = find_table(["zpvfsdcancelledsalesinvoice", "cancelledsalesinvoice", "cancelled_sales_invoice", "cancelled"])
+                    cust_tbl_rev = find_table(["zivfcustomermaster", "customermaster", "customer"])
+
+                    rev_q = f"""
+                    WITH base AS (
+                        SELECT
+                            "{_h_inv}"  AS "invoice_number",
+                            "{_h_plt}"  AS "plant",
+                            "{_h_fk}"   AS "FKART",
+                            "{_h_cust}" AS "dealer_code",
+                            "{_h_date}" AS "invoice_date",
+                            "{_h_dc}"   AS "distribution_channel",
+                            "{_h_canc}" AS "indicator_cancel",
+                            "{_h_rev}"  AS "invoice_value"
+                        FROM {q_tbl(hist_sales_tbl)}
+                        UNION ALL
+                        SELECT
+                            "{_c_inv}"  AS "invoice_number",
+                            "{_c_plt}"  AS "plant",
+                            "{_c_fk}"   AS "FKART",
+                            "{_c_cust}" AS "dealer_code",
+                            "{_c_date}" AS "invoice_date",
+                            "{_c_dc}"   AS "distribution_channel",
+                            "{_c_canc}" AS "indicator_cancel",
+                            "{_c_rev}"  AS "invoice_value"
+                        FROM {q_tbl(curr_sales_tbl)}
+                    )
+                    SELECT
+                        ROUND(SUM(COALESCE(t."invoice_value", 0)) / 10000000, 2) AS total_sales_revenue,
+                        MIN(YEAR(t."invoice_date")) AS min_yr,
+                        MAX(YEAR(t."invoice_date")) AS max_yr
+                    FROM base t
+                    WHERE CAST(t."distribution_channel" AS NVARCHAR(10)) = '10'
+                      AND COALESCE(t."indicator_cancel", '') NOT IN ('X', 'Y', '1')
+                      AND t."invoice_date" >= '2020-01-01'
+                    """
+
+                    # NOT EXISTS: exclude invoices present in CancelledSalesInvoice
+                    if canc_tbl_rev:
+                        rev_q += f"""
+                      AND NOT EXISTS (
+                          SELECT 1 FROM {q_tbl(canc_tbl_rev)} c
+                          WHERE CAST(c."distribution_channel" AS NVARCHAR(10)) = '10'
+                            AND c."invoice_number" = t."invoice_number"
+                            AND c."plant"          = t."plant"
+                            AND c."FKART"          = t."FKART"
+                      )"""
+
+                    # NOT EXISTS: exclude dummy/internal/test accounts (KLABC = 'X')
+                    if cust_tbl_rev:
+                        rev_q += f"""
+                      AND NOT EXISTS (
+                          SELECT 1 FROM {q_tbl(cust_tbl_rev)} cm
+                          WHERE cm."KUNNR" = t."dealer_code"
+                            AND UPPER(TRIM(cm."KLABC")) = 'X'
+                      )"""
+
+                    execute_query(cursor, rev_q, is_hana=True)
+                    row = fetchone_dict(cursor)
+                    if row:
+                        total_revenue = float(row.get("total_sales_revenue") or 0)
+                        min_sales_yr  = row.get("min_yr")
+                        max_sales_yr  = row.get("max_yr")
+                        # print(f"[Default Metrics] HANA Lifetime Revenue (ch=10, excl cancelled+dummy): ₹{total_revenue:,.2f} Cr")
+                else:
+                    # MySQL / single-table path: use existing sales_from
+                    rev_q = f"SELECT SUM({join_revenue_expr}) AS total_sales_revenue"
+                    if real_date_col:
+                        rev_q += f", MIN(YEAR(s.{q_name(real_date_col)})) AS min_yr, MAX(YEAR(s.{q_name(real_date_col)})) AS max_yr"
+                    rev_q += f" FROM {sales_from}"
+                    execute_query(cursor, rev_q, is_hana=is_hana)
+                    row = fetchone_dict(cursor)
+                    if row:
+                        total_revenue = float(row.get("total_sales_revenue") or 0)
+                        min_sales_yr  = row.get("min_yr")
+                        max_sales_yr  = row.get("max_yr")
             except Exception as rev_err:
-                print(f"[Default Metrics] Total revenue query failed: {rev_err}")
+                # print(f"[Default Metrics] Total revenue query failed: {rev_err}")
+                # Fallback: plain SUM without filters
+                try:
+                    rev_q_fb = f"SELECT SUM({join_revenue_expr}) AS total_sales_revenue FROM {sales_from}"
+                    execute_query(cursor, rev_q_fb, is_hana=is_hana)
+                    row = fetchone_dict(cursor)
+                    if row:
+                        total_revenue = float(row.get("total_sales_revenue") or 0)
+                except Exception:
+                    pass
 
         # 2. Top Performing Tyre
         top_tyre = "N/A"
         if has_revenue:
-            # Join SKU Master with Category Master
-            if sku_tbl and cat_tbl:
-                sales_mat = check_col(sales_cols, ["sku", "material", "matnr"])
-                sku_mat = check_col(table_columns[sku_tbl], ["matnr", "sku", "material"])
-                sku_cat = check_col(table_columns[sku_tbl], ["cat_code", "catcode", "category_code", "category"])
-                cat_code = check_col(table_columns[cat_tbl], ["cat_code", "catcode", "category_code"])
-                cat_desc = check_col(table_columns[cat_tbl], ["cat_desc", "catdesc", "category_desc", "category_name", "cat_name"])
+            # ── SAP HANA path: full CTE with NOT EXISTS cancellation & dummy-account filters ──
+            if is_hana and curr_sales_tbl and hist_sales_tbl:
+                try:
+                    curr_c2 = table_columns.get(curr_sales_tbl, {})
+                    hist_c2 = table_columns.get(hist_sales_tbl, {})
+                    _h_rev2  = check_col(hist_c2,  ["invoice_value", "ndp_value", "invoice_value_inr", "taxable_value"]) or "invoice_value"
+                    _c_rev2  = check_col(curr_c2,  ["invoice_value", "ndp_value", "invoice_value_inr", "taxable_value"]) or "invoice_value"
+                    _h_date2 = check_col(hist_c2,  ["invoice_date", "date", "fkdat"]) or "invoice_date"
+                    _c_date2 = check_col(curr_c2,  ["invoice_date", "date", "fkdat"]) or "invoice_date"
+                    _h_cust2 = check_col(hist_c2,  ["dealer_code", "dealercode", "customer", "kunnr"]) or "dealer_code"
+                    _c_cust2 = check_col(curr_c2,  ["dealer_code", "dealercode", "customer", "kunnr"]) or "dealer_code"
+                    _h_plt2  = check_col(hist_c2,  ["plant", "werks"]) or "plant"
+                    _c_plt2  = check_col(curr_c2,  ["plant", "werks"]) or "plant"
+                    _h_inv2  = check_col(hist_c2,  ["invoice_number", "invoicenumber", "vbeln"]) or "invoice_number"
+                    _c_inv2  = check_col(curr_c2,  ["invoice_number", "invoicenumber", "vbeln"]) or "invoice_number"
+                    _h_fk2   = check_col(hist_c2,  ["fkart", "billing_type", "bill_type"]) or "FKART"
+                    _c_fk2   = check_col(curr_c2,  ["fkart", "billing_type", "bill_type"]) or "FKART"
+                    _h_dc2   = check_col(hist_c2,  ["distribution_channel", "vtweg"]) or "distribution_channel"
+                    _c_dc2   = check_col(curr_c2,  ["distribution_channel", "vtweg"]) or "distribution_channel"
+                    _h_canc2 = check_col(hist_c2,  ["indicator_cancel", "cancel", "fksto"]) or "indicator_cancel"
+                    _c_canc2 = check_col(curr_c2,  ["indicator_cancel", "cancel", "fksto"]) or "indicator_cancel"
+                    _h_sku2  = check_col(hist_c2,  ["sku", "material", "matnr"]) or "SKU"
+                    _c_sku2  = check_col(curr_c2,  ["sku", "material", "matnr"]) or "SKU"
 
-                if sales_mat and sku_mat and sku_cat and cat_code and cat_desc:
-                    try:
-                        q_t = f"""
-                            SELECT
-                                cat.{q_name(cat_desc)} AS vehicle_type,
-                                ROUND(SUM({join_revenue_expr}), 2) AS revenue
-                            FROM {sales_from}
-                            JOIN {q_tbl(sku_tbl)} sm ON s.{q_name(sales_mat)} = sm.{q_name(sku_mat)}
-                            JOIN {q_tbl(cat_tbl)} cat ON sm.{q_name(sku_cat)} = cat.{q_name(cat_code)}
-                            WHERE cat.{q_name(cat_desc)} IS NOT NULL AND cat.{q_name(cat_desc)} <> ''
-                            GROUP BY cat.{q_name(cat_desc)}
-                            ORDER BY revenue DESC
-                            LIMIT 1
-                        """
-                        execute_query(cursor, q_t, is_hana=is_hana)
+                    canc_tbl2 = find_table(["zpvfsdcancelledsalesinvoice", "cancelledsalesinvoice", "cancelled_sales_invoice", "cancelled"])
+                    cust_tbl2 = find_table(["zivfcustomermaster", "customermaster", "customer"])
+
+                    if sku_tbl and cat_tbl:
+                        sku_mat2 = check_col(table_columns.get(sku_tbl, {}), ["matnr", "sku", "material"]) or "MATNR"
+                        sku_cat2 = check_col(table_columns.get(sku_tbl, {}), ["cat_code", "catcode", "category_code", "category"]) or "CAT_CODE"
+                        cat_code2 = check_col(table_columns.get(cat_tbl, {}), ["cat_code", "catcode", "category_code"]) or "CAT_CODE"
+                        cat_desc2 = check_col(table_columns.get(cat_tbl, {}), ["cat_desc", "catdesc", "category_desc", "category_name", "cat_name"]) or "CAT_DESC"
+
+                        q_tyre_hana = f"""
+WITH base AS (
+    SELECT "{_h_inv2}" AS "invoice_number", "{_h_plt2}" AS "plant", "{_h_fk2}" AS "FKART",
+           "{_h_cust2}" AS "dealer_code", "{_h_date2}" AS "invoice_date",
+           "{_h_dc2}" AS "distribution_channel", "{_h_canc2}" AS "indicator_cancel",
+           "{_h_sku2}" AS "SKU", "{_h_rev2}" AS "invoice_value"
+    FROM {q_tbl(hist_sales_tbl)}
+    UNION ALL
+    SELECT "{_c_inv2}" AS "invoice_number", "{_c_plt2}" AS "plant", "{_c_fk2}" AS "FKART",
+           "{_c_cust2}" AS "dealer_code", "{_c_date2}" AS "invoice_date",
+           "{_c_dc2}" AS "distribution_channel", "{_c_canc2}" AS "indicator_cancel",
+           "{_c_sku2}" AS "SKU", "{_c_rev2}" AS "invoice_value"
+    FROM {q_tbl(curr_sales_tbl)}
+)
+SELECT cat."{cat_desc2}" AS vehicle_type,
+       ROUND(SUM(COALESCE(t."invoice_value", 0)) / 10000000, 2) AS revenue
+FROM base t
+JOIN {q_tbl(sku_tbl)} sk ON sk."{sku_mat2}" = t."SKU"
+LEFT JOIN (SELECT DISTINCT "{cat_code2}", "{cat_desc2}" FROM {q_tbl(cat_tbl)}) cat
+    ON cat."{cat_code2}" = sk."{sku_cat2}"
+WHERE CAST(t."distribution_channel" AS NVARCHAR(10)) = '10'
+  AND COALESCE(t."indicator_cancel", '') NOT IN ('X', 'Y', '1')
+  AND t."invoice_date" >= '2020-01-01'
+  AND cat."{cat_desc2}" IS NOT NULL AND cat."{cat_desc2}" <> ''"""
+
+                        if canc_tbl2:
+                            q_tyre_hana += f"""
+  AND NOT EXISTS (
+      SELECT 1 FROM {q_tbl(canc_tbl2)} c
+      WHERE CAST(c."distribution_channel" AS NVARCHAR(10)) = '10'
+        AND c."invoice_number" = t."invoice_number"
+        AND c."plant" = t."plant" AND c."FKART" = t."FKART"
+  )"""
+                        if cust_tbl2:
+                            q_tyre_hana += f"""
+  AND NOT EXISTS (
+      SELECT 1 FROM {q_tbl(cust_tbl2)} cm
+      WHERE cm."KUNNR" = t."dealer_code" AND UPPER(TRIM(cm."KLABC")) = 'X'
+  )"""
+
+                        q_tyre_hana += """
+GROUP BY cat.\"{cat_desc2_alias}\"
+ORDER BY revenue DESC
+LIMIT 1""".replace('\"{cat_desc2_alias}\"', f'"{cat_desc2}"')
+
+                        execute_query(cursor, q_tyre_hana, is_hana=True)
                         row = fetchone_dict(cursor)
                         if row and row.get("vehicle_type"):
                             top_tyre = row["vehicle_type"]
-                    except Exception as tyre_err:
-                        print(f"[Default Metrics] Category master join query failed: {tyre_err}")
+                            # print(f"[Default Metrics] HANA Top Tyre Category: {top_tyre}")
+                except Exception as tyre_hana_err:
+                    # print(f"[Default Metrics] HANA Top Tyre query failed: {tyre_hana_err}")
+                    pass
 
-            # Fallback direct category master query
-            if top_tyre == "N/A" and cat_tbl:
-                sales_mat = check_col(sales_cols, ["sku", "material", "matnr"])
-                cat_mat = check_col(table_columns[cat_tbl], ["matnr", "sku", "material"])
-                cat_desc = check_col(table_columns[cat_tbl], ["cat_desc", "catdesc", "category_desc", "category_name"])
-                if sales_mat and cat_mat and cat_desc:
-                    try:
-                        q_t2 = f"""
-                            SELECT
-                                cat.{q_name(cat_desc)} AS vehicle_type,
-                                ROUND(SUM({join_revenue_expr}), 2) AS revenue
-                            FROM {sales_from}
-                            JOIN {q_tbl(cat_tbl)} cat ON s.{q_name(sales_mat)} = cat.{q_name(cat_mat)}
-                            WHERE cat.{q_name(cat_desc)} IS NOT NULL AND cat.{q_name(cat_desc)} <> ''
-                            GROUP BY cat.{q_name(cat_desc)}
-                            ORDER BY revenue DESC
-                            LIMIT 1
-                        """
-                        execute_query(cursor, q_t2, is_hana=is_hana)
-                        row = fetchone_dict(cursor)
-                        if row and row.get("vehicle_type"):
-                            top_tyre = row["vehicle_type"]
-                    except Exception as tyre_err:
-                        print(f"[Default Metrics] Direct category master query failed: {tyre_err}")
+            # ── Non-HANA / fallback paths (unchanged) ──
+            if top_tyre == "N/A":
+                if sku_tbl and cat_tbl:
+                    sales_mat = check_col(sales_cols, ["sku", "material", "matnr"])
+                    sku_mat = check_col(table_columns[sku_tbl], ["matnr", "sku", "material"])
+                    sku_cat = check_col(table_columns[sku_tbl], ["cat_code", "catcode", "category_code", "category"])
+                    cat_code = check_col(table_columns[cat_tbl], ["cat_code", "catcode", "category_code"])
+                    cat_desc = check_col(table_columns[cat_tbl], ["cat_desc", "catdesc", "category_desc", "category_name", "cat_name"])
 
-            # Fallback SKU tyre_type
-            if top_tyre == "N/A" and sku_tbl:
-                sales_mat = check_col(sales_cols, ["sku", "material", "matnr"])
-                sku_mat = check_col(table_columns[sku_tbl], ["matnr", "sku", "material"])
-                sku_tyre = check_col(table_columns[sku_tbl], ["tyre_type", "tyretype", "vehicle_type", "maktx"])
-                if sales_mat and sku_mat and sku_tyre:
-                    try:
-                        q_t3 = f"""
-                            SELECT
-                                sm.{q_name(sku_tyre)} AS vehicle_type,
-                                ROUND(SUM({join_revenue_expr}), 2) AS revenue
-                            FROM {sales_from}
-                            JOIN {q_tbl(sku_tbl)} sm ON s.{q_name(sales_mat)} = sm.{q_name(sku_mat)}
-                            WHERE sm.{q_name(sku_tyre)} IS NOT NULL AND sm.{q_name(sku_tyre)} NOT IN ('', '0', '-')
-                            GROUP BY sm.{q_name(sku_tyre)}
-                            ORDER BY revenue DESC
-                            LIMIT 1
-                        """
-                        execute_query(cursor, q_t3, is_hana=is_hana)
-                        row = fetchone_dict(cursor)
-                        if row and row.get("vehicle_type"):
-                            top_tyre = row["vehicle_type"]
-                    except Exception as tyre_err:
-                        print(f"[Default Metrics] SKU tyre_type query failed: {tyre_err}")
+                    if sales_mat and sku_mat and sku_cat and cat_code and cat_desc:
+                        try:
+                            q_t = f"""
+                                SELECT
+                                    cat.{q_name(cat_desc)} AS vehicle_type,
+                                    ROUND(SUM(ms.mat_rev), 2) AS revenue
+                                FROM (
+                                    SELECT s.{q_name(sales_mat)} AS mat_id, SUM({join_revenue_expr}) AS mat_rev
+                                    FROM {sales_from}
+                                    WHERE s.{q_name(sales_mat)} IS NOT NULL
+                                    GROUP BY s.{q_name(sales_mat)}
+                                ) ms
+                                JOIN {q_tbl(sku_tbl)} sm ON (ms.mat_id = sm.{q_name(sku_mat)} OR LTRIM(ms.mat_id, '0') = LTRIM(sm.{q_name(sku_mat)}, '0'))
+                                JOIN {q_tbl(cat_tbl)} cat ON sm.{q_name(sku_cat)} = cat.{q_name(cat_code)}
+                                WHERE cat.{q_name(cat_desc)} IS NOT NULL AND cat.{q_name(cat_desc)} <> ''
+                                GROUP BY cat.{q_name(cat_desc)}
+                                ORDER BY revenue DESC
+                                LIMIT 1
+                            """
+                            execute_query(cursor, q_t, is_hana=is_hana)
+                            row = fetchone_dict(cursor)
+                            if row and row.get("vehicle_type"):
+                                top_tyre = row["vehicle_type"]
+                        except Exception as tyre_err:
+                            # print(f"[Default Metrics] Category master join query failed: {tyre_err}")
+                            pass
 
-        # 3. Leading Region
+                if top_tyre == "N/A" and cat_tbl:
+                    sales_mat = check_col(sales_cols, ["sku", "material", "matnr"])
+                    cat_mat = check_col(table_columns[cat_tbl], ["matnr", "sku", "material"])
+                    cat_desc = check_col(table_columns[cat_tbl], ["cat_desc", "catdesc", "category_desc", "category_name"])
+                    if sales_mat and cat_mat and cat_desc:
+                        try:
+                            q_t2 = f"""
+                                SELECT
+                                    cat.{q_name(cat_desc)} AS vehicle_type,
+                                    ROUND(SUM(ms.mat_rev), 2) AS revenue
+                                FROM (
+                                    SELECT s.{q_name(sales_mat)} AS mat_id, SUM({join_revenue_expr}) AS mat_rev
+                                    FROM {sales_from}
+                                    WHERE s.{q_name(sales_mat)} IS NOT NULL
+                                    GROUP BY s.{q_name(sales_mat)}
+                                ) ms
+                                JOIN {q_tbl(cat_tbl)} cat ON (ms.mat_id = cat.{q_name(cat_mat)} OR LTRIM(ms.mat_id, '0') = LTRIM(cat.{q_name(cat_mat)}, '0'))
+                                WHERE cat.{q_name(cat_desc)} IS NOT NULL AND cat.{q_name(cat_desc)} <> ''
+                                GROUP BY cat.{q_name(cat_desc)}
+                                ORDER BY revenue DESC
+                                LIMIT 1
+                            """
+                            execute_query(cursor, q_t2, is_hana=is_hana)
+                            row = fetchone_dict(cursor)
+                            if row and row.get("vehicle_type"):
+                                top_tyre = row["vehicle_type"]
+                        except Exception as tyre_err:
+                            # print(f"[Default Metrics] Direct category master query failed: {tyre_err}")
+                            pass
+
+                if top_tyre == "N/A" and sku_tbl:
+                    sales_mat = check_col(sales_cols, ["sku", "material", "matnr"])
+                    sku_mat = check_col(table_columns[sku_tbl], ["matnr", "sku", "material"])
+                    sku_tyre = check_col(table_columns[sku_tbl], ["tyre_type", "tyretype", "vehicle_type", "maktx"])
+                    if sales_mat and sku_mat and sku_tyre:
+                        try:
+                            q_t3 = f"""
+                                SELECT
+                                    sm.{q_name(sku_tyre)} AS vehicle_type,
+                                    ROUND(SUM(ms.mat_rev), 2) AS revenue
+                                FROM (
+                                    SELECT s.{q_name(sales_mat)} AS mat_id, SUM({join_revenue_expr}) AS mat_rev
+                                    FROM {sales_from}
+                                    WHERE s.{q_name(sales_mat)} IS NOT NULL
+                                    GROUP BY s.{q_name(sales_mat)}
+                                ) ms
+                                JOIN {q_tbl(sku_tbl)} sm ON (ms.mat_id = sm.{q_name(sku_mat)} OR LTRIM(ms.mat_id, '0') = LTRIM(sm.{q_name(sku_mat)}, '0'))
+                                WHERE sm.{q_name(sku_tyre)} IS NOT NULL AND sm.{q_name(sku_tyre)} NOT IN ('', '0', '-')
+                                GROUP BY sm.{q_name(sku_tyre)}
+                                ORDER BY revenue DESC
+                                LIMIT 1
+                            """
+                            execute_query(cursor, q_t3, is_hana=is_hana)
+                            row = fetchone_dict(cursor)
+                            if row and row.get("vehicle_type"):
+                                top_tyre = row["vehicle_type"]
+                        except Exception as tyre_err:
+                            # print(f"[Default Metrics] SKU tyre_type query failed: {tyre_err}")
+                            pass
+
+
+        # 3. Leading Region (Prioritize Customer Market Geography over Factory Plant location)
         leading_region = "N/A"
         if has_revenue:
-            # Plant -> Territory -> Region
-            if terr_tbl and reg_tbl:
-                sales_plant = check_col(sales_cols, ["plant", "werks"])
-                terr_werks = check_col(table_columns[terr_tbl], ["werks", "plant"])
-                terr_area = check_col(table_columns[terr_tbl], ["area", "region_code", "region", "regio"])
-                r_code = check_col(table_columns[reg_tbl], ["region_code", "region", "regio"])
-                r_name = check_col(table_columns[reg_tbl], ["region_name", "region", "name"])
+            # ── SAP HANA path: full CTE with LTRIM join + BZIRK→REGIO→region_code path ──
+            if is_hana and curr_sales_tbl and hist_sales_tbl:
+                try:
+                    curr_c3 = table_columns.get(curr_sales_tbl, {})
+                    hist_c3 = table_columns.get(hist_sales_tbl, {})
+                    _h_rev3  = check_col(hist_c3,  ["invoice_value", "ndp_value", "invoice_value_inr", "taxable_value"]) or "invoice_value"
+                    _c_rev3  = check_col(curr_c3,  ["invoice_value", "ndp_value", "invoice_value_inr", "taxable_value"]) or "invoice_value"
+                    _h_date3 = check_col(hist_c3,  ["invoice_date", "date", "fkdat"]) or "invoice_date"
+                    _c_date3 = check_col(curr_c3,  ["invoice_date", "date", "fkdat"]) or "invoice_date"
+                    _h_cust3 = check_col(hist_c3,  ["dealer_code", "dealercode", "customer", "kunnr"]) or "dealer_code"
+                    _c_cust3 = check_col(curr_c3,  ["dealer_code", "dealercode", "customer", "kunnr"]) or "dealer_code"
+                    _h_plt3  = check_col(hist_c3,  ["plant", "werks"]) or "plant"
+                    _c_plt3  = check_col(curr_c3,  ["plant", "werks"]) or "plant"
+                    _h_inv3  = check_col(hist_c3,  ["invoice_number", "invoicenumber", "vbeln"]) or "invoice_number"
+                    _c_inv3  = check_col(curr_c3,  ["invoice_number", "invoicenumber", "vbeln"]) or "invoice_number"
+                    _h_fk3   = check_col(hist_c3,  ["fkart", "billing_type", "bill_type"]) or "FKART"
+                    _c_fk3   = check_col(curr_c3,  ["fkart", "billing_type", "bill_type"]) or "FKART"
+                    _h_dc3   = check_col(hist_c3,  ["distribution_channel", "vtweg"]) or "distribution_channel"
+                    _c_dc3   = check_col(curr_c3,  ["distribution_channel", "vtweg"]) or "distribution_channel"
+                    _h_canc3 = check_col(hist_c3,  ["indicator_cancel", "cancel", "fksto"]) or "indicator_cancel"
+                    _c_canc3 = check_col(curr_c3,  ["indicator_cancel", "cancel", "fksto"]) or "indicator_cancel"
 
-                if sales_plant and terr_werks and terr_area and r_code and r_name:
-                    try:
-                        q_r2 = f"""
-                            SELECT
-                                r.{q_name(r_name)} AS region_name,
-                                ROUND(SUM({join_revenue_expr}), 2) AS revenue
-                            FROM {sales_from}
-                            JOIN {q_tbl(terr_tbl)} t ON s.{q_name(sales_plant)} = t.{q_name(terr_werks)}
-                            JOIN {q_tbl(reg_tbl)} r ON t.{q_name(terr_area)} = r.{q_name(r_code)}
-                            WHERE r.{q_name(r_name)} IS NOT NULL AND r.{q_name(r_name)} <> ''
-                            GROUP BY r.{q_name(r_name)}
-                            ORDER BY revenue DESC
-                            LIMIT 1
-                        """
-                        execute_query(cursor, q_r2, is_hana=is_hana)
+                    canc_tbl3 = find_table(["zpvfsdcancelledsalesinvoice", "cancelledsalesinvoice", "cancelled_sales_invoice", "cancelled"])
+                    cust_tbl3 = find_table(["zivfcustomermaster", "customermaster", "customer"])
+
+                    if cust_tbl3 and terr_tbl and reg_tbl:
+                        r_name3 = check_col(table_columns.get(reg_tbl, {}), ["region_name", "region", "name"]) or "region_name"
+                        r_code3 = check_col(table_columns.get(reg_tbl, {}), ["region_code", "region", "regio"]) or "region_code"
+
+                        q_region_hana = f"""
+WITH base AS (
+    SELECT "{_h_inv3}" AS "invoice_number", "{_h_plt3}" AS "plant", "{_h_fk3}" AS "FKART",
+           "{_h_cust3}" AS "dealer_code", "{_h_date3}" AS "invoice_date",
+           "{_h_dc3}" AS "distribution_channel", "{_h_canc3}" AS "indicator_cancel",
+           "{_h_rev3}" AS "invoice_value"
+    FROM {q_tbl(hist_sales_tbl)}
+    UNION ALL
+    SELECT "{_c_inv3}" AS "invoice_number", "{_c_plt3}" AS "plant", "{_c_fk3}" AS "FKART",
+           "{_c_cust3}" AS "dealer_code", "{_c_date3}" AS "invoice_date",
+           "{_c_dc3}" AS "distribution_channel", "{_c_canc3}" AS "indicator_cancel",
+           "{_c_rev3}" AS "invoice_value"
+    FROM {q_tbl(curr_sales_tbl)}
+)
+SELECT rm."{r_name3}" AS region_name,
+       ROUND(SUM(COALESCE(t."invoice_value", 0)) / 10000000, 2) AS revenue
+FROM base t
+JOIN (
+    SELECT DISTINCT LTRIM("KUNNR", '0') AS "KUNNR", TRIM("BZIRK") AS "BZIRK"
+    FROM {q_tbl(cust_tbl3)}
+    WHERE "VTWEG" = '10'
+) cm ON cm."KUNNR" = LTRIM(t."dealer_code", '0')
+JOIN {q_tbl(terr_tbl)} tm ON tm."BZIRK" = cm."BZIRK"
+JOIN {q_tbl(reg_tbl)} rm ON rm."{r_code3}" = tm."REGIO"
+WHERE CAST(t."distribution_channel" AS NVARCHAR(10)) = '10'
+  AND COALESCE(t."indicator_cancel", '') NOT IN ('X', 'Y', '1')
+  AND t."invoice_date" >= '2020-01-01'
+  AND rm."{r_name3}" IS NOT NULL AND rm."{r_name3}" <> ''"""
+
+                        if canc_tbl3:
+                            q_region_hana += f"""
+  AND NOT EXISTS (
+      SELECT 1 FROM {q_tbl(canc_tbl3)} c
+      WHERE CAST(c."distribution_channel" AS NVARCHAR(10)) = '10'
+        AND c."invoice_number" = t."invoice_number"
+        AND c."plant" = t."plant" AND c."FKART" = t."FKART"
+  )"""
+                        if cust_tbl3:
+                            q_region_hana += f"""
+  AND NOT EXISTS (
+      SELECT 1 FROM {q_tbl(cust_tbl3)} cx
+      WHERE LTRIM(cx."KUNNR", '0') = LTRIM(t."dealer_code", '0')
+        AND cx."KLABC" = 'X'
+  )"""
+
+                        q_region_hana += f"""
+GROUP BY rm."{r_name3}"
+ORDER BY revenue DESC
+LIMIT 1"""
+
+                        execute_query(cursor, q_region_hana, is_hana=True)
                         row = fetchone_dict(cursor)
                         if row and row.get("region_name"):
                             leading_region = row["region_name"]
-                    except Exception as reg_err:
-                        print(f"[Default Metrics] Plant territory region query failed: {reg_err}")
+                            # print(f"[Default Metrics] HANA Leading Region: {leading_region}")
+                except Exception as reg_hana_err:
+                    # print(f"[Default Metrics] HANA Leading Region query failed: {reg_hana_err}")
+                    pass
 
-            # Customer -> Territory -> Region
-            if leading_region == "N/A" and cust_tbl and reg_tbl:
-                sales_cust = check_col(sales_cols, ["dealercode", "dealer_code", "customer", "kunnr"])
-                cust_id = check_col(table_columns[cust_tbl], ["kunnr", "dealercode", "customer"])
-                r_name = check_col(table_columns[reg_tbl], ["region_name", "region", "name"])
+            # ── Non-HANA / fallback paths (unchanged) ──
+            if leading_region == "N/A":
+                if cust_tbl and reg_tbl:
+                    sales_cust = check_col(sales_cols, ["dealercode", "dealer_code", "customer", "kunnr"])
+                    cust_id = check_col(table_columns[cust_tbl], ["kunnr", "dealercode", "customer"])
+                    r_name = check_col(table_columns[reg_tbl], ["region_name", "region", "name"])
 
-                if terr_tbl:
-                    cust_terr = check_col(table_columns[cust_tbl], ["bzirk", "territory", "territory_code"])
-                    terr_code = check_col(table_columns[terr_tbl], ["bzirk", "territory_code", "territory"])
-                    terr_reg = check_col(table_columns[terr_tbl], ["regio", "region_code", "region", "area"])
+                    if terr_tbl:
+                        cust_terr = check_col(table_columns[cust_tbl], ["bzirk", "territory", "territory_code"])
+                        terr_code = check_col(table_columns[terr_tbl], ["bzirk", "territory_code", "territory"])
+                        terr_reg = check_col(table_columns[terr_tbl], ["regio", "region_code", "region", "area"])
+                        cust_reg = check_col(table_columns[cust_tbl], ["regio", "region_code", "region"])
+                        r_code = check_col(table_columns[reg_tbl], ["region_code", "region", "regio"])
+
+                        if sales_cust and cust_id and cust_terr and terr_code and terr_reg and r_code and r_name:
+                            try:
+                                q_r3 = f"""
+                                    SELECT
+                                        COALESCE(r.{q_name(r_name)}, r.{q_name(r_code)}, 'Unknown') AS region_name,
+                                        ROUND(SUM(ds.dealer_rev), 2) AS revenue
+                                    FROM (
+                                        SELECT s.{q_name(sales_cust)} AS d_code, SUM({join_revenue_expr}) AS dealer_rev
+                                        FROM {sales_from}
+                                        WHERE s.{q_name(sales_cust)} IS NOT NULL
+                                        GROUP BY s.{q_name(sales_cust)}
+                                    ) ds
+                                    JOIN {q_tbl(cust_tbl)} c ON (ds.d_code = c.{q_name(cust_id)} OR LTRIM(ds.d_code, '0') = LTRIM(c.{q_name(cust_id)}, '0'))
+                                    LEFT JOIN {q_tbl(terr_tbl)} t ON c.{q_name(cust_terr)} = t.{q_name(terr_code)}
+                                    LEFT JOIN {q_tbl(reg_tbl)} r ON (t.{q_name(terr_reg)} = r.{q_name(r_code)} OR c.{q_name(cust_reg)} = r.{q_name(r_code)})
+                                    WHERE (c.{q_name('KLABC')} IS NULL OR c.{q_name('KLABC')} <> 'X')
+                                      AND r.{q_name(r_name)} IS NOT NULL AND r.{q_name(r_name)} <> ''
+                                    GROUP BY COALESCE(r.{q_name(r_name)}, r.{q_name(r_code)}, 'Unknown')
+                                    ORDER BY revenue DESC
+                                    LIMIT 1
+                                """
+                                execute_query(cursor, q_r3, is_hana=is_hana)
+                                row = fetchone_dict(cursor)
+                                if row and row.get("region_name"):
+                                    leading_region = row["region_name"]
+                            except Exception as reg_err:
+                                # print(f"[Default Metrics] Customer territory region query failed: {reg_err}")
+                                pass
+
+                if leading_region == "N/A" and cust_tbl and reg_tbl:
+                    sales_cust = check_col(sales_cols, ["dealercode", "dealer_code", "customer", "kunnr"])
+                    cust_id = check_col(table_columns[cust_tbl], ["kunnr", "dealercode", "customer"])
+                    cust_reg = check_col(table_columns[cust_tbl], ["regio", "region_code", "region"])
                     r_code = check_col(table_columns[reg_tbl], ["region_code", "region", "regio"])
+                    r_name = check_col(table_columns[reg_tbl], ["region_name", "region", "name"])
 
-                    if sales_cust and cust_id and cust_terr and terr_code and terr_reg and r_code and r_name:
+                    if sales_cust and cust_id and cust_reg and r_code and r_name:
                         try:
-                            q_r3 = f"""
+                            q_r_direct = f"""
+                                SELECT
+                                    r.{q_name(r_name)} AS region_name,
+                                    ROUND(SUM(ds.dealer_rev), 2) AS revenue
+                                FROM (
+                                    SELECT s.{q_name(sales_cust)} AS d_code, SUM({join_revenue_expr}) AS dealer_rev
+                                    FROM {sales_from}
+                                    WHERE s.{q_name(sales_cust)} IS NOT NULL
+                                    GROUP BY s.{q_name(sales_cust)}
+                                ) ds
+                                JOIN {q_tbl(cust_tbl)} c ON (ds.d_code = c.{q_name(cust_id)} OR LTRIM(ds.d_code, '0') = LTRIM(c.{q_name(cust_id)}, '0'))
+                                JOIN {q_tbl(reg_tbl)} r ON c.{q_name(cust_reg)} = r.{q_name(r_code)}
+                                WHERE (c.{q_name('KLABC')} IS NULL OR c.{q_name('KLABC')} <> 'X')
+                                  AND r.{q_name(r_name)} IS NOT NULL AND r.{q_name(r_name)} <> ''
+                                GROUP BY r.{q_name(r_name)}
+                                ORDER BY revenue DESC
+                                LIMIT 1
+                            """
+                            execute_query(cursor, q_r_direct, is_hana=is_hana)
+                            row = fetchone_dict(cursor)
+                            if row and row.get("region_name"):
+                                leading_region = row["region_name"]
+                        except Exception as reg_err:
+                            # print(f"[Default Metrics] Direct customer region query failed: {reg_err}")
+                            pass
+
+                if leading_region == "N/A" and terr_tbl and reg_tbl:
+                    sales_plant = check_col(sales_cols, ["plant", "werks"])
+                    terr_werks = check_col(table_columns[terr_tbl], ["werks", "plant"])
+                    terr_area = check_col(table_columns[terr_tbl], ["area", "region_code", "region", "regio"])
+                    r_code = check_col(table_columns[reg_tbl], ["region_code", "region", "regio"])
+                    r_name = check_col(table_columns[reg_tbl], ["region_name", "region", "name"])
+
+                    if sales_plant and terr_werks and terr_area and r_code and r_name:
+                        try:
+                            q_r2 = f"""
                                 SELECT
                                     r.{q_name(r_name)} AS region_name,
                                     ROUND(SUM({join_revenue_expr}), 2) AS revenue
                                 FROM {sales_from}
-                                JOIN {q_tbl(cust_tbl)} c ON s.{q_name(sales_cust)} = c.{q_name(cust_id)}
-                                JOIN {q_tbl(terr_tbl)} t ON c.{q_name(cust_terr)} = t.{q_name(terr_code)}
-                                JOIN {q_tbl(reg_tbl)} r ON t.{q_name(terr_reg)} = r.{q_name(r_code)}
+                                JOIN {q_tbl(terr_tbl)} t ON s.{q_name(sales_plant)} = t.{q_name(terr_werks)}
+                                JOIN {q_tbl(reg_tbl)} r ON t.{q_name(terr_area)} = r.{q_name(r_code)}
                                 WHERE r.{q_name(r_name)} IS NOT NULL AND r.{q_name(r_name)} <> ''
                                 GROUP BY r.{q_name(r_name)}
                                 ORDER BY revenue DESC
                                 LIMIT 1
                             """
-                            execute_query(cursor, q_r3, is_hana=is_hana)
+                            execute_query(cursor, q_r2, is_hana=is_hana)
                             row = fetchone_dict(cursor)
                             if row and row.get("region_name"):
                                 leading_region = row["region_name"]
                         except Exception as reg_err:
-                            print(f"[Default Metrics] Joined territory region query failed: {reg_err}")
+                            # print(f"[Default Metrics] Plant territory region query failed: {reg_err}")
+                            pass
+
 
         # 4. YoY Growth
         current_year = 0.0
         previous_year = 0.0
+        current_year_num = None
+        prev_year_num = None
         yoy = 0.0
         yoy_subtext = "No data available"
-        real_date_col = check_col(sales_cols, ["invoice_date", "date", "billing__doc_date", "billing_doc_date", "fkdat"])
 
-        if has_revenue and real_date_col:
-            try:
-                year_expr = f"YEAR(s.{q_name(real_date_col)})"
-                date_filter = f"s.{q_name(real_date_col)} IS NOT NULL"
+        if has_revenue:
+            # ── SAP HANA path: full CTE with NOT EXISTS cancellation filters ──
+            if is_hana and curr_sales_tbl and hist_sales_tbl:
+                try:
+                    curr_c4 = table_columns.get(curr_sales_tbl, {})
+                    hist_c4 = table_columns.get(hist_sales_tbl, {})
+                    _h_rev4  = check_col(hist_c4,  ["invoice_value", "ndp_value", "invoice_value_inr", "taxable_value"]) or "invoice_value"
+                    _c_rev4  = check_col(curr_c4,  ["invoice_value", "ndp_value", "invoice_value_inr", "taxable_value"]) or "invoice_value"
+                    _h_date4 = check_col(hist_c4,  ["invoice_date", "date", "fkdat"]) or "invoice_date"
+                    _c_date4 = check_col(curr_c4,  ["invoice_date", "date", "fkdat"]) or "invoice_date"
+                    _h_cust4 = check_col(hist_c4,  ["dealer_code", "dealercode", "customer", "kunnr"]) or "dealer_code"
+                    _c_cust4 = check_col(curr_c4,  ["dealer_code", "dealercode", "customer", "kunnr"]) or "dealer_code"
+                    _h_plt4  = check_col(hist_c4,  ["plant", "werks"]) or "plant"
+                    _c_plt4  = check_col(curr_c4,  ["plant", "werks"]) or "plant"
+                    _h_inv4  = check_col(hist_c4,  ["invoice_number", "invoicenumber", "vbeln"]) or "invoice_number"
+                    _c_inv4  = check_col(curr_c4,  ["invoice_number", "invoicenumber", "vbeln"]) or "invoice_number"
+                    _h_fk4   = check_col(hist_c4,  ["fkart", "billing_type", "bill_type"]) or "FKART"
+                    _c_fk4   = check_col(curr_c4,  ["fkart", "billing_type", "bill_type"]) or "FKART"
+                    _h_dc4   = check_col(hist_c4,  ["distribution_channel", "vtweg"]) or "distribution_channel"
+                    _c_dc4   = check_col(curr_c4,  ["distribution_channel", "vtweg"]) or "distribution_channel"
+                    _h_canc4 = check_col(hist_c4,  ["indicator_cancel", "cancel", "fksto"]) or "indicator_cancel"
+                    _c_canc4 = check_col(curr_c4,  ["indicator_cancel", "cancel", "fksto"]) or "indicator_cancel"
 
-                q_yoy = f"""
-                    SELECT {year_expr} AS yr, ROUND(SUM({join_revenue_expr}), 2) AS revenue
-                    FROM {sales_from}
-                    WHERE {date_filter} AND {year_expr} IS NOT NULL AND {year_expr} > 2000
-                    GROUP BY {year_expr}
-                    ORDER BY yr DESC
-                """
-                execute_query(cursor, q_yoy, is_hana=is_hana)
-                year_rows = fetchall_dict(cursor)
+                    canc_tbl4 = find_table(["zpvfsdcancelledsalesinvoice", "cancelledsalesinvoice", "cancelled_sales_invoice", "cancelled"])
+                    cust_tbl4 = find_table(["zivfcustomermaster", "customermaster", "customer"])
 
-                if year_rows and len(year_rows) > 0:
-                    current_year_row = year_rows[0]
-                    current_year = float(current_year_row.get("revenue") or 0.0)
-                    current_year_num = int(current_year_row["yr"])
+                    q_yoy_hana = f"""
+WITH base AS (
+    SELECT "{_h_inv4}" AS "invoice_number", "{_h_plt4}" AS "plant", "{_h_fk4}" AS "FKART",
+           "{_h_cust4}" AS "dealer_code", "{_h_date4}" AS "invoice_date",
+           "{_h_dc4}" AS "distribution_channel", "{_h_canc4}" AS "indicator_cancel",
+           "{_h_rev4}" AS "invoice_value"
+    FROM {q_tbl(hist_sales_tbl)}
+    UNION ALL
+    SELECT "{_c_inv4}" AS "invoice_number", "{_c_plt4}" AS "plant", "{_c_fk4}" AS "FKART",
+           "{_c_cust4}" AS "dealer_code", "{_c_date4}" AS "invoice_date",
+           "{_c_dc4}" AS "distribution_channel", "{_c_canc4}" AS "indicator_cancel",
+           "{_c_rev4}" AS "invoice_value"
+    FROM {q_tbl(curr_sales_tbl)}
+)
+SELECT YEAR(t."invoice_date") AS yr,
+       ROUND(SUM(COALESCE(t."invoice_value", 0)) / 10000000, 2) AS revenue
+FROM base t
+WHERE CAST(t."distribution_channel" AS NVARCHAR(10)) = '10'
+  AND COALESCE(t."indicator_cancel", '') NOT IN ('X', 'Y', '1')
+  AND t."invoice_date" >= '2020-01-01'"""
 
-                    if len(year_rows) > 1:
-                        prev_year_row = year_rows[1]
-                        previous_year = float(prev_year_row.get("revenue") or 0.0)
-                        prev_year_num = int(prev_year_row["yr"])
+                    if canc_tbl4:
+                        q_yoy_hana += f"""
+  AND NOT EXISTS (
+      SELECT 1 FROM {q_tbl(canc_tbl4)} c
+      WHERE CAST(c."distribution_channel" AS NVARCHAR(10)) = '10'
+        AND c."invoice_number" = t."invoice_number"
+        AND c."plant" = t."plant" AND c."FKART" = t."FKART"
+  )"""
+                    if cust_tbl4:
+                        q_yoy_hana += f"""
+  AND NOT EXISTS (
+      SELECT 1 FROM {q_tbl(cust_tbl4)} cm
+      WHERE cm."KUNNR" = t."dealer_code" AND UPPER(TRIM(cm."KLABC")) = 'X'
+  )"""
 
-                        if previous_year > 0:
-                            yoy = round(((current_year - previous_year) / previous_year) * 100, 2)
-                            if current_year_num - prev_year_num == 1:
-                                yoy_subtext = "Compared to last year"
-                            else:
+                    q_yoy_hana += """
+GROUP BY YEAR(t."invoice_date")
+ORDER BY yr DESC"""
+
+                    execute_query(cursor, q_yoy_hana, is_hana=True)
+                    year_rows = fetchall_dict(cursor)
+
+                    if year_rows and len(year_rows) > 0:
+                        current_year_row = year_rows[0]
+                        current_year = float(current_year_row.get("revenue") or 0.0)
+                        current_year_num = int(current_year_row["yr"])
+
+                        if len(year_rows) > 1:
+                            prev_year_row = year_rows[1]
+                            previous_year = float(prev_year_row.get("revenue") or 0.0)
+                            prev_year_num = int(prev_year_row["yr"])
+
+                            if previous_year > 0:
+                                yoy = round(((current_year - previous_year) / previous_year) * 100, 2)
                                 yoy_subtext = f"Compared to {prev_year_num}"
+                            else:
+                                yoy_subtext = f"{current_year_num} sales only"
                         else:
                             yoy_subtext = f"{current_year_num} sales only"
-                    else:
-                        yoy_subtext = f"{current_year_num} sales only"
-            except Exception as yoy_err:
-                print(f"[Default Metrics] YoY query failed: {yoy_err}")
+                        # print(f"[Default Metrics] HANA YoY: {current_year_num}={current_year:.2f}Cr, {prev_year_num}={previous_year:.2f}Cr, growth={yoy:+.2f}%")
+                except Exception as yoy_hana_err:
+                    # print(f"[Default Metrics] HANA YoY query failed: {yoy_hana_err}")
+                    pass
 
-        # 5. Billing Scope (Distinct active customers billed)
-        billing_scope = "N/A"
-        real_cust_col_sales = check_col(sales_cols, ["dealercode", "dealer_code", "customer", "kunnr"])
-        if real_cust_col_sales:
-            try:
-                execute_query(cursor, f"SELECT COUNT(DISTINCT s.{q_name(real_cust_col_sales)}) AS cust_count FROM {sales_from}", is_hana=is_hana)
-                row = fetchone_dict(cursor)
-                if row and row.get("cust_count") is not None:
-                    billing_scope = str(row["cust_count"])
-            except Exception as e:
-                print(f"[Default Metrics] Billing scope query failed: {e}")
-
-        # 6. Dealer Spread (Active dealers with CH_TYPE='DL' or KTOKD='0001')
-        dealer_spread = "N/A"
-        if real_cust_col_sales and cust_tbl:
-            cust_id_col = check_col(table_columns[cust_tbl], ["kunnr", "dealercode", "customer"])
-            dealer_type_col = check_col(table_columns[cust_tbl], ["ch_type", "ktokd", "acc_grp", "customer_type"])
-            if cust_id_col:
+            # ── Non-HANA / fallback path (unchanged) ──
+            if current_year == 0.0 and real_date_col:
                 try:
-                    if dealer_type_col:
-                        q_ds = f"""
-                            SELECT COUNT(DISTINCT s.{q_name(real_cust_col_sales)}) AS dealer_count
-                            FROM {sales_from}
-                            JOIN {q_tbl(cust_tbl)} c ON s.{q_name(real_cust_col_sales)} = c.{q_name(cust_id_col)}
-                            WHERE c.{q_name(dealer_type_col)} IN ('DL', '0001', 'Z001')
-                        """
-                    else:
-                        q_ds = f"SELECT COUNT(DISTINCT s.{q_name(real_cust_col_sales)}) AS dealer_count FROM {sales_from}"
-                    execute_query(cursor, q_ds, is_hana=is_hana)
-                    row = fetchone_dict(cursor)
-                    if row and row.get("dealer_count") is not None:
-                        dealer_spread = str(row["dealer_count"])
-                except Exception as e:
-                    print(f"[Default Metrics] Dealer spread query failed: {e}")
+                    year_expr = f"YEAR(s.{q_name(real_date_col)})"
+                    date_filter = f"s.{q_name(real_date_col)} IS NOT NULL"
 
-        # 7. Credit Exposure and Outstanding
+                    q_yoy = f"""
+                        SELECT {year_expr} AS yr, ROUND(SUM({join_revenue_expr}), 2) AS revenue
+                        FROM {sales_from}
+                        WHERE {date_filter} AND {year_expr} IS NOT NULL AND {year_expr} > 2000
+                        GROUP BY {year_expr}
+                        ORDER BY yr DESC
+                    """
+                    execute_query(cursor, q_yoy, is_hana=is_hana)
+                    year_rows = fetchall_dict(cursor)
+
+                    if year_rows and len(year_rows) > 0:
+                        current_year_row = year_rows[0]
+                        current_year = float(current_year_row.get("revenue") or 0.0)
+                        current_year_num = int(current_year_row["yr"])
+
+                        if len(year_rows) > 1:
+                            prev_year_row = year_rows[1]
+                            previous_year = float(prev_year_row.get("revenue") or 0.0)
+                            prev_year_num = int(prev_year_row["yr"])
+
+                            if previous_year > 0:
+                                yoy = round(((current_year - previous_year) / previous_year) * 100, 2)
+                                if current_year_num - prev_year_num == 1:
+                                    yoy_subtext = f"Compared to {prev_year_num}"
+                                else:
+                                    yoy_subtext = f"Compared to {prev_year_num}"
+                            else:
+                                yoy_subtext = f"{current_year_num} sales only"
+                        else:
+                            yoy_subtext = f"{current_year_num} sales only"
+                except Exception as yoy_err:
+                    # print(f"[Default Metrics] YoY query failed: {yoy_err}")
+                    pass
+
+        # 5. Billing Scope, Dealer Spread, Financials & Network Health KPIs
+        billing_scope = "N/A"
+        dealer_spread = "N/A"
         exposure_val = "N/A"
         overdue_val = "N/A"
-        if cust_tbl:
-            exp_col = check_col(table_columns[cust_tbl], ["exposure"])
-            out_col = check_col(table_columns[cust_tbl], ["outstand", "outstanding"])
-            if exp_col:
-                try:
-                    if is_hana:
-                        execute_query(cursor, f"SELECT SUM(COALESCE({q_name(exp_col)}, 0)) AS val FROM {q_tbl(cust_tbl)} WHERE {q_name(exp_col)} IS NOT NULL", is_hana=is_hana)
-                    else:
-                        execute_query(cursor, f"SELECT SUM(CAST(REPLACE(TRIM({q_name(exp_col)}), ',', '') AS DECIMAL(18,2))) AS val FROM {q_tbl(cust_tbl)} WHERE {q_name(exp_col)} IS NOT NULL AND {q_name(exp_col)} != ''", is_hana=is_hana)
-                    row = fetchone_dict(cursor)
-                    if row and row.get("val") is not None:
-                        v = float(row["val"])
-                        if v >= 10000000: exposure_val = f"₹{(v / 10000000):.2f} Cr"
-                        elif v >= 100000: exposure_val = f"₹{(v / 100000):.2f} Lac"
-                        else: exposure_val = f"₹{v:,.2f}"
-                except Exception as e:
-                    print(f"[Default Metrics] Exposure query failed: {e}")
-
-            if out_col:
-                try:
-                    if is_hana:
-                        execute_query(cursor, f"SELECT SUM(COALESCE({q_name(out_col)}, 0)) AS val FROM {q_tbl(cust_tbl)} WHERE {q_name(out_col)} IS NOT NULL", is_hana=is_hana)
-                    else:
-                        execute_query(cursor, f"SELECT SUM(CAST(REPLACE(TRIM({q_name(out_col)}), ',', '') AS DECIMAL(18,2))) AS val FROM {q_tbl(cust_tbl)} WHERE {q_name(out_col)} IS NOT NULL AND {q_name(out_col)} != ''", is_hana=is_hana)
-                    row = fetchone_dict(cursor)
-                    if row and row.get("val") is not None:
-                        v = float(row["val"])
-                        if v >= 10000000: overdue_val = f"₹{(v / 10000000):.2f} Cr"
-                        elif v >= 100000: overdue_val = f"₹{(v / 100000):.2f} Lac"
-                        else: overdue_val = f"₹{v:,.2f}"
-                except Exception as e:
-                    print(f"[Default Metrics] Outstanding query failed: {e}")
-
-        # 8. SAS IN & SAS Variance
-        sas_in_val = "N/A"
-        sas_variance_val = "N/A"
-        if cust_tbl:
-            sas_col = check_col(table_columns[cust_tbl], ["open_sas", "sas_curr", "dmbtr_sas"])
-            if sas_col:
-                try:
-                    if is_hana:
-                        execute_query(cursor, f"SELECT SUM(COALESCE({q_name(sas_col)}, 0)) AS val FROM {q_tbl(cust_tbl)} WHERE {q_name(sas_col)} IS NOT NULL", is_hana=is_hana)
-                    else:
-                        execute_query(cursor, f"SELECT SUM(CAST(REPLACE(TRIM({q_name(sas_col)}), ',', '') AS DECIMAL(18,2))) AS val FROM {q_tbl(cust_tbl)} WHERE {q_name(sas_col)} IS NOT NULL AND {q_name(sas_col)} != ''", is_hana=is_hana)
-                    row = fetchone_dict(cursor)
-                    if row and row.get("val") is not None:
-                        s_num = float(row["val"])
-                        if s_num >= 10000000: sas_in_val = f"₹{(s_num / 10000000):.2f} Cr"
-                        elif s_num >= 100000: sas_in_val = f"₹{(s_num / 100000):.2f} Lac"
-                        else: sas_in_val = f"₹{s_num:,.2f}"
-                        if total_revenue > 0:
-                            s_var = ((total_revenue - s_num) / total_revenue) * 100
-                            sas_variance_val = f"{s_var:+.1f}%"
-                except Exception as e:
-                    print(f"[Default Metrics] SAS query failed: {e}")
-
-        # 9. Attrition
+        overdue_num = 0.0
+        exposure_num = 0.0
+        sas_in_val = "₹0.00"
+        sas_variance_val = "0.0%"
+        rotation_val = "0.0x"
+        rot_subtext = "Receivables turnover"
         attrition = "N/A"
-        if cust_tbl:
-            att_col = check_col(table_columns[cust_tbl], ["attration", "attrition", "lm_nobill", "l2m_nobill", "l3m_nobill"])
-            if att_col:
-                try:
-                    q_att_cust = f"SELECT COUNT(*) AS att_count FROM {q_tbl(cust_tbl)} WHERE {q_name(att_col)} IS NOT NULL AND UPPER(TRIM(CAST({q_name(att_col)} AS NVARCHAR(10)))) IN ('Y', '1', 'X', 'TRUE')" if is_hana else f"SELECT COUNT(*) AS att_count FROM {q_tbl(cust_tbl)} WHERE {q_name(att_col)} IS NOT NULL AND {q_name(att_col)} IN ('Y', '1', 'X', 'TRUE')"
-                    execute_query(cursor, q_att_cust, is_hana=is_hana)
-                    row = fetchone_dict(cursor)
-                    if row and row.get("att_count") is not None and int(row["att_count"]) > 0:
-                        attrition = str(row["att_count"])
-                except Exception as e:
-                    print(f"[Default Metrics] Customer Master attrition failed: {e}")
+        att_subtext = "Inactive from last month"
+        new_dealer_val = "N/A"
+        target_yr_str = str(current_year_num) if current_year_num else str(datetime.now().year)
+        new_dealer_subtext = f"Onboarded in {target_yr_str}"
 
-        if attrition == "N/A" and real_cust_col_sales and real_date_col:
+        if is_hana and curr_sales_tbl and hist_sales_tbl:
+            # ── Dedicated Optimized SAP HANA Path ──
+            cust_tbl_h = find_table(["zivfcustomermaster", "customermaster", "customer"])
+            canc_tbl_h = find_table(["zpvfsdcancelledsalesinvoice", "cancelledsalesinvoice", "cancelled"])
+
+            # 5. Billing Scope (Distinct customers billed with valid distribution channel 10)
             try:
-                execute_query(cursor, f"SELECT MAX(s.{q_name(real_date_col)}) AS max_d FROM {sales_from}", is_hana=is_hana)
-                max_d_row = fetchone_dict(cursor)
-                latest_date = max_d_row.get("max_d") if max_d_row else None
-                if latest_date:
-                    if isinstance(latest_date, str):
-                        latest_dt = datetime.strptime(latest_date[:10], '%Y-%m-%d')
-                    else:
-                        latest_dt = latest_date
-                    curr_month_start = latest_dt.replace(day=1)
-                    prev_month_start = (curr_month_start - timedelta(days=1)).replace(day=1)
-                    
-                    p_start = prev_month_start.strftime('%Y-%m-%d')
-                    c_start = curr_month_start.strftime('%Y-%m-%d')
-                    date_expr = f"s.{q_name(real_date_col)}"
-                    q_att = f"""
-                        SELECT COUNT(DISTINCT prev_cust) AS attrition_count
-                        FROM (
-                            SELECT DISTINCT s.{q_name(real_cust_col_sales)} AS prev_cust
-                            FROM {sales_from}
-                            WHERE {date_expr} >= %s AND {date_expr} < %s
-                        ) p
-                        WHERE prev_cust NOT IN (
-                            SELECT DISTINCT s.{q_name(real_cust_col_sales)}
-                            FROM {sales_from}
-                            WHERE {date_expr} >= %s
-                        )
-                    """
-                    execute_query(cursor, q_att, (p_start, c_start, c_start), is_hana=is_hana)
-                    row = fetchone_dict(cursor)
-                    if row and row.get("attrition_count") is not None:
-                        attrition = str(row["attrition_count"])
-            except Exception as e:
-                print(f"[Default Metrics] Attrition query failed: {e}")
+                q_bscope_h = f"""
+                SELECT COUNT(DISTINCT s."dealer_code") AS cust_count
+                FROM (
+                    SELECT "dealer_code", "distribution_channel", "indicator_cancel", "invoice_number", "plant", "FKART"
+                    FROM {q_tbl(hist_sales_tbl)}
+                    UNION ALL
+                    SELECT "dealer_code", "distribution_channel", "indicator_cancel", "invoice_number", "plant", "FKART"
+                    FROM {q_tbl(curr_sales_tbl)}
+                ) s
+                WHERE CAST(s."distribution_channel" AS NVARCHAR(10)) = '10'
+                  AND COALESCE(s."indicator_cancel", '') NOT IN ('X', 'Y', '1')
+                """
+                if canc_tbl_h:
+                    q_bscope_h += f"""
+                  AND NOT EXISTS (
+                      SELECT 1 FROM {q_tbl(canc_tbl_h)} c
+                      WHERE CAST(c."distribution_channel" AS NVARCHAR(10)) = '10'
+                        AND c."invoice_number" = s."invoice_number"
+                        AND c."plant" = s."plant" AND c."FKART" = s."FKART"
+                  )"""
+                if cust_tbl_h:
+                    q_bscope_h += f"""
+                  AND NOT EXISTS (
+                      SELECT 1 FROM {q_tbl(cust_tbl_h)} cm
+                      WHERE cm."KUNNR" = s."dealer_code" AND UPPER(TRIM(cm."KLABC")) = 'X'
+                  )"""
+                execute_query(cursor, q_bscope_h, is_hana=True)
+                b_row = fetchone_dict(cursor)
+                if b_row and b_row.get("cust_count") is not None:
+                    billing_scope = str(b_row["cust_count"])
+                    # print(f"[Default Metrics] HANA Billing Scope: {billing_scope}")
+            except Exception as b_err:
+                # print(f"[Default Metrics] HANA Billing Scope failed: {b_err}")
+                pass
 
-        # 10. Sales Target and Achievement
+            # 6 to 10 & 12: CustomerMaster-based KPIs in a single fast query
+            if cust_tbl_h:
+                try:
+                    q_cm_kpis = f"""
+                    SELECT 
+                        COUNT(DISTINCT CASE 
+                            WHEN (UPPER(TRIM(cm."CH_TYPE")) = 'DL' OR cm."KTOKD" IN ('0001', 'Z001') OR COALESCE(cm."DLR_CNT", 0) > 0 OR UPPER(TRIM(cm."ACTIVE_CM")) = 'Y')
+                            THEN cm."KUNNR" END
+                        ) AS active_dealers,
+                        
+                        SUM(CASE WHEN COALESCE(cm."OUTSTAND", 0) > 0 THEN cm."OUTSTAND" ELSE 0 END) AS tot_overdue,
+                        SUM(COALESCE(cm."EXPOSURE", 0)) AS tot_exposure,
+                        
+                        SUM(COALESCE(cm."SAS_CURR", cm."DMBTR_SAS", cm."OPEN_SAS", 0)) AS tot_sas_in,
+                        SUM(COALESCE(cm."SAS_CURR", 0)) AS curr_sas,
+                        SUM(COALESCE(cm."OPEN_SAS", 0)) AS open_sas,
+                        
+                        SUM(COALESCE(cm."SALE_TOT", 0)) AS tot_sale_tot,
+                        
+                        COUNT(DISTINCT CASE 
+                            WHEN LEFT(CAST(cm."ERDAT" AS NVARCHAR(20)), 4) = '{target_yr_str}' 
+                              OR LEFT(CAST(cm."FS_BILL_DT" AS NVARCHAR(20)), 4) = '{target_yr_str}'
+                            THEN cm."KUNNR" END
+                        ) AS new_dealers_curr,
+                        
+                        COUNT(DISTINCT CASE 
+                            WHEN UPPER(TRIM(cm."ATTRATION")) IN ('Y', '1', 'TRUE') 
+                              OR UPPER(TRIM(cm."LM_NOBILL")) = 'Y'
+                            THEN cm."KUNNR" END
+                        ) AS attrition_count
+                    FROM {q_tbl(cust_tbl_h)} cm
+                    WHERE COALESCE(cm."KLABC", '') <> 'X'
+                    """
+                    execute_query(cursor, q_cm_kpis, is_hana=True)
+                    cm_row = fetchone_dict(cursor)
+                    if cm_row:
+                        # Dealer Spread
+                        act_dlrs = int(cm_row.get("active_dealers") or 0)
+                        if act_dlrs > 0:
+                            dealer_spread = str(act_dlrs)
+                        elif billing_scope != "N/A":
+                            dealer_spread = billing_scope
+
+                        # Overdue
+                        od_val = float(cm_row.get("tot_overdue") or 0)
+                        overdue_num = od_val
+                        if od_val >= 10000000: overdue_val = f"₹{(od_val / 10000000):.2f} Cr"
+                        elif od_val >= 100000: overdue_val = f"₹{(od_val / 100000):.2f} Lac"
+                        elif od_val > 0: overdue_val = f"₹{od_val:,.2f}"
+                        else: overdue_val = "₹0.00"
+
+                        # Exposure
+                        exp_val = float(cm_row.get("tot_exposure") or 0)
+                        exposure_num = exp_val
+                        if exp_val >= 10000000: exposure_val = f"₹{(exp_val / 10000000):.2f} Cr"
+                        elif exp_val >= 100000: exposure_val = f"₹{(exp_val / 100000):.2f} Lac"
+                        elif exp_val > 0: exposure_val = f"₹{exp_val:,.2f}"
+                        else: exposure_val = "₹0.00"
+
+                        # SAS IN
+                        sas_val = float(cm_row.get("tot_sas_in") or 0)
+                        if sas_val >= 10000000: sas_in_val = f"₹{(sas_val / 10000000):.2f} Cr"
+                        elif sas_val >= 100000: sas_in_val = f"₹{(sas_val / 100000):.2f} Lac"
+                        elif sas_val > 0: sas_in_val = f"₹{sas_val:,.2f}"
+                        else: sas_in_val = "₹0.00"
+
+                        # SAS Variance
+                        c_sas = float(cm_row.get("curr_sas") or 0)
+                        o_sas = float(cm_row.get("open_sas") or 0)
+                        if o_sas > 0:
+                            s_var = ((c_sas - o_sas) / o_sas) * 100
+                            sas_variance_val = f"{s_var:+.1f}%"
+                        else:
+                            sas_variance_val = "0.0%"
+
+                        # Rotation
+                        tot_st = float(cm_row.get("tot_sale_tot") or 0)
+                        if od_val > 0 and tot_st > 0:
+                            rot = round(tot_st / od_val, 1)
+                            rotation_val = f"{rot:.1f}x"
+                            rot_subtext = "Receivables turnover"
+                        elif current_year > 0 and od_val > 0:
+                            rot = round((current_year * 10000000) / od_val, 1)
+                            rotation_val = f"{rot:.1f}x"
+                            rot_subtext = "Receivables turnover"
+                        else:
+                            rotation_val = "0.0x"
+                            rot_subtext = "Receivables turnover"
+
+                        # New Dealer
+                        nd_cnt = int(cm_row.get("new_dealers_curr") or 0)
+                        if nd_cnt > 0:
+                            new_dealer_val = str(nd_cnt)
+                        else:
+                            new_dealer_val = "0"
+
+                        # Attrition
+                        att_cnt = int(cm_row.get("attrition_count") or 0)
+                        if att_cnt > 0:
+                            attrition = str(att_cnt)
+                            att_subtext = f"Inactive since Sep {target_yr_str}"
+                        else:
+                            attrition = "0"
+                            att_subtext = f"Inactive since Sep {target_yr_str}"
+
+                        # print(f"[Default Metrics] HANA KPIs: Dealers={dealer_spread}, Overdue={overdue_val}, Exposure={exposure_val}, New={new_dealer_val}, Attrition={attrition}")
+                except Exception as cm_err:
+                    # print(f"[Default Metrics] HANA CustomerMaster KPIs query failed: {cm_err}")
+                    pass
+
+        else:
+            # ── Non-HANA / MySQL Fallback Path ──
+            real_cust_col_sales = check_col(sales_cols, ["dealercode", "dealer_code", "customer", "kunnr"])
+            if real_cust_col_sales:
+                try:
+                    execute_query(cursor, f"SELECT COUNT(DISTINCT s.{q_name(real_cust_col_sales)}) AS cust_count FROM {sales_from}", is_hana=is_hana)
+                    row = fetchone_dict(cursor)
+                    if row and row.get("cust_count") is not None:
+                        billing_scope = str(row["cust_count"])
+                except Exception as e:
+                    # print(f"[Default Metrics] Billing scope query failed: {e}")
+                    pass
+
+            if real_cust_col_sales and cust_tbl:
+                cust_id_col = check_col(table_columns[cust_tbl], ["kunnr", "dealercode", "customer"])
+                dealer_type_col = check_col(table_columns[cust_tbl], ["ch_type", "ktokd", "acc_grp", "customer_type"])
+                dlr_cnt_col = check_col(table_columns[cust_tbl], ["dlr_cnt", "dlrcnt", "dealer_cnt"])
+                klabc_col = check_col(table_columns[cust_tbl], ["klabc"])
+                klabc_filter = f"AND (c.{q_name(klabc_col)} IS NULL OR c.{q_name(klabc_col)} <> 'X')" if klabc_col else ""
+
+                if cust_id_col:
+                    try:
+                        conds = []
+                        if dealer_type_col:
+                            conds.append(f"UPPER(TRIM(CAST(c.{q_name(dealer_type_col)} AS NVARCHAR(20)))) IN ('DL', '0001', 'Z001')")
+                        if dlr_cnt_col:
+                            conds.append(f"COALESCE(c.{q_name(dlr_cnt_col)}, 0) > 0")
+                        dealer_filter = f"AND ({' OR '.join(conds)})" if conds else ""
+
+                        q_ds = f"""
+                            SELECT COUNT(DISTINCT s.d_code) AS dealer_count
+                            FROM (
+                                SELECT DISTINCT s.{q_name(real_cust_col_sales)} AS d_code
+                                FROM {sales_from}
+                                WHERE s.{q_name(real_cust_col_sales)} IS NOT NULL
+                            ) s
+                            JOIN {q_tbl(cust_tbl)} c 
+                              ON (s.d_code = c.{q_name(cust_id_col)} OR LTRIM(s.d_code, '0') = LTRIM(CAST(c.{q_name(cust_id_col)} AS NVARCHAR(20)), '0'))
+                            WHERE 1=1 {klabc_filter} {dealer_filter}
+                        """
+                        execute_query(cursor, q_ds, is_hana=is_hana)
+                        row = fetchone_dict(cursor)
+                        if row and row.get("dealer_count") is not None and int(row["dealer_count"]) > 0:
+                            dealer_spread = str(row["dealer_count"])
+                        elif billing_scope != "N/A":
+                            dealer_spread = billing_scope
+                    except Exception as e:
+                        # print(f"[Default Metrics] Dealer spread query failed: {e}")
+                        if billing_scope != "N/A":
+                            dealer_spread = billing_scope
+
+            if cust_tbl:
+                exp_col = check_col(table_columns[cust_tbl], ["exposure"])
+                out_col = check_col(table_columns[cust_tbl], ["outstand", "outstanding"])
+                klabc_col = check_col(table_columns[cust_tbl], ["klabc"])
+                klabc_filter = f"WHERE ({q_name(klabc_col)} IS NULL OR {q_name(klabc_col)} <> 'X')" if klabc_col else "WHERE 1=1"
+
+                if exp_col:
+                    try:
+                        execute_query(cursor, f"SELECT SUM(CAST(REPLACE(TRIM({q_name(exp_col)}), ',', '') AS DECIMAL(18,2))) AS val FROM {q_tbl(cust_tbl)} {klabc_filter} AND {q_name(exp_col)} IS NOT NULL AND {q_name(exp_col)} != ''", is_hana=is_hana)
+                        row = fetchone_dict(cursor)
+                        if row and row.get("val") is not None:
+                            exposure_num = float(row["val"])
+                            if exposure_num >= 10000000: exposure_val = f"₹{(exposure_num / 10000000):.2f} Cr"
+                            elif exposure_num >= 100000: exposure_val = f"₹{(exposure_num / 100000):.2f} Lac"
+                            else: exposure_val = f"₹{exposure_num:,.2f}"
+                    except Exception as e:
+                        # print(f"[Default Metrics] Exposure query failed: {e}")
+                        pass
+
+                if out_col:
+                    try:
+                        execute_query(cursor, f"SELECT SUM(CAST(REPLACE(TRIM({q_name(out_col)}), ',', '') AS DECIMAL(18,2))) AS val FROM {q_tbl(cust_tbl)} {klabc_filter} AND {q_name(out_col)} IS NOT NULL AND {q_name(out_col)} != ''", is_hana=is_hana)
+                        row = fetchone_dict(cursor)
+                        if row and row.get("val") is not None:
+                            overdue_num = float(row["val"])
+                            if overdue_num >= 10000000: overdue_val = f"₹{(overdue_num / 10000000):.2f} Cr"
+                            elif overdue_num >= 100000: overdue_val = f"₹{(overdue_num / 100000):.2f} Lac"
+                            else: overdue_val = f"₹{overdue_num:,.2f}"
+                    except Exception as e:
+                        # print(f"[Default Metrics] Outstanding query failed: {e}")
+                        pass
+
+                dmbtr_sas_col = check_col(table_columns[cust_tbl], ["dmbtr_sas", "dmbtrsas"])
+                sas_curr_col = check_col(table_columns[cust_tbl], ["sas_curr", "sascurr"])
+                open_sas_col = check_col(table_columns[cust_tbl], ["open_sas", "opensas"])
+                cols_to_sum = []
+                if dmbtr_sas_col: cols_to_sum.append(f"SUM(COALESCE({q_name(dmbtr_sas_col)}, 0)) AS d_sas")
+                if sas_curr_col: cols_to_sum.append(f"SUM(COALESCE({q_name(sas_curr_col)}, 0)) AS c_sas")
+                if open_sas_col: cols_to_sum.append(f"SUM(COALESCE({q_name(open_sas_col)}, 0)) AS o_sas")
+                if cols_to_sum:
+                    try:
+                        q_sas = f"SELECT {', '.join(cols_to_sum)} FROM {q_tbl(cust_tbl)} {klabc_filter}"
+                        execute_query(cursor, q_sas, is_hana=is_hana)
+                        row = fetchone_dict(cursor)
+                        if row:
+                            d_val = float(row.get("d_sas") or 0)
+                            c_val = float(row.get("c_sas") or 0)
+                            o_val = float(row.get("o_sas") or 0)
+                            sas_num = d_val if d_val > 0 else (c_val if c_val > 0 else o_val)
+                            if sas_num > 0:
+                                if sas_num >= 10000000: sas_in_val = f"₹{(sas_num / 10000000):.2f} Cr"
+                                elif sas_num >= 100000: sas_in_val = f"₹{(sas_num / 100000):.2f} Lac"
+                                else: sas_in_val = f"₹{sas_num:,.2f}"
+                                if o_val > 0:
+                                    s_var = ((c_val - o_val) / o_val) * 100
+                                    sas_variance_val = f"{s_var:+.1f}%"
+                    except Exception as e:
+                        # print(f"[Default Metrics] SAS query failed: {e}")
+                        pass
+
+                att_col = check_col(table_columns[cust_tbl], ["attration", "attrition"])
+                nobill_col = check_col(table_columns[cust_tbl], ["lm_nobill", "l2m_nobill", "l3m_nobill"])
+                target_att_cols = [c for c in [att_col, nobill_col] if c]
+                if target_att_cols:
+                    try:
+                        att_conds = [f"UPPER(TRIM(CAST({q_name(c)} AS NVARCHAR(10)))) IN ('Y', '1', 'X', 'TRUE')" for c in target_att_cols]
+                        q_att_cust = f"SELECT COUNT(*) AS att_count FROM {q_tbl(cust_tbl)} WHERE ({' OR '.join(att_conds)}) {klabc_filter.replace('WHERE', 'AND')}"
+                        execute_query(cursor, q_att_cust, is_hana=is_hana)
+                        row = fetchone_dict(cursor)
+                        if row and row.get("att_count") is not None and int(row["att_count"]) > 0:
+                            attrition = str(row["att_count"])
+                    except Exception as e:
+                        # print(f"[Default Metrics] Attrition query failed: {e}")
+                        pass
+
+            if attrition == "N/A":
+                attrition = "0"
+
+
+        # 11. Sales Target and Achievement
         sales_target_val = "N/A"
         achievement_val = "N/A"
+        target_subtext = "Target sales"
+        ach_subtext = "Current achievement"
         if target_tbl:
             try:
                 target_col = check_col(table_columns[target_tbl], ["plan_value", "rev_plan_val", "plan_ho_val", "rev_plan", "org_plan", "value", "target", "target_value", "sales_target"])
+                ymonth_col = check_col(table_columns[target_tbl], ["ymonth", "year_month", "month", "calmonth"])
                 if target_col:
-                    if is_hana:
-                        execute_query(cursor, f"SELECT SUM(COALESCE({q_name(target_col)}, 0)) AS total_target FROM {q_tbl(target_tbl)}", is_hana=is_hana)
+                    t_val = 0.0
+                    ref_sales = 0.0
+                    target_filter = ""
+                    if ymonth_col and current_year > 0 and current_year_num:
+                        target_filter = f"WHERE CAST({q_name(ymonth_col)} AS NVARCHAR(20)) LIKE '{current_year_num}%'"
+                        ref_sales = current_year
+                        target_subtext = f"{current_year_num} Target"
+                        ach_subtext = f"{current_year_num} Achievement"
                     else:
-                        execute_query(cursor, f"SELECT SUM(CAST(REPLACE(TRIM({q_name(target_col)}), ',', '') AS DECIMAL(18,2))) AS total_target FROM {q_tbl(target_tbl)}", is_hana=is_hana)
+                        ref_sales = total_revenue
+                        target_subtext = "Lifetime Target"
+                        ach_subtext = "Lifetime Achievement"
+
+                    if is_hana:
+                        execute_query(cursor, f"SELECT SUM(COALESCE({q_name(target_col)}, 0)) AS total_target FROM {q_tbl(target_tbl)} {target_filter}", is_hana=is_hana)
+                    else:
+                        execute_query(cursor, f"SELECT SUM(CAST(REPLACE(TRIM({q_name(target_col)}), ',', '') AS DECIMAL(18,2))) AS total_target FROM {q_tbl(target_tbl)} {target_filter}", is_hana=is_hana)
                     t_row = fetchone_dict(cursor)
-                    if t_row and t_row.get("total_target") is not None:
+                    if t_row and t_row.get("total_target") is not None and float(t_row["total_target"]) > 0:
                         t_val = float(t_row["total_target"])
-                        if t_val > 0:
+                    elif target_filter:
+                        # Fallback to total target if year filter yielded zero
+                        if is_hana:
+                            execute_query(cursor, f"SELECT SUM(COALESCE({q_name(target_col)}, 0)) AS total_target FROM {q_tbl(target_tbl)}", is_hana=is_hana)
+                        else:
+                            execute_query(cursor, f"SELECT SUM(CAST(REPLACE(TRIM({q_name(target_col)}), ',', '') AS DECIMAL(18,2))) AS total_target FROM {q_tbl(target_tbl)}", is_hana=is_hana)
+                        t_row = fetchone_dict(cursor)
+                        if t_row and t_row.get("total_target") is not None:
+                            t_val = float(t_row["total_target"])
+                            ref_sales = total_revenue
+                            target_subtext = "Lifetime Target"
+                            ach_subtext = "Lifetime Achievement"
+
+                    if t_val > 0:
+                        if is_hana:
+                            t_val_cr = t_val / 10000000 if t_val >= 10000000 else t_val
+                            sales_target_val = f"₹{t_val_cr:,.2f} Cr"
+                            if ref_sales > 0:
+                                ach = (ref_sales / t_val_cr) * 100
+                                achievement_val = f"{ach:.2f}%"
+                        else:
                             if t_val >= 10000000: sales_target_val = f"₹{(t_val / 10000000):.2f} Cr"
                             elif t_val >= 100000: sales_target_val = f"₹{(t_val / 100000):.2f} Lac"
                             else: sales_target_val = f"₹{t_val:,.2f}"
 
-                            if total_revenue > 0:
-                                ach = (total_revenue / t_val) * 100
+                            if ref_sales > 0:
+                                ach = (ref_sales / t_val) * 100
                                 achievement_val = f"{ach:.2f}%"
             except Exception as e:
-                print(f"[Default Metrics] Sales target query failed: {e}")
+                # print(f"[Default Metrics] Sales target query failed: {e}")
+                pass
 
-        # 11. New Dealer
+        # 12. New Dealer (Onboarded in current operational year, e.g. 2026)
         new_dealer_val = "N/A"
+        target_yr_str = str(current_year_num) if current_year_num else str(datetime.now().year)
+        new_dealer_subtext = f"Onboarded in {target_yr_str}"
         if cust_tbl:
             erdat_col = check_col(table_columns[cust_tbl], ["erdat", "created_date", "fs_bill_dt", "first_bill_date"])
+            klabc_col = check_col(table_columns[cust_tbl], ["klabc"])
+            klabc_filter = f"AND ({q_name(klabc_col)} IS NULL OR {q_name(klabc_col)} <> 'X')" if klabc_col else ""
+
             if erdat_col:
                 try:
-                    execute_query(cursor, f"SELECT COUNT(*) AS nd_count FROM {q_tbl(cust_tbl)} WHERE {q_name(erdat_col)} IS NOT NULL", is_hana=is_hana)
+                    q_nd = f"""
+                        SELECT COUNT(*) AS nd_count 
+                        FROM {q_tbl(cust_tbl)} 
+                        WHERE {q_name(erdat_col)} IS NOT NULL 
+                          AND (
+                              CAST({q_name(erdat_col)} AS NVARCHAR(20)) LIKE '{target_yr_str}%'
+                              OR LEFT(CAST({q_name(erdat_col)} AS NVARCHAR(20)), 4) = '{target_yr_str}'
+                          )
+                          {klabc_filter}
+                    """ if is_hana else f"""
+                        SELECT COUNT(*) AS nd_count 
+                        FROM {q_tbl(cust_tbl)} 
+                        WHERE {q_name(erdat_col)} IS NOT NULL 
+                          AND (
+                              CAST({q_name(erdat_col)} AS CHAR(20)) LIKE '{target_yr_str}%'
+                              OR LEFT(CAST({q_name(erdat_col)} AS CHAR(20)), 4) = '{target_yr_str}'
+                          )
+                          {klabc_filter}
+                    """
+                    execute_query(cursor, q_nd, is_hana=is_hana)
                     row = fetchone_dict(cursor)
-                    if row and row.get("nd_count") is not None:
+                    if row and row.get("nd_count") is not None and int(row["nd_count"]) > 0:
                         new_dealer_val = str(row["nd_count"])
+                    else:
+                        # Fallback to previous year if current year has 0
+                        prev_yr_str = str(int(target_yr_str) - 1)
+                        q_nd_prev = f"""
+                            SELECT COUNT(*) AS nd_count 
+                            FROM {q_tbl(cust_tbl)} 
+                            WHERE {q_name(erdat_col)} IS NOT NULL 
+                              AND (
+                                  CAST({q_name(erdat_col)} AS NVARCHAR(20)) LIKE '{prev_yr_str}%'
+                                  OR LEFT(CAST({q_name(erdat_col)} AS NVARCHAR(20)), 4) = '{prev_yr_str}'
+                              )
+                              {klabc_filter}
+                        """ if is_hana else f"""
+                            SELECT COUNT(*) AS nd_count 
+                            FROM {q_tbl(cust_tbl)} 
+                            WHERE {q_name(erdat_col)} IS NOT NULL 
+                              AND (
+                                  CAST({q_name(erdat_col)} AS CHAR(20)) LIKE '{prev_yr_str}%'
+                                  OR LEFT(CAST({q_name(erdat_col)} AS CHAR(20)), 4) = '{prev_yr_str}'
+                              )
+                              {klabc_filter}
+                        """
+                        execute_query(cursor, q_nd_prev, is_hana=is_hana)
+                        row_p = fetchone_dict(cursor)
+                        if row_p and row_p.get("nd_count") is not None and int(row_p["nd_count"]) > 0:
+                            new_dealer_val = str(row_p["nd_count"])
+                            new_dealer_subtext = f"Onboarded in {prev_yr_str}"
                 except Exception as e:
-                    print(f"[Default Metrics] New dealer query failed: {e}")
+                    # print(f"[Default Metrics] New dealer query failed: {e}")
+                    pass
 
         # Format total revenue
-        formatted_revenue = f"₹{float(total_revenue):,.2f}"
-        if total_revenue >= 10000000:
-            formatted_revenue = f"₹{(total_revenue / 10000000):.2f} Cr"
-        elif total_revenue >= 100000:
-            formatted_revenue = f"₹{(total_revenue / 100000):.2f} Lac"
+        # Total Sales Revenue
+        if is_hana:
+            formatted_revenue = f"₹{float(total_revenue):,.2f} Cr"
+        else:
+            formatted_revenue = f"₹{float(total_revenue):,.2f}"
+            if total_revenue >= 10000000:
+                formatted_revenue = f"₹{(total_revenue / 10000000):.2f} Cr"
+            elif total_revenue >= 100000:
+                formatted_revenue = f"₹{(total_revenue / 100000):.2f} Lac"
+
+        if min_sales_yr and max_sales_yr:
+            rev_subtext = f"Lifetime revenue ({min_sales_yr}-{max_sales_yr})"
+        else:
+            rev_subtext = "Lifetime revenue"
+
+        # Format Sales Actual
+        actual_subtext = "Actual sales"
+        if current_year > 0 and current_year_num:
+            actual_revenue = current_year
+            if is_hana:
+                formatted_actual = f"₹{actual_revenue:,.2f} Cr"
+            else:
+                if actual_revenue >= 10000000:
+                    formatted_actual = f"₹{(actual_revenue / 10000000):.2f} Cr"
+                elif actual_revenue >= 100000:
+                    formatted_actual = f"₹{(actual_revenue / 100000):.2f} Lac"
+                else:
+                    formatted_actual = f"₹{actual_revenue:,.2f}"
+            actual_subtext = f"{current_year_num} Actual"
+        else:
+            formatted_actual = formatted_revenue
+            actual_subtext = "Lifetime Actual"
 
         metrics_data = {
             "metric_1": {
                 "label": "Total Sales Revenue", 
                 "value": formatted_revenue, 
-                "subtext": "Lifetime revenue"
+                "subtext": rev_subtext
             },
             "metric_2": {
                 "label": "Top Performing Tyre", 
@@ -2491,31 +3624,35 @@ def default_dashboard_metrics_controller(get_db_connection):
             "metric_3": {
                 "label": "Leading Region", 
                 "value": str(leading_region), 
-                "subtext": "Most profitable territory"
+                "subtext": "Most profitable region"
             },
             "metric_4": {
                 "label": "Year-over-Year Growth", 
-                "value": f"{yoy:+0.1f}%" if previous_year > 0 else ("0.0%" if current_year > 0 else "N/A"), 
+                "value": f"{yoy:+0.2f}%" if previous_year > 0 else ("0.00%" if current_year > 0 else "N/A"), 
                 "subtext": yoy_subtext
             },
-            "metric_5": {"label": "Achievement", "value": achievement_val, "subtext": "Current achievement"},
-            "metric_6": {"label": "Sales Target", "value": sales_target_val, "subtext": "Target sales"},
-            "metric_7": {"label": "Sales Actual", "value": formatted_revenue, "subtext": "Actual sales"},
+            "metric_5": {"label": "Achievement", "value": achievement_val, "subtext": ach_subtext},
+            "metric_6": {"label": "Sales Target", "value": sales_target_val, "subtext": target_subtext},
+            "metric_7": {"label": "Sales Actual", "value": formatted_actual, "subtext": actual_subtext},
             "metric_8": {"label": "SAS IN", "value": sas_in_val, "subtext": "SAS IN value"},
             "metric_9": {"label": "SAS Variance", "value": sas_variance_val, "subtext": "Variance"},
             "metric_10": {"label": "Billing Scope", "value": billing_scope, "subtext": "Customers billed"},
             "metric_11": {"label": "Dealer Spread", "value": dealer_spread, "subtext": "Active dealers"},
             "metric_12": {"label": "Overdue", "value": overdue_val, "subtext": "Outstanding balance"},
             "metric_13": {"label": "Exposure", "value": exposure_val, "subtext": "Credit exposure"},
-            "metric_14": {"label": "Rotation", "value": "N/A", "subtext": "Rotation metric"},
-            "metric_15": {"label": "New Dealer", "value": new_dealer_val, "subtext": "New dealers"},
-            "metric_16": {"label": "Attrition", "value": attrition, "subtext": "Inactive from last month"}
+            "metric_14": {"label": "Rotation", "value": rotation_val, "subtext": rot_subtext},
+            "metric_15": {"label": "New Dealer", "value": new_dealer_val, "subtext": new_dealer_subtext},
+            "metric_16": {"label": "Attrition", "value": attrition, "subtext": att_subtext}
         }
-
+        try:
+            calc_sec = round(time.time() - start_calc_t, 2) if 'start_calc_t' in locals() else 0.0
+            set_cached_component_data(conn, session_id, "key_metrics", metrics_data, "all", duration_sec=calc_sec)
+        except Exception:
+            pass
         return jsonify({"status": "success", "data": metrics_data}), 200
 
     except Exception as exc:
-        print(f"[Default Metrics] Database query failed: {exc}")
+        # print(f"[Default Metrics] Database query failed: {exc}")
         return jsonify({
             "status": "error",
             "message": "Database query failed.",

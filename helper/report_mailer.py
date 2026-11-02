@@ -170,14 +170,26 @@ def send_report_email(to_email, attachment_paths, recipient_name=""):
             else:
                 print(f"[Mailer Error] Could not attach file: {attachment_path} not found.")
 
+        # Resolve IPv4 host to prevent [Errno 101] Network is unreachable when IPv6 is unrouted on AWS
+        import socket
+        smtp_host = MAIL_SERVER
+        try:
+            addr_info = socket.getaddrinfo(MAIL_SERVER, MAIL_PORT, socket.AF_INET, socket.SOCK_STREAM)
+            if addr_info and addr_info[0] and addr_info[0][4]:
+                smtp_host = addr_info[0][4][0]
+        except Exception:
+            smtp_host = MAIL_SERVER
+
         # Send using the dynamic SMTP server from config
         if MAIL_USE_TLS or MAIL_PORT == 587:
-            with smtplib.SMTP(MAIL_SERVER, MAIL_PORT) as server:
+            with smtplib.SMTP(smtp_host, MAIL_PORT, timeout=25) as server:
+                server.ehlo()
                 server.starttls()
+                server.ehlo()
                 server.login(from_email, password)
                 server.send_message(msg)
         else:
-            with smtplib.SMTP_SSL(MAIL_SERVER, MAIL_PORT) as server:
+            with smtplib.SMTP_SSL(smtp_host, MAIL_PORT, timeout=25) as server:
                 server.login(from_email, password)
                 server.send_message(msg)
             

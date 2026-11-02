@@ -449,33 +449,41 @@ def _load_hana(session_id, get_fn):
 SAP S/4HANA Sales & Distribution (SD) Architecture and Table Context:
 1. Fact Views:
    - ZPVF_SD_SalesHistory_01_TR: Historical Invoices Fact view (~30,044,097 rows, years 2006 to 2025). Use for historical period queries, multi-year trends, and prior period sales.
-   - ZPVF_SD_CurrentSales_01_TR: Current Period MTD Invoices Fact view (~1,000,000 rows, year 2026). Use for current period / MTD sales questions.
+   - ZPVF_SD_CurrentSales_01_TR: Current Period MTD Invoices Fact view (~1,000,000 rows, year 2026). Use for current period / MTD sales questions, top customers, and general sales analysis.
    - ZPVF_SD_CancelledSalesInvoice_01_TR: Cancelled Invoices Reference view (~50,000 rows). Contains list of cancelled invoices.
-   - ZIVF_SD_Sales_Plan_Target_01_TR: Sales Plan & Target view (~200,000 rows). Target Value is PLAN_VALUE, Target Qty is ORG_PLAN.
-   Fact Columns: invoice_number, invoice_date, plant, dealer_code, ship_to_party, SKU, batch, volume, Tyre_Quantity, ndp_value, old_code, invoice_value, total_discount, gst, taxable_value, FKART, BILL_TYPE, distribution_channel, indicator_cancel.
-2. Master Views & Joins:
-   - Customer Master: ZIVF_CustomerMaster_01_MD (~69,104 rows). Join on fact.dealer_code = cm.KUNNR. Customer/Dealer Name is cm.NAME1. Mandatory filter: (cm.KLABC IS NULL OR cm.KLABC <> 'X').
-   - SKU / Material Master: ZIVR_SKUMaster_01_TR (~30,000 rows). Join on fact.SKU = sk.MATNR. Description is MAKTX or PROD_TITLE, Brand is BRAND, Sub Brand is SUB_BRAND, Category Code is CAT_CODE, Construction is CONSTUCTION, Tyre Type is TYRE_TYPE (or TYRE_TP: TRUCK, LCV, CAR, etc.).
-   - Category Master: ZIVF_CategoryMaster_01_TR. Join on sk.CAT_CODE = cat.CAT_CODE. Category Description is cat.CAT_DESC (TBR, PCR, TBB, etc.).
-   - Territory Master: ZIVF_TerritoryMaster_01_TR. Join on cm.BZIRK = tm.BZIRK. Territory Name is tm.NAME, Region code is tm.REGIO, Zone code is tm.P_ZONE.
-   - Region Master: ZIVF_RegionMaster_MD_01. Join on tm.REGIO = rm.region_code or cm.REGIO = rm.region_code. Region Name is rm.region_name (DELHI, MUMBAI, KOLKATA, etc.), Zone code is rm.zone_code.
-   - Zone Master: ZIVF_ZoneMaster_01_TR. Join on rm.zone_code = zm.P_ZONE or tm.P_ZONE = zm.P_ZONE. Zone Name is zm.NAME (NORTH, WEST, EAST, SOUTH, etc.).
-   - Date Master: ZITR_DayAttribute_01_TR. Join on fact.invoice_date = da.Date_. Year-Month is da.YMONTH, Year is da.CAL_YEAR, Qtr is da.QTR.
+   - ZIVF_SD_Sales_Plan_Target_01_TR: Sales Plan & Target view (~200,000 rows). Target Value is PLAN_VALUE (or REV_PLAN_VAL), Target Qty is ORG_PLAN (or REV_PLAN).
+   CRITICAL SAP HANA CASING FOR FACT COLUMNS (MUST USE DOUBLE QUOTES):
+   "invoice_number", "invoice_date", "plant", "dealer_code", "ship_to_party", "SKU", "batch", "volume", "Tyre_Quantity", "ndp_value", "old_code", "invoice_value", "total_discount", "gst", "taxable_value", "FKART", "BILL_TYPE", "distribution_channel", "indicator_cancel".
+   - Customer Master: ZIVF_CustomerMaster_01_MD (~69,104 rows, columns UPPERCASE). When ranking or listing customers/dealers (Top N, Worst N, Dealers), ALWAYS use JOIN (INNER JOIN) on (fact."dealer_code" = cm.KUNNR OR LTRIM(fact."dealer_code", '0') = LTRIM(cm.KUNNR, '0')) to guarantee valid registered customer names. Customer Name is COALESCE(NULLIF(TRIM(cm.NAME1), ''), NULLIF(TRIM(cm.BNAME), ''), fact."dealer_code"). Filter: (cm.KLABC IS NULL OR cm.KLABC <> 'X'). Do NOT use cm.KUNNR IS NULL in ranking queries. (NOTE: SAP KUNNR often has 10-digit leading zeros '0001234567' while fact."dealer_code" is '1234567'. LTRIM matches them perfectly).
+   - SKU / Material Master: ZIVR_SKUMaster_01_TR (~30,000 rows, columns UPPERCASE). Join on fact."SKU" = sk.MATNR. Description is sk.MAKTX or sk.PROD_TITLE, Brand is sk.BRAND, Sub Brand is sk.SUB_BRAND, Category Code is sk.CAT_CODE, Construction is sk.CONSTUCTION, Tyre Type is sk.TYRE_TYPE (or sk.TYRE_TP: TRUCK, LCV, CAR, etc.).
+   - Category Master: ZIVF_CategoryMaster_01_TR (columns UPPERCASE). Join on sk.CAT_CODE = cat.CAT_CODE. Category Description is cat.CAT_DESC (Tyre, Tube, Flap).
+   - Territory Master: ZIVF_TerritoryMaster_01_TR (columns UPPERCASE). Join on cm.BZIRK = tm.BZIRK. Territory Name is tm.NAME, Region code is tm.REGIO, Zone code is tm.P_ZONE.
+   - Region Master: ZIVF_RegionMaster_MD_01 (columns LOWERCASE). Join on tm.REGIO = rm."region_code" or cm.REGIO = rm."region_code". Region Name is rm."region_name", Zone code is rm."zone_code".
+   - Zone Master: ZIVF_ZoneMaster_01_TR (columns UPPERCASE). Join on rm."zone_code" = zm.P_ZONE or tm.P_ZONE = zm.P_ZONE. Zone Name is zm.NAME (NORTH, WEST, EAST, SOUTH, etc.).
+   - Date Master: ZITR_DayAttribute_01_TR. Join on fact."invoice_date" = da."Date_". Year-Month is da.YMONTH, Year is da.CAL_YEAR, Qtr is da.QTR.
+   - Sales Plan & Target Joins (ZIVF_SD_Sales_Plan_Target_01_TR):
+     * Territory: tgt.TERR_CODE = tm.BZIRK
+     * Region: tgt.REG_CODE = rm."region_code"
+     * Date/Period: tgt.YMONTH = da.YMONTH
+     * Product/SKU: tgt.MATNR = sk.MATNR
+     * Category: tgt.CAT_CODE = cat.CAT_CODE
+     * Target vs Actual Architecture: DO NOT directly join Sales Fact and Target Fact. Pre-aggregate Actual Sales and Target Plans in separate CTEs/subqueries by territory (tm.BZIRK) or region (rm."region_code") or month (da.YMONTH), then join the aggregated CTEs on the dimension key.
 3. Filtering & Exclusion Rules:
-   - Distribution Channel: ALWAYS filter (fact.distribution_channel = 10 OR fact.distribution_channel = '10').
+   - Distribution Channel: ALWAYS filter fact."distribution_channel" = '10' (string literal).
    - Cancelled Invoices Exclusion (CRITICAL FOR PERFORMANCE & MEMORY):
      ALWAYS filter directly on the fact view:
-     AND (fact.indicator_cancel IS NULL OR fact.indicator_cancel NOT IN ('X', 'Y', '1'))
+     AND (fact."indicator_cancel" IS NULL OR fact."indicator_cancel" NOT IN ('X', 'Y', '1'))
      NOTE: Both CurrentSales and SalesHistory fact views contain the indicator_cancel column ('X' indicates cancelled).
      DO NOT join ZPVF_SD_CancelledSalesInvoice_01_TR across 30M rows, as multi-column string join on 30M rows exhausts HANA memory (GLOBAL_ALLOCATION_LIMIT).
    - Customer Status: ALWAYS filter (cm.KLABC IS NULL OR cm.KLABC <> 'X') on ZIVF_CustomerMaster_01_MD (exclude deleted/test/scrap customers).
 4. Business Metrics:
-   - Sales / Revenue = SUM(fact.invoice_value)
-   - Volume / Quantity = SUM(fact.Tyre_Quantity) or SUM(fact.volume)
-   - Net Sales = SUM(fact.invoice_value) - SUM(COALESCE(fact.total_discount, 0))
-   - Average Realization = SUM(fact.invoice_value) / NULLIF(SUM(fact.Tyre_Quantity), 0)
-   - Planned Target Value = SUM(PLAN_VALUE), Planned Qty = SUM(ORG_PLAN)
-   - Target Achievement % = (SUM(fact.invoice_value) / NULLIF(SUM(PLAN_VALUE), 0)) * 100
+   - Sales / Revenue = SUM(fact."invoice_value")
+   - Volume / Quantity = SUM(fact."Tyre_Quantity") or SUM(fact."volume")
+   - Net Sales = SUM(fact."invoice_value") - SUM(COALESCE(fact."total_discount", 0))
+   - Average Realization = SUM(fact."invoice_value") / NULLIF(SUM(fact."Tyre_Quantity"), 0)
+   - Planned Target Value = SUM(tgt.PLAN_VALUE), Planned Qty = SUM(tgt.ORG_PLAN)
+   - Target Value Achievement % = (SUM(fact."invoice_value") / NULLIF(SUM(tgt.PLAN_VALUE), 0)) * 100
+   - Target Qty Achievement % = (SUM(fact."Tyre_Quantity") / NULLIF(SUM(tgt.ORG_PLAN), 0)) * 100
 """
         chunks.append(_chunk(biz_rules, db="SAP_S4", table="BUSINESS_RULES", kind="schema"))
 
@@ -1239,14 +1247,18 @@ def _mistral(system, user, retries=2, temperature=0.15):
     
     for attempt in range(retries + 1):
         try:
+            _t0 = time.time()
             response = call_llm_chat(messages, json_mode=True, temperature=temperature)
+            _t1 = time.time()
+            print(f"[LLM] call_llm_chat completed in {_t1 - _t0:.3f}s (attempt {attempt+1})")
             if response:
                 return json.loads(response)
             return None
         except Exception as e:
-            print(f"[LLM] error attempt {attempt+1}: {e}")
+            import traceback
+            print(f"[LLM] error attempt {attempt+1}: {type(e).__name__}: {e}")
+            print(f"[LLM] Traceback:\n{traceback.format_exc()}")
             if attempt == retries: return None
-            import time
             time.sleep(1)
     return None
 
@@ -1302,92 +1314,267 @@ If a component is missing from the user's question, set it to null.
 DEFAULT_SQL_SYS = """You are a Senior Data Analyst, SQL Expert, and Business Intelligence Assistant specializing in SAP S/4HANA Sales & Distribution (SD) analytics.
 
 PRIMARY OBJECTIVE:
-Generate SAP HANA SQL that computes answers from the FULL DATASET in schema "SAP_S4".
+Generate clean, highly efficient, and 100% syntactically correct SAP HANA SQL that computes answers from schema "SAP_S4".
 
 SCHEMA & BUSINESS DEFINITIONS:
-1. TARGET SCHEMA / DATABASE:
-   - For SAP S/4HANA, the target schema is "SAP_S4".
+1. TARGET SCHEMA / VIEWS:
+   - Schema: "SAP_S4"
    - Fact Views:
-     * "SAP_S4"."ZPVF_SD_CurrentSales_01_TR" (Current Period / MTD Sales Fact View)
-     * "SAP_S4"."ZPVF_SD_SalesHistory_01_TR" (Historical Sales Fact View)
-     * "SAP_S4"."ZPVF_SD_CancelledSalesInvoice_01_TR" (Cancelled Sales Invoices View)
-     * "SAP_S4"."ZIVF_SD_Sales_Plan_Target_01_TR" (Sales Plan & Target View)
-   - Master Views:
-     * Customer Master: "SAP_S4"."ZIVF_CustomerMaster_01_MD" (Join: fact.dealer_code = cm.KUNNR)
-       Name column: cm.NAME1. MANDATORY FILTER: (cm.KLABC IS NULL OR cm.KLABC <> 'X')
-     * SKU / Product Master: "SAP_S4"."ZIVR_SKUMaster_01_TR" (Join: fact.SKU = sk.MATNR)
-       Description: sk.MAKTX or sk.PROD_TITLE, Brand: sk.BRAND, Sub Brand: sk.SUB_BRAND, Category code: sk.CAT_CODE
-       Construction (Tyre type / Radial / Bias): sk.CONSTUCTION (or sk.BULD_TYPE)
-       Tyre / Vehicle Type: sk.TYRE_TYPE (or sk.TYRE_TP, e.g. TRUCK, LCV, CAR, 3W, SCV, FARM, OTR)
-     * Category Master: "SAP_S4"."ZIVF_CategoryMaster_01_TR" (Join: sk.CAT_CODE = cat.CAT_CODE)
-       Category description: cat.CAT_DESC (Tyre, Tube, Flap)
-     * Territory Master: "SAP_S4"."ZIVF_TerritoryMaster_01_TR" (Join: cm.BZIRK = tm.BZIRK)
+     * "SAP_S4"."ZPVF_SD_CurrentSales_01_TR" (Current Period / Rolling MTD Sales Fact View - FAST, use for current sales, top customers, recent data)
+     * "SAP_S4"."ZPVF_SD_SalesHistory_01_TR" (Historical Sales Fact View - use for multi-year trends or historical prior periods)
+     * "SAP_S4"."ZPVF_SD_CancelledSalesInvoice_01_TR" (Cancelled Sales Invoices Reference View)
+     * "SAP_S4"."ZIVF_SD_Sales_Plan_Target_01_TR" (Sales Plan & Target View: Target Revenue = PLAN_VALUE or REV_PLAN_VAL, Target Qty = ORG_PLAN or REV_PLAN)
+   
+   - Master Views & Primary Join Keys:
+     * Customer Master: "SAP_S4"."ZIVF_CustomerMaster_01_MD"
+       JOIN: (fact."dealer_code" = cm.KUNNR OR LTRIM(fact."dealer_code", '0') = LTRIM(cm.KUNNR, '0'))
+       Customer Name: COALESCE(NULLIF(TRIM(cm.NAME1), ''), NULLIF(TRIM(cm.BNAME), ''), fact."dealer_code") AS customer_name
+       Mandatory Filter: (cm.KLABC IS NULL OR cm.KLABC <> 'X')
+       (CRITICAL: In SAP S/4HANA, KUNNR is 10 digits with leading zeros '0001105923' while dealer_code in facts is '1105923'. LTRIM matches them reliably. Also fallback to BNAME if NAME1 is empty).
+     * SKU / Material Master: "SAP_S4"."ZIVR_SKUMaster_01_TR" (JOIN: fact."SKU" = sk.MATNR)
+       Product Name: COALESCE(sk.MAKTX, sk.PROD_TITLE, fact."SKU") AS product_name, Brand: sk.BRAND, Sub Brand: sk.SUB_BRAND, Category Code: sk.CAT_CODE
+       Construction: sk.CONSTUCTION (Radial, Bias), Tyre Type: sk.TYRE_TYPE (TRUCK, LCV, CAR, 3W, SCV, FARM, OTR)
+     * Category Master: "SAP_S4"."ZIVF_CategoryMaster_01_TR" (JOIN: sk.CAT_CODE = cat.CAT_CODE)
+       Category Name: cat.CAT_DESC (Tyre, Tube, Flap)
+     * Territory Master: "SAP_S4"."ZIVF_TerritoryMaster_01_TR" (JOIN: cm.BZIRK = tm.BZIRK)
        Territory Name: tm.NAME, Region code: tm.REGIO, Zone code: tm.P_ZONE, Plant: tm.WERKS, Area: tm.AREA
-     * Region Master: "SAP_S4"."ZIVF_RegionMaster_MD_01" (Join: tm.REGIO = rm.region_code or cm.REGIO = rm.region_code)
-       Region Name: rm.region_name, Zone code: rm.zone_code
-     * Zone Master: "SAP_S4"."ZIVF_ZoneMaster_01_TR" (Join: rm.zone_code = zm.P_ZONE or tm.P_ZONE = zm.P_ZONE)
-       Zone Name: zm.NAME
-     * Date Attribute: "SAP_S4"."ZITR_DayAttribute_01_TR" (Join: fact.invoice_date = da.Date_)
+     * Region Master: "SAP_S4"."ZIVF_RegionMaster_MD_01" (JOIN: tm.REGIO = rm."region_code" OR cm.REGIO = rm."region_code")
+       Region Name: rm."region_name", Zone code: rm."zone_code"
+     * Zone Master: "SAP_S4"."ZIVF_ZoneMaster_01_TR" (JOIN: tm.P_ZONE = zm.P_ZONE OR rm."zone_code" = zm.P_ZONE)
+       Zone Name: zm.NAME (North Zone, South Zone, East Zone, West Zone, Central Zone)
+     * Date Attribute: "SAP_S4"."ZITR_DayAttribute_01_TR" (JOIN: fact."invoice_date" = da."Date_")
        Month: da.YMONTH, Year: da.CAL_YEAR, Qtr: da.QTR, Fin Year: da.FIN_YEAR
+     * Sales Plan & Target: "SAP_S4"."ZIVF_SD_Sales_Plan_Target_01_TR"
+       JOIN Keys: tgt.TERR_CODE = tm.BZIRK (Territory), tgt.REG_CODE = rm."region_code" (Region), tgt.YMONTH = da.YMONTH (Month/Period), tgt.MATNR = sk.MATNR (SKU), tgt.CAT_CODE = cat.CAT_CODE (Category)
+       Target Revenue: tgt.PLAN_VALUE (or tgt.REV_PLAN_VAL), Target Qty: tgt.ORG_PLAN (or tgt.REV_PLAN)
 
-2. MANDATORY FILTERS & BUSINESS RULES (CRITICAL):
-   - Customer Master Filter: ALWAYS filter (cm.KLABC IS NULL OR cm.KLABC <> 'X') on "SAP_S4"."ZIVF_CustomerMaster_01_MD" to exclude test/scrap/non-eligible accounts.
-   - Distribution Channel: ALWAYS filter (fact.distribution_channel = 10 OR fact.distribution_channel = '10') on sales fact views.
-   - Cancellation Check (MEMORY-SAFE FILTER):
-     ALWAYS filter cancellation directly on the fact view:
-     AND (fact.indicator_cancel IS NULL OR fact.indicator_cancel NOT IN ('X', 'Y', '1'))
-     CRITICAL: DO NOT JOIN "SAP_S4"."ZPVF_SD_CancelledSalesInvoice_01_TR" on large sales queries! Both fact views already have the indicator_cancel column ('X' = cancelled). Joining 30M rows with CancelledSalesInvoice exhausts SAP HANA transient memory (GLOBAL_ALLOCATION_LIMIT).
-   - Current Sales vs Historical Sales:
-     * If query is about current period / MTD: Use "SAP_S4"."ZPVF_SD_CurrentSales_01_TR".
-     * If query is specifically about prior historical periods: Use "SAP_S4"."ZPVF_SD_SalesHistory_01_TR".
-     * If query spans full time, trend across months, or YoY: Only project needed columns in UNION ALL:
-       (
-         SELECT distribution_channel, plant, invoice_number, invoice_date, indicator_cancel, dealer_code, ship_to_party, SKU, invoice_value, Tyre_Quantity
-         FROM "SAP_S4"."ZPVF_SD_CurrentSales_01_TR"
-         WHERE (distribution_channel = 10 OR distribution_channel = '10')
-           AND (indicator_cancel IS NULL OR indicator_cancel NOT IN ('X', 'Y', '1'))
-         UNION ALL
-         SELECT distribution_channel, plant, invoice_number, invoice_date, indicator_cancel, dealer_code, ship_to_party, SKU, invoice_value, Tyre_Quantity
-         FROM "SAP_S4"."ZPVF_SD_SalesHistory_01_TR"
-         WHERE (distribution_channel = 10 OR distribution_channel = '10')
-           AND (indicator_cancel IS NULL OR indicator_cancel NOT IN ('X', 'Y', '1'))
-       ) fact
-   - Canonical Customer Ranking Query (e.g. Top 2 Customers by total sales):
-     SELECT cm.NAME1 AS customer_name, fact.dealer_code, SUM(fact.invoice_value) AS total_sales
-     FROM "SAP_S4"."ZPVF_SD_SalesHistory_01_TR" fact
-     JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm ON fact.dealer_code = cm.KUNNR
-     WHERE (fact.distribution_channel = 10 OR fact.distribution_channel = '10')
-       AND (fact.indicator_cancel IS NULL OR fact.indicator_cancel NOT IN ('X', 'Y', '1'))
+2. CRITICAL SAP HANA CASE-SENSITIVITY & QUOTING RULES:
+   - In SAP HANA, unquoted column names automatically become UPPERCASE!
+   - Fact views (CurrentSales & SalesHistory) have LOWERCASE and MIXED-CASE column names.
+     YOU MUST ALWAYS ENCLOSE FACT COLUMNS IN DOUBLE QUOTES:
+     fact."dealer_code", fact."invoice_value", fact."Tyre_Quantity", fact."invoice_date", fact."distribution_channel", fact."indicator_cancel", fact."plant", fact."SKU", fact."ship_to_party", fact."total_discount", fact."taxable_value", fact."volume"
+   - Region Master has LOWERCASE column names: rm."region_code", rm."region_name", rm."zone_code".
+   - Date Master date column is MIXED-CASE: da."Date_".
+   - Master views (CustomerMaster, SKUMaster, CategoryMaster, TerritoryMaster, ZoneMaster, SalesPlanTarget) have UPPERCASE column names:
+     cm.NAME1, cm.KUNNR, cm.KLABC, cm.BZIRK, sk.MATNR, sk.BRAND, sk.MAKTX, sk.CONSTUCTION, sk.TYRE_TYPE, cat.CAT_DESC, tm.NAME, tm.REGIO, zm.NAME, tgt.PLAN_VALUE, tgt.ORG_PLAN.
+
+3. QUERY SIMPLICITY & PERFORMANCE RULES:
+   - KEEP QUERIES AS SIMPLE AND DIRECT AS POSSIBLE.
+   - For general sales questions, current period, top customers/dealers, or latest performance:
+     Query DIRECTLY from "SAP_S4"."ZPVF_SD_CurrentSales_01_TR" fact (or "SAP_S4"."ZPVF_SD_SalesHistory_01_TR" for historical data).
+     DO NOT write complex 31M-row UNION ALL queries unless the user specifically asks for multi-year historical trends or all-time data. Querying fact tables directly is clean, instant, and completely avoids memory limit errors!
+   - Distribution channel: If the user explicitly asks for a distribution channel or dealer channel, filter fact."distribution_channel" = '10' (as string literal). If not mentioned in the query, DO NOT filter by distribution channel so all valid sales are included!
+   - Cancellation check: AND (fact."indicator_cancel" IS NULL OR fact."indicator_cancel" NOT IN ('X', 'Y', '1')).
+     DO NOT join ZPVF_SD_CancelledSalesInvoice_01_TR.
+   - MASTER TABLES & DESCRIPTIVE NAMES / DESCRIPTIONS MANDATE:
+     Whenever the user query asks for Customers, Dealers, Products, Materials, SKUs, Categories, Territories, Regions, or Zones:
+     YOU MUST JOIN THE CORRESPONDING MASTER TABLE TO FETCH THE HUMAN-READABLE NAME/DESCRIPTION.
+     NEVER return only bare codes/IDs (e.g. dealer_code, MATNR, BZIRK, region_code, zone_code) without their descriptive name!
+     * Customer/Dealer Join:
+       When ranking or listing customers/dealers (Top N, Worst N, Performers):
+       ALWAYS use JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm (INNER JOIN):
+       ON (fact."dealer_code" = cm.KUNNR OR LTRIM(fact."dealer_code", '0') = LTRIM(cm.KUNNR, '0'))
+       SELECT: COALESCE(NULLIF(TRIM(cm.NAME1), ''), NULLIF(TRIM(cm.BNAME), ''), fact."dealer_code") AS customer_name, fact."dealer_code" AS customer_code
+       Filter: AND (cm.KLABC IS NULL OR cm.KLABC <> 'X')
+       (CRITICAL: Using JOIN guarantees every customer returned has a verified profile and name. Never allow 'cm.KUNNR IS NULL' in ranking queries, as it pulls unprofiled orphan accounting adjustments like 102425).
+     * SKU / Product: JOIN "SAP_S4"."ZIVR_SKUMaster_01_TR" sk ON fact."SKU" = sk.MATNR
+       SELECT: COALESCE(sk.MAKTX, sk.PROD_TITLE, fact."SKU") AS product_name, fact."SKU" AS sku_code
+     * Category: JOIN "SAP_S4"."ZIVF_CategoryMaster_01_TR" cat ON sk.CAT_CODE = cat.CAT_CODE
+       SELECT: cat.CAT_DESC AS category_name
+     * Territory: LEFT JOIN "SAP_S4"."ZIVF_TerritoryMaster_01_TR" tm ON cm.BZIRK = tm.BZIRK
+       SELECT: tm.NAME AS territory_name, tm.BZIRK AS territory_code
+     * Region: LEFT JOIN "SAP_S4"."ZIVF_RegionMaster_MD_01" rm ON (tm.REGIO = rm."region_code" OR cm.REGIO = rm."region_code")
+       SELECT: rm."region_name", rm."region_code"
+     * Zone: LEFT JOIN "SAP_S4"."ZIVF_ZoneMaster_01_TR" zm ON (tm.P_ZONE = zm.P_ZONE OR rm."zone_code" = zm.P_ZONE)
+       SELECT: zm.NAME AS zone_name
+   - CRITICAL CASE-INSENSITIVE TEXT FILTERING (SAP HANA RULE):
+     SAP HANA string comparisons are strictly case-sensitive! Whenever filtering on names or text attributes (e.g., rm."region_name", zm.NAME, sk.BRAND, cat.CAT_DESC, sk.TYRE_TYPE):
+     ALWAYS use case-insensitive matching with UPPER and LIKE or TRIM:
+     e.g., UPPER(TRIM(rm."region_name")) LIKE UPPER('%Jaipur%')
+     NEVER write rm."region_name" = 'Jaipur' as it returns 0 rows if stored in uppercase (e.g. 'JAIPUR')!
+   - NO UNREQUESTED DISTRIBUTION CHANNEL FILTER:
+     Filter fact."distribution_channel" = '10' ONLY IF the user explicitly asked for channel 10 or dealer channel. If not mentioned, DO NOT include fact."distribution_channel" = '10' so all valid channel sales are captured!
+   - SUBQUERY & CTE JOIN KEY HYGIENE (LEADING ZEROS):
+     Whenever comparing dealer/customer codes between CTEs, tables, or subqueries, ALWAYS wrap in LTRIM:
+     ON (LTRIM(ad.dealer_code, '0') = LTRIM(rs.dealer_code, '0'))
+   - TARGET VS ACTUAL / PLAN ACHIEVEMENT RULES:
+     Target view is at monthly planning grain (TERR_CODE, REG_CODE, YMONTH) and does NOT have dealer_code or daily dates.
+     NEVER join Sales Fact directly to Target Fact with an INNER/LEFT JOIN — this causes Cartesian product and duplicates numbers!
+     ALWAYS use Common Table Expressions (CTEs):
+     * CTE 1: actual_sales — Aggregate SUM(fact."invoice_value") AS actual_sales, SUM(fact."Tyre_Quantity") AS actual_qty from ZPVF_SD_CurrentSales_01_TR grouped by territory / region / zone / month.
+     * CTE 2: target_plans — Aggregate SUM(tgt.PLAN_VALUE) AS target_sales, SUM(tgt.ORG_PLAN) AS target_qty from ZIVF_SD_Sales_Plan_Target_01_TR grouped by tgt.TERR_CODE / tgt.REG_CODE / tgt.YMONTH.
+     * Outer Query: Join CTEs on territory/region/month, calculate % Value ((actual_sales / target_sales) * 100) and % Qty ((actual_qty / target_qty) * 100).
+
+   - YMONTH & DATE FILTERING HYGIENE:
+     * In "SAP_S4"."ZITR_DayAttribute_01_TR", da.YMONTH is a 6-digit string formatted as 'YYYYMM' (e.g. '202609', '202410').
+     * NEVER compare da.YMONTH = EXTRACT(MONTH FROM ...) because EXTRACT(MONTH) returns a single digit (1-12) while YMONTH is 6 digits!
+     * For "current month", "last month", or "recent period", NEVER use CURRENT_DATE because historical datasets may end earlier. Instead, find the latest month dynamically:
+       WHERE da.YMONTH = (SELECT MAX(sub_da.YMONTH) FROM "SAP_S4"."ZITR_DayAttribute_01_TR" sub_da WHERE sub_da."Date_" <= (SELECT MAX(sub_f."invoice_date") FROM "SAP_S4"."ZPVF_SD_CurrentSales_01_TR" sub_f))
+       or in CTE: WHERE dms.month = (SELECT MAX(m.month) FROM dealer_monthly_sales m)
+   - RESULT SET BOUNDING & ACTIONABLE LIMITS:
+     * When generating granular reports across multiple dimensions (e.g. region + territory + category + month) without narrow user filters, ALWAYS append an appropriate ORDER BY ... DESC LIMIT 100 (or LIMIT 50) to keep results actionable, fast, and UI-friendly.
+4. CANONICAL EXAMPLES:
+   - Top N Customers in a Region / Territory / Zone (e.g. Jaipur):
+     SELECT 
+       COALESCE(NULLIF(TRIM(cm.NAME1), ''), NULLIF(TRIM(cm.BNAME), ''), fact."dealer_code") AS customer_name, 
+       fact."dealer_code" AS customer_code, 
+       rm."region_name",
+       SUM(fact."invoice_value") AS total_sales_value
+     FROM "SAP_S4"."ZPVF_SD_CurrentSales_01_TR" fact
+     JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm 
+       ON (fact."dealer_code" = cm.KUNNR OR LTRIM(fact."dealer_code", '0') = LTRIM(cm.KUNNR, '0'))
+     LEFT JOIN "SAP_S4"."ZIVF_TerritoryMaster_01_TR" tm ON cm.BZIRK = tm.BZIRK
+     LEFT JOIN "SAP_S4"."ZIVF_RegionMaster_MD_01" rm ON (tm.REGIO = rm."region_code" OR cm.REGIO = rm."region_code")
+     WHERE (fact."indicator_cancel" IS NULL OR fact."indicator_cancel" NOT IN ('X', 'Y', '1'))
        AND (cm.KLABC IS NULL OR cm.KLABC <> 'X')
-     GROUP BY cm.NAME1, fact.dealer_code
+       AND UPPER(TRIM(rm."region_name")) LIKE UPPER('%Jaipur%')
+     GROUP BY COALESCE(NULLIF(TRIM(cm.NAME1), ''), NULLIF(TRIM(cm.BNAME), ''), fact."dealer_code"), fact."dealer_code", rm."region_name"
+     ORDER BY total_sales_value DESC
+     LIMIT 5
+
+   - Top 2 Customers by Total Sales:
+     SELECT 
+       COALESCE(NULLIF(TRIM(cm.NAME1), ''), NULLIF(TRIM(cm.BNAME), ''), fact."dealer_code") AS customer_name, 
+       fact."dealer_code" AS customer_code, 
+       SUM(fact."invoice_value") AS total_sales
+     FROM "SAP_S4"."ZPVF_SD_CurrentSales_01_TR" fact
+     JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm 
+       ON (fact."dealer_code" = cm.KUNNR OR LTRIM(fact."dealer_code", '0') = LTRIM(cm.KUNNR, '0'))
+     WHERE (fact."indicator_cancel" IS NULL OR fact."indicator_cancel" NOT IN ('X', 'Y', '1'))
+       AND (cm.KLABC IS NULL OR cm.KLABC <> 'X')
+     GROUP BY COALESCE(NULLIF(TRIM(cm.NAME1), ''), NULLIF(TRIM(cm.BNAME), ''), fact."dealer_code"), fact."dealer_code"
      ORDER BY total_sales DESC
      LIMIT 2
 
-3. CORE METRICS:
-   - Sales / Revenue: SUM(fact.invoice_value)
-   - Volume / Quantity: SUM(fact.Tyre_Quantity) or SUM(fact.volume)
-   - Net Sales: SUM(fact.invoice_value) - SUM(COALESCE(fact.total_discount, 0))
-   - Invoice Count: COUNT(DISTINCT fact.invoice_number)
-   - Dealer / Customer Count: COUNT(DISTINCT fact.dealer_code)
-   - Average Realization: SUM(fact.invoice_value) / NULLIF(SUM(fact.Tyre_Quantity), 0)
-   - Planned Target Value: SUM(tgt.PLAN_VALUE) from "SAP_S4"."ZIVF_SD_Sales_Plan_Target_01_TR"
-   - Target Achievement %: (SUM(fact.invoice_value) / NULLIF(SUM(tgt.PLAN_VALUE), 0)) * 100
+   - Worst 2 Customers / Lowest Performers:
+     SELECT 
+       COALESCE(NULLIF(TRIM(cm.NAME1), ''), NULLIF(TRIM(cm.BNAME), ''), fact."dealer_code") AS customer_name, 
+       fact."dealer_code" AS customer_code, 
+       SUM(fact."invoice_value") AS total_sales
+     FROM "SAP_S4"."ZPVF_SD_CurrentSales_01_TR" fact
+     JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm 
+       ON (fact."dealer_code" = cm.KUNNR OR LTRIM(fact."dealer_code", '0') = LTRIM(cm.KUNNR, '0'))
+     WHERE (fact."indicator_cancel" IS NULL OR fact."indicator_cancel" NOT IN ('X', 'Y', '1'))
+       AND (cm.KLABC IS NULL OR cm.KLABC <> 'X')
+     GROUP BY COALESCE(NULLIF(TRIM(cm.NAME1), ''), NULLIF(TRIM(cm.BNAME), ''), fact."dealer_code"), fact."dealer_code"
+     ORDER BY total_sales ASC
+     LIMIT 2
 
-4. SYNTAX & FORMATTING (SAP HANA SQL):
-   - Always qualify views with "SAP_S4"."VIEW_NAME".
-   - Use double quotes ONLY around schema and view names, e.g. "SAP_S4"."ZPVF_SD_SalesHistory_01_TR".
-   - DO NOT put double quotes around column names (write fact.dealer_code, cm.NAME1, fact.invoice_value). In SAP HANA, double quotes on columns enforce case sensitivity and cause invalid column errors.
-   - NEVER use MySQL backticks `.
-   - Date functions: YEAR(invoice_date), MONTH(invoice_date), TO_VARCHAR(invoice_date, 'YYYY-MM').
-   - For limits: use LIMIT N at the end of the query.
-   - For per-group rankings (e.g. top dealer per category/zone): use ROW_NUMBER() OVER (PARTITION BY ... ORDER BY SUM(...) DESC) AS rn.
-   - All non-aggregated SELECT columns must appear in GROUP BY.
-   - Output valid JSON only:
-     {
-       "db": "SAP_S4",
-       "sql": "SELECT ... FROM ...",
-       "reasoning": "..."
-     }
+   - Sales by Brand & Tyre Category:
+     SELECT sk.BRAND, sk.TYRE_TYPE, SUM(fact."invoice_value") AS total_sales, SUM(fact."Tyre_Quantity") AS total_qty
+     FROM "SAP_S4"."ZPVF_SD_CurrentSales_01_TR" fact
+     JOIN "SAP_S4"."ZIVR_SKUMaster_01_TR" sk ON fact."SKU" = sk.MATNR
+     WHERE fact."distribution_channel" = '10'
+       AND (fact."indicator_cancel" IS NULL OR fact."indicator_cancel" NOT IN ('X', 'Y', '1'))
+     GROUP BY sk.BRAND, sk.TYRE_TYPE
+     ORDER BY total_sales DESC
+
+   - Sales by Region & Zone:
+     SELECT zm.NAME AS zone_name, rm."region_name", SUM(fact."invoice_value") AS total_sales
+     FROM "SAP_S4"."ZPVF_SD_CurrentSales_01_TR" fact
+     JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm 
+       ON (fact."dealer_code" = cm.KUNNR OR LTRIM(fact."dealer_code", '0') = LTRIM(cm.KUNNR, '0'))
+     JOIN "SAP_S4"."ZIVF_TerritoryMaster_01_TR" tm ON cm.BZIRK = tm.BZIRK
+     JOIN "SAP_S4"."ZIVF_RegionMaster_MD_01" rm ON tm.REGIO = rm."region_code"
+     JOIN "SAP_S4"."ZIVF_ZoneMaster_01_TR" zm ON tm.P_ZONE = zm.P_ZONE
+     WHERE fact."distribution_channel" = '10'
+       AND (fact."indicator_cancel" IS NULL OR fact."indicator_cancel" NOT IN ('X', 'Y', '1'))
+       AND (cm.KLABC IS NULL OR cm.KLABC <> 'X')
+     GROUP BY zm.NAME, rm."region_name"
+     ORDER BY total_sales DESC
+
+   - Target vs Actual Sales & Achievement % by Territory, Region & Zone:
+     WITH actual_sales AS (
+       SELECT 
+         tm.BZIRK AS terr_code,
+         tm.NAME AS territory_name,
+         rm."region_name",
+         zm.NAME AS zone_name,
+         SUM(fact."Tyre_Quantity") AS actual_qty,
+         SUM(fact."invoice_value") AS actual_sales
+       FROM "SAP_S4"."ZPVF_SD_CurrentSales_01_TR" fact
+       JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm 
+         ON (fact."dealer_code" = cm.KUNNR OR LTRIM(fact."dealer_code", '0') = LTRIM(cm.KUNNR, '0'))
+       JOIN "SAP_S4"."ZIVF_TerritoryMaster_01_TR" tm ON cm.BZIRK = tm.BZIRK
+       JOIN "SAP_S4"."ZIVF_RegionMaster_MD_01" rm ON tm.REGIO = rm."region_code"
+       JOIN "SAP_S4"."ZIVF_ZoneMaster_01_TR" zm ON tm.P_ZONE = zm.P_ZONE
+       WHERE fact."distribution_channel" = '10'
+         AND (fact."indicator_cancel" IS NULL OR fact."indicator_cancel" NOT IN ('X', 'Y', '1'))
+         AND (cm.KLABC IS NULL OR cm.KLABC <> 'X')
+       GROUP BY tm.BZIRK, tm.NAME, rm."region_name", zm.NAME
+     ),
+     target_plans AS (
+       SELECT 
+         tgt.TERR_CODE AS terr_code,
+         SUM(tgt.ORG_PLAN) AS target_qty,
+         SUM(tgt.PLAN_VALUE) AS target_sales
+       FROM "SAP_S4"."ZIVF_SD_Sales_Plan_Target_01_TR" tgt
+       GROUP BY tgt.TERR_CODE
+     )
+     SELECT 
+       COALESCE(a.zone_name, 'Unknown') AS zone_name,
+       COALESCE(a."region_name", 'Unknown') AS region_name,
+       COALESCE(a.territory_name, 'Unknown') AS territory_name,
+       COALESCE(a.actual_qty, 0) AS actual_qty,
+       COALESCE(t.target_qty, 0) AS target_qty,
+       COALESCE(a.actual_sales, 0) AS actual_sales,
+       COALESCE(t.target_sales, 0) AS target_sales,
+       ROUND((COALESCE(a.actual_sales, 0) / NULLIF(t.target_sales, 0)) * 100, 2) AS value_achv_pct,
+       ROUND((COALESCE(a.actual_qty, 0) / NULLIF(t.target_qty, 0)) * 100, 2) AS qty_achv_pct
+     FROM actual_sales a
+     LEFT JOIN target_plans t ON a.terr_code = t.terr_code
+     ORDER BY actual_sales DESC
+     LIMIT 10
+
+   - Multi-year Historical Trend (ONLY when explicitly requested):
+     SELECT da.CAL_YEAR, da.YMONTH, SUM(fact."invoice_value") AS total_sales
+     FROM (
+       SELECT "distribution_channel", "invoice_date", "indicator_cancel", "invoice_value"
+       FROM "SAP_S4"."ZPVF_SD_CurrentSales_01_TR"
+       WHERE "distribution_channel" = '10'
+         AND ("indicator_cancel" IS NULL OR "indicator_cancel" NOT IN ('X', 'Y', '1'))
+       UNION ALL
+       SELECT "distribution_channel", "invoice_date", "indicator_cancel", "invoice_value"
+       FROM "SAP_S4"."ZPVF_SD_SalesHistory_01_TR"
+       WHERE "distribution_channel" = '10'
+         AND ("indicator_cancel" IS NULL OR "indicator_cancel" NOT IN ('X', 'Y', '1'))
+     ) AS fact
+     JOIN "SAP_S4"."ZITR_DayAttribute_01_TR" da ON fact."invoice_date" = da."Date_"
+     GROUP BY da.CAL_YEAR, da.YMONTH
+     ORDER BY da.CAL_YEAR, da.YMONTH
+
+   - Top N Per Month / Category (e.g. Top 2 Dealers Month-wise):
+     NEVER use 'LIMIT 2 BY month' (ClickHouse syntax invalid in SAP HANA).
+     ALWAYS use standard SQL window function ROW_NUMBER() OVER (PARTITION BY ...):
+     WITH ranked_dealers AS (
+       SELECT 
+         da.YMONTH AS month,
+         COALESCE(NULLIF(TRIM(cm.NAME1), ''), NULLIF(TRIM(cm.BNAME), ''), fact."dealer_code") AS dealer_name,
+         fact."dealer_code" AS dealer_code,
+         SUM(fact."Tyre_Quantity") AS total_quantity,
+         SUM(fact."invoice_value") AS total_sales,
+         ROW_NUMBER() OVER (PARTITION BY da.YMONTH ORDER BY SUM(fact."Tyre_Quantity") DESC) AS rn
+       FROM "SAP_S4"."ZPVF_SD_CurrentSales_01_TR" fact
+       JOIN "SAP_S4"."ZIVR_SKUMaster_01_TR" sk ON fact."SKU" = sk.MATNR
+       JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm 
+         ON (fact."dealer_code" = cm.KUNNR OR LTRIM(fact."dealer_code", '0') = LTRIM(cm.KUNNR, '0'))
+       JOIN "SAP_S4"."ZITR_DayAttribute_01_TR" da ON fact."invoice_date" = da."Date_"
+       WHERE (fact."indicator_cancel" IS NULL OR fact."indicator_cancel" NOT IN ('X', 'Y', '1'))
+         AND (cm.KLABC IS NULL OR cm.KLABC <> 'X')
+       GROUP BY da.YMONTH, COALESCE(NULLIF(TRIM(cm.NAME1), ''), NULLIF(TRIM(cm.BNAME), ''), fact."dealer_code"), fact."dealer_code"
+     )
+     SELECT month, dealer_name, dealer_code, total_quantity, total_sales
+     FROM ranked_dealers
+     WHERE rn <= 2
+     ORDER BY month DESC, rn ASC
+
+5. OUTPUT FORMAT:
+   Return valid JSON only:
+   {
+     "db": "SAP_S4",
+     "sql": "SELECT ... FROM ...",
+     "reasoning": "..."
+   }
 """
 
 DEFAULT_DEFAULT_TPL = """Business data summary ({len_chunks} total chunks):
@@ -1457,14 +1644,16 @@ DEEP ANALYSIS PROTOCOL:
 5. If SQL Results exist, ignore any conflicting retrieved chunks.
 6. Do NOT include "(source:...)" or "[source:...]" tags in the answer text.
 7. {followup_ins}
+8. ENTITY NAMES & CODES: When discussing entities (customers, dealers, products, territories), ALWAYS present the verified name alongside the code (e.g. "Alok Enterprises (Customer Code: 102425)"). NEVER refer to an entity solely by its numeric code if a customer_name, dealer_name, or product_name is available in the SQL results.
 
 VISUALIZATION RULES:
 If the question involves comparison, distribution, ranking, trends, or category breakdown, generate up to 3 visualizations in the "visualizations" array.
+CRITICAL: For entity rankings/breakdowns (customers, dealers, products, categories), ALWAYS use the human-readable entity name (e.g. "customer_name", "product_name") as the xKey and display label in charts, NOT bare numeric codes! Ensure both name and code are present in each data object.
 Supported types:
 1. Table:
    {"type":"table", "title":"...", "columns":[{"key":"colKey","label":"Col Label"}], "data":[{"colKey":"value"}]}
 2. Bar Chart:
-   {"type":"bar_chart", "title":"...", "xKey":"category", "yKey":"value", "data":[{"category":"A","value":100}]}
+   {"type":"bar_chart", "title":"...", "xKey":"customer_name", "yKey":"total_sales", "data":[{"customer_name":"ABC Enterprises","customer_code":"102425","total_sales":100}]}
 3. Line Chart (for trends over time):
    {"type":"line_chart", "title":"...", "xKey":"month", "yKey":"value", "seriesKey":"series", "data":[{"series":"Radial","month":"Jan","value":100}]}
 
@@ -1830,7 +2019,7 @@ def _build_business_map(table_cols, workspace_id):
     from database.prompt_loader import get_prompt
     
     # Defaults (Fallback if no config found)
-    FACT_TABLE_HINTS = ["invoice", "sales", "saleshistory", "currentsales", "zpvf_sd_saleshistory_01_tr", "zpvf_sd_currentsales_01_tr"]
+    FACT_TABLE_HINTS = ["currentsales", "zpvf_sd_currentsales_01_tr", "invoice", "sales", "saleshistory", "zpvf_sd_saleshistory_01_tr"]
     MEASURE_COLUMN   = "invoice_value"
     DIMENSIONS = [
         {
@@ -1843,7 +2032,7 @@ def _build_business_map(table_cols, workspace_id):
             "label":    "customer",
             "fact_key": "dealer_code",
             "dim_key":  "KUNNR",
-            "owns":     ["NAME1", "BZIRK", "REGIO", "KLABC", "DLR_CATG", "Customer", "Cname"],
+            "owns":     ["NAME1", "BNAME", "BZIRK", "REGIO", "KLABC", "DLR_CATG", "Customer", "Cname"],
         },
         {
             "label":    "territory",
@@ -1866,12 +2055,15 @@ def _build_business_map(table_cols, workspace_id):
     ]
     PRODUCT_HIERARCHY = ["CAT_DESC", "CONSTUCTION", "TYRE_TYPE", "BRAND", "MAKTX", "CATEGORY", "CONSTRUCTION", "vehicle type"]
     COLUMN_SYNONYMS = {
-        "product category": "CAT_DESC", "category": "CAT_DESC", "categories": "CAT_DESC",
+        "product category": "CAT_DESC", "category": "CAT_DESC", "categories": "CAT_DESC", "category name": "CAT_DESC",
         "construction": "CONSTUCTION", "tyre type": "CONSTUCTION", "tire type": "CONSTUCTION",
         "radial": "CONSTUCTION", "bias": "CONSTUCTION",
-        "brand": "BRAND", "product": "MAKTX", "material": "MATNR", "sku": "SKU",
-        "region": "region_name", "zone": "P_ZONE", "territory": "NAME",
-        "dealer": "NAME1", "customer": "NAME1", "dealer code": "dealer_code", "customer code": "KUNNR",
+        "brand": "BRAND", "product": "MAKTX", "product name": "MAKTX", "product description": "MAKTX",
+        "material": "MATNR", "material description": "MAKTX", "sku": "SKU",
+        "region": "region_name", "region name": "region_name", "zone": "P_ZONE", "zone name": "NAME",
+        "territory": "NAME", "territory name": "NAME",
+        "dealer": "NAME1", "customer": "NAME1", "dealer name": "NAME1", "customer name": "NAME1",
+        "dealer code": "dealer_code", "customer code": "KUNNR",
         "month": "YMONTH", "year": "CAL_YEAR", "quarter": "QTR",
         "sales": "invoice_value", "revenue": "invoice_value", "volume": "Tyre_Quantity",
     }
@@ -2047,18 +2239,26 @@ def _build_geography_prompt(table_cols):
     s4_terr = next((t for t in table_cols if "territorymaster" in t.lower()), None)
     s4_reg  = next((t for t in table_cols if "regionmaster" in t.lower()), None)
     s4_zone = next((t for t in table_cols if "zonemaster" in t.lower()), None)
+    s4_tgt  = next((t for t in table_cols if "plan_target" in t.lower() or "sales_plan" in t.lower()), None)
 
     if s4_cust and s4_terr:
-        reg_join = f"- Region Master: JOIN \"SAP_S4\".\"{s4_reg}\" rm ON tm.REGIO = rm.region_code (Region Name: rm.region_name, Zone code: rm.zone_code)\n" if s4_reg else ""
-        zone_on = "rm.zone_code = zm.P_ZONE" if s4_reg else "tm.P_ZONE = zm.P_ZONE"
-        zone_join = f"- Zone Master: JOIN \"SAP_S4\".\"{s4_zone}\" zm ON {zone_on} (Zone Name: zm.NAME)\n" if s4_zone else ""
+        reg_join = f"- Region Master: LEFT JOIN \"SAP_S4\".\"{s4_reg}\" rm ON (tm.REGIO = rm.\"region_code\" OR cm.REGIO = rm.\"region_code\") (Region Name: rm.\"region_name\", Zone code: rm.\"zone_code\")\n" if s4_reg else ""
+        zone_on = "rm.\"zone_code\" = zm.P_ZONE" if s4_reg else "tm.P_ZONE = zm.P_ZONE"
+        zone_join = f"- Zone Master: LEFT JOIN \"SAP_S4\".\"{s4_zone}\" zm ON {zone_on} (Zone Name: zm.NAME)\n" if s4_zone else ""
+        tgt_hint = (
+            f"- Sales Plan & Target: \"SAP_S4\".\"{s4_tgt}\" tgt (Join keys: tgt.TERR_CODE = tm.BZIRK, tgt.REG_CODE = rm.\"region_code\")\n"
+            f"  CRITICAL FOR TARGET VS ACTUAL: Use separate CTEs for actual sales and target plan, never direct JOIN.\n"
+        ) if s4_tgt else ""
         return (
             f"\n\nSAP S/4HANA GEOGRAPHY CHAIN (MANDATORY):\n"
-            f"- Customer Master: \"SAP_S4\".\"{s4_cust}\" cm (fact.dealer_code = cm.KUNNR, FILTER: (cm.KLABC IS NULL OR cm.KLABC <> 'X'))\n"
-            f"- Territory Master: JOIN \"SAP_S4\".\"{s4_terr}\" tm ON cm.BZIRK = tm.BZIRK (Territory Name: tm.NAME, Region code: tm.REGIO, Zone code: tm.P_ZONE)\n"
+            f"- Customer Master: \"SAP_S4\".\"{s4_cust}\" cm (JOIN: (fact.\"dealer_code\" = cm.KUNNR OR LTRIM(fact.\"dealer_code\", '0') = LTRIM(cm.KUNNR, '0')), Customer Name: COALESCE(NULLIF(TRIM(cm.NAME1), ''), NULLIF(TRIM(cm.BNAME), ''), fact.\"dealer_code\"), FILTER: (cm.KLABC IS NULL OR cm.KLABC <> 'X'))\n"
+            f"- Territory Master: LEFT JOIN \"SAP_S4\".\"{s4_terr}\" tm ON cm.BZIRK = tm.BZIRK (Territory Name: tm.NAME, Region code: tm.REGIO, Zone code: tm.P_ZONE)\n"
             f"{reg_join}"
             f"{zone_join}"
-            f"Reference columns ONLY on their owning view: Territory name is tm.NAME, Region name is rm.region_name, Zone name is zm.NAME."
+            f"{tgt_hint}"
+            f"Reference columns ONLY on their owning view: Customer name is cm.NAME1 (fallback cm.BNAME), Territory name is tm.NAME, Region name is rm.\"region_name\", Zone name is zm.NAME.\n"
+            f"CRITICAL: Always use LEFT JOIN for Territory, Region, and Zone Master so customers with unassigned territories are never dropped.\n"
+            f"CRITICAL STRING FILTER RULE: String matching in SAP HANA is case-sensitive! Always use UPPER(TRIM(col)) LIKE UPPER('%value%') (e.g. UPPER(TRIM(rm.\"region_name\")) LIKE UPPER('%Jaipur%')) instead of strict equality."
         )
 
     g = GEOGRAPHY_CHAIN
@@ -2188,7 +2388,34 @@ def _grouping_hint(question, biz):
 def _safe_visualizations(vizs):
     return [v for v in vizs if isinstance(v,dict) and v.get("type") and v.get("title")]
 
-def session_rag_chat_controller(get_connection_func):
+def _is_unbounded_heavy_comparison(question: str) -> bool:
+    """
+    Detects if the query is an actual vs target/plan comparison or heavy multi-dimensional
+    monthly report that spans all historical data without any time limit or period constraint.
+    """
+    q = (question or "").lower()
+    
+    # Check if question asks for actual vs target/plan or multi-dimensional monthly performance
+    is_plan_comparison = bool(re.search(
+        r'\b(?:actual\s+(?:sales\s+)?(?:vs|against)\s+(?:sales\s+)?plan|target\s+vs\s+actual|actual\s+vs\s+target|achievement\s+percentage|performance\s+report)\b',
+        q, re.I
+    ))
+    
+    dim_count = sum(1 for dim in ['region', 'territory', 'category', 'product', 'customer', 'dealer', 'zone', 'sku'] if dim in q)
+    is_heavy_monthly = ('monthly' in q or 'by month' in q or 'month-wise' in q or 'month wise' in q) and dim_count >= 2
+    
+    if not (is_plan_comparison or is_heavy_monthly):
+        return False
+
+    # Check if question specifies ANY time range or period constraint
+    has_time_limit = bool(re.search(
+        r'\b(?:201[89]|202[0-9]|last\s+\d+\s+months?|past\s+\d+\s+months?|last\s+\d+\s+years?|last\s+quarter|past\s+quarter|q[1-4]|fy\s*\d{2,4}|financial\s+year|fiscal\s+year|current\s+year|this\s+year|current\s+month|this\s+month|last\s+month|previous\s+month|mtd|ytd|qtd|today|yesterday|january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec)\b',
+        q, re.I
+    ))
+    
+    return not has_time_limit
+
+def session_rag_chat_controller(get_connection_func, status_callback=None):
     data       = request.json or {}
     session_id     = (data.get("session_id")     or "").strip()
     question       = (data.get("question")       or "").strip()
@@ -2197,6 +2424,9 @@ def session_rag_chat_controller(get_connection_func):
     visit_number   = data.get("visit_number")
     login_token    = data.get("login_token")
     source_chat_id = (data.get("source_chat_id") or "").strip() or None
+
+    if status_callback:
+        status_callback("start")
 
     if not session_id:
         return jsonify({"status":"failed","statusCode":400,
@@ -2328,6 +2558,8 @@ def session_rag_chat_controller(get_connection_func):
         }), 200
 
     # Understand + Retrieve
+    if status_callback:
+        status_callback("analyzing")
     understanding = _understand(question, all_chunks)
     context       = _retrieve(all_chunks, bm25_idx, col, question, understanding)
     hist          = _history(history)
@@ -2336,6 +2568,8 @@ def session_rag_chat_controller(get_connection_func):
     # NEW ARCHITECTURE: INTENT ROUTER 
     intent = classify_intent(question, workspace_id, get_connection_func())
     print(f"[RAG] Router classified intent: {intent}")
+    if status_callback:
+        status_callback("retrieving", intent=intent)
     context = ""
 
     if intent == "HYBRID":
@@ -2361,6 +2595,62 @@ def session_rag_chat_controller(get_connection_func):
     # ─────────────────────────────────────────────
     if intent == "AGGREGATION":
         print(" Bypassing VectorDB. Routing to Structured Database (SQL/AQL)...")
+
+        # Guard: Check for unconstrained heavy multi-dimensional or actual vs plan queries across all history
+        if _is_unbounded_heavy_comparison(question):
+            print(f"[GUARD] Unbounded heavy comparison detected for question: '{question}' — generating dynamic LLM response & suggestions.")
+            
+            _guard_sys = (
+                "You are an expert enterprise business intelligence advisor. "
+                "The user asked an analytical question that requires aggregating massive enterprise transactional data "
+                "across multiple dimensions (e.g. regions, territories, categories, products, months) across all historical years without any time constraint. "
+                "State politely, clearly, and concisely in 2 sentences that the data volume across all historical years is too large to process, "
+                "and ask them to specify a time filter (such as a specific fiscal year, recent months, or a quarter). "
+                "Provide 3 tailored, highly relevant follow-up questions specifically adapted to the user's exact business question with concrete time periods "
+                "(e.g., 'for FY 2024', 'for last 6 months', 'for current year', etc.).\n"
+                "Respond ONLY in valid JSON matching this exact structure:\n"
+                "{\n"
+                '  "message": "Polite explanation and request for time filter...",\n'
+                '  "suggestions": ["Follow-up question 1 with time filter", "Follow-up question 2 with time filter", "Follow-up question 3 with time filter"]\n'
+                "}"
+            )
+            _guard_user = f"User Question: \"{question}\""
+            _guard_res = _mistral(_guard_sys, _guard_user, temperature=0.2)
+
+            if _guard_res and isinstance(_guard_res, dict) and _guard_res.get("message"):
+                _heavy_msg = _guard_res.get("message")
+                raw_sug = _guard_res.get("suggestions", [])
+                fuq = [str(s) for s in raw_sug if s]
+            else:
+                _heavy_msg = (
+                    "The data volume is too high to generate an all-time report across all regions, territories, and product categories.\n\n"
+                    "Please specify a time range or period in your question, such as:\n"
+                    "- **\"for 2024\"** (or **\"for FY 2024\"**)\n"
+                    "- **\"for last 6 months\"**\n"
+                    "- **\"for current year\"**"
+                )
+                fuq = [
+                    f"{question.rstrip('.')} for 2024",
+                    f"{question.rstrip('.')} for last 6 months",
+                    f"{question.rstrip('.')} for current year"
+                ]
+
+            _advance_turn(session_id)
+            actual_visit = _save_history(
+                get_connection_func, session_id, user_id,
+                question, _heavy_msg, fuq, understanding.get("intent", "AGGREGATION"), "answer",
+                login_token=login_token, visualizations=[], chat_id=active_chat_id
+            )
+            return jsonify({
+                "status":              "success",
+                "statusCode":          200,
+                "answer":              _heavy_msg,
+                "sql_query":           "",
+                "follow_up_questions": fuq,
+                "visualizations":      [],
+                "chat_id":             active_chat_id,
+                "visit_number":        actual_visit
+            }), 200
         schema_chunks = [c["text"] for c in all_chunks if c["kind"] in ("schema", "count")]
         schema_context = "\n".join(schema_chunks)
 
@@ -2382,7 +2672,25 @@ def session_rag_chat_controller(get_connection_func):
             sql_sys = DEFAULT_SQL_SYS
 
         sql_user = f"Schemas available:\n{schema_context}\n\nOriginal Question: {question}\n\nCanonical Query (Structured Intent):\n{canonical_query_str}"
-        sql_user += "\n\nCRITICAL FINAL RULE: NEVER SELECT or GROUP BY `customer_master.KUNNR` or any other dimension's Primary Key! You MUST SELECT and GROUP BY the Fact Table's Foreign Key (e.g. `sales_data.customer`) instead. Selecting dimension keys causes unmatched rows to lump together as NULLs."
+        if "SAP_S4" in schema_context or "ZPVF_" in schema_context:
+            sql_user += (
+                "\n\nCRITICAL MANDATE FOR NAMES & DESCRIPTIONS:\n"
+                "When the question asks for customers, products, categories, territories, regions, or zones, "
+                "you MUST join the corresponding Master table to the point and SELECT the human-readable NAME / DESCRIPTION:\n"
+                "- For Customer Name: ALWAYS join (fact.\"dealer_code\" = cm.KUNNR OR LTRIM(fact.\"dealer_code\", '0') = LTRIM(cm.KUNNR, '0')) and SELECT COALESCE(NULLIF(TRIM(cm.NAME1), ''), NULLIF(TRIM(cm.BNAME), ''), fact.\"dealer_code\") AS customer_name, fact.\"dealer_code\" AS customer_code.\n"
+                "- For Product/SKU: Join fact.\"SKU\" = sk.MATNR and SELECT COALESCE(sk.MAKTX, sk.PROD_TITLE, fact.\"SKU\") AS product_name, fact.\"SKU\" AS sku_code, sk.BRAND.\n"
+                "- For Category: Join sk.CAT_CODE = cat.CAT_CODE and SELECT cat.CAT_DESC AS category_name, cat.CAT_CODE AS category_code.\n"
+                "- For Territory/Region/Zone: SELECT tm.NAME AS territory_name, tm.BZIRK AS territory_code, rm.\"region_name\", rm.\"region_code\", zm.NAME AS zone_name.\n"
+                "ALWAYS select BOTH the human-readable Name (for UI display) AND the Code (for safe JOINs across CTEs/subqueries)!\n\n"
+                "CRITICAL RULES FOR ACTUAL VS TARGET / PLAN COMPARISONS:\n"
+                "1. Target View 'ZIVF_SD_Sales_Plan_Target_01_TR' ALREADY has 'YMONTH' directly on the view! NEVER join 'ZITR_DayAttribute_01_TR' to the target view (DayAttribute has daily rows, so joining on YMONTH creates a catastrophic 30x Cartesian duplicate explosion and takes 200+ seconds)!\n"
+                "2. When comparing Actual Sales vs Target Plans using CTEs:\n"
+                "   - In CTE 1 (actual_sales): Select and group by BOTH the display name and code (e.g. tm.NAME AS territory_name, tm.BZIRK AS territory_code, rm.\"region_name\", rm.\"region_code\", cat.CAT_DESC AS category_name, cat.CAT_CODE AS category_code, da.YMONTH AS month).\n"
+                "   - In CTE 2 (target_plans): Query directly from \"SAP_S4\".\"ZIVF_SD_Sales_Plan_Target_01_TR\" tgt (DO NOT join DayAttribute). Select tgt.TERR_CODE AS territory_code, tgt.REG_CODE AS region_code, tgt.CAT_CODE AS category_code, tgt.YMONTH AS month, SUM(tgt.PLAN_VALUE) AS target_sales_value, SUM(tgt.ORG_PLAN) AS target_qty. Group by tgt.TERR_CODE, tgt.REG_CODE, tgt.CAT_CODE, tgt.YMONTH.\n"
+                "   - In Outer Query: JOIN CTEs on CODES (e.g. a.territory_code = t.territory_code AND a.month = t.month AND a.category_code = t.category_code). NEVER join a Name column to a Code column (e.g. NEVER do a.territory_name = t.terr_code)!"
+            )
+        else:
+            sql_user += "\n\nCRITICAL FINAL RULE: NEVER SELECT or GROUP BY `customer_master.KUNNR` or any other dimension's Primary Key! You MUST SELECT and GROUP BY the Fact Table's Foreign Key (e.g. `sales_data.customer`) instead. Selecting dimension keys causes unmatched rows to lump together as NULLs."
         schema_grounding, col_to_tables = _build_schema_grounding(schema_chunks)
         table_cols_map = _parse_schema_chunks(schema_chunks)
         if schema_grounding:
@@ -2549,7 +2857,8 @@ def session_rag_chat_controller(get_connection_func):
                                     run_query = run_query.replace('`', '"')
                                 # Replace any HDI container / user schema prefix like "SAP_S4#AI_BI_EXT" with "SAP_S4"
                                 run_query = re.sub(r'\"?SAP_S4#[a-zA-Z0-9_]+\"?', '"SAP_S4"', run_query, flags=re.IGNORECASE)
-                                # Ensure SAP_S4 schema prefix on SAP views if unqualified
+
+                                # Ensure SAP_S4 schema prefix on SAP views safely without duplicate quoting
                                 for sap_v in [
                                     "ZPVF_SD_CurrentSales_01_TR", "ZPVF_SD_SalesHistory_01_TR",
                                     "ZPVF_SD_CancelledSalesInvoice_01_TR", "ZIVF_SD_Sales_Plan_Target_01_TR",
@@ -2558,21 +2867,181 @@ def session_rag_chat_controller(get_connection_func):
                                     "ZIVF_RegionMaster_MD_01", "ZIVF_ZoneMaster_01_TR", "ZITR_DayAttribute_01_TR"
                                 ]:
                                     run_query = re.sub(
-                                        rf'(?<!SAP_S4\.)(?<!\"SAP_S4\"\.)\b("?{sap_v}"?)\b',
+                                        rf'(?:\"?SAP_S4\"?\.)?\"?{sap_v}\"?(?!\w)',
                                         rf'"SAP_S4"."{sap_v}"',
                                         run_query,
                                         flags=re.IGNORECASE
                                     )
-                                # In SAP HANA, double quotes on columns make them strictly case-sensitive.
-                                # Strip double quotes from table.column references (e.g. fact."invoice_number" -> fact.invoice_number)
-                                # so HANA matches them case-insensitively to SYS.VIEW_COLUMNS.
-                                run_query = re.sub(r'\b([a-zA-Z0-9_]+)\."([a-zA-Z0-9_]+)"', r'\1.\2', run_query)
-                                # Fix alias mismatches like C.INVOICE_NUMBER when alias is can or vice versa
-                                if 'can.' in run_query.lower() and 'c.' in run_query.lower():
-                                    run_query = re.sub(r'\bc\.', 'can.', run_query, flags=re.IGNORECASE)
 
+                                # Automatic Column Casing & Quoting for SAP S/4HANA (Strictly case-sensitive CDS views)
+                                # Map all lowercase and mixed-case columns to exact double-quoted identifiers
+                                sap_col_map = {
+                                    'DISTRIBUTION_CHANNEL': '"distribution_channel"',
+                                    'COMPANY_CODE': '"company_code"',
+                                    'INVOICE_TYPE': '"invoice_type"',
+                                    'PLANT': '"plant"',
+                                    'INVOICE_NUMBER': '"invoice_number"',
+                                    'INVOICE_DATE': '"invoice_date"',
+                                    'INDICATOR_CANCEL': '"indicator_cancel"',
+                                    'DEALER_CODE': '"dealer_code"',
+                                    'SHIP_TO_PARTY': '"ship_to_party"',
+                                    'BATCH': '"batch"',
+                                    'VOLUME': '"volume"',
+                                    'NDP_VALUE': '"ndp_value"',
+                                    'OLD_CODE': '"old_code"',
+                                    'TOTAL_DISCOUNT': '"total_discount"',
+                                    'GST': '"gst"',
+                                    'INVOICE_VALUE': '"invoice_value"',
+                                    'TAXABLE_VALUE': '"taxable_value"',
+                                    'TYRE_QUANTITY': '"Tyre_Quantity"',
+                                    'REGION_CODE': '"region_code"',
+                                    'REGION_NAME': '"region_name"',
+                                    'REGION_EMPLOYEE_NUMBER': '"region_employee_number"',
+                                    'PERSON_RESPONSIBLE': '"person_responsible"',
+                                    'ZONE_CODE': '"zone_code"',
+                                    'REGION_USER_ID': '"region_user_id"',
+                                    'MOBILE_NUMBER': '"mobile_number"',
+                                    'EMAIL_ID': '"email_id"',
+                                    'SMTPADDR': '"SmtpAddr"',
+                                    'DATE_': '"Date_"'
+                                }
+
+                                for u_col, exact_col in sap_col_map.items():
+                                    # Match alias."col" or alias.col cleanly
+                                    run_query = re.sub(
+                                        rf'\b([a-zA-Z0-9_]+)\.\"?{u_col}\"?(?!\w)',
+                                        rf'\1.{exact_col}',
+                                        run_query,
+                                        flags=re.IGNORECASE
+                                    )
+                                    # Match standalone "col" or col
+                                    run_query = re.sub(
+                                        rf'(?<![a-zA-Z0-9_".])\"?{u_col}\"?(?![a-zA-Z0-9_"])',
+                                        exact_col,
+                                        run_query,
+                                        flags=re.IGNORECASE
+                                    )
+
+                                # Collapse any accidental double-quotes: ""col"" -> "col"
+                                run_query = re.sub(r'\"\"+', '"', run_query)
+                                # Collapse any duplicated schema: "SAP_S4"."SAP_S4". -> "SAP_S4".
+                                run_query = re.sub(r'(?:\"SAP_S4\"\.)+', '"SAP_S4".', run_query, flags=re.IGNORECASE)
+
+                                # Standardize distribution_channel filter to string '10' (avoid implicit type conversion on NVARCHAR)
+                                run_query = re.sub(r'\"distribution_channel\"\s*=\s*10\b', r'"distribution_channel" = \'10\'', run_query)
+                                run_query = re.sub(r'\bdistribution_channel\s*=\s*10\b', r'"distribution_channel" = \'10\'', run_query)
+
+                                # Ensure subquery alias has AS keyword for strict HANA parser: ") fact" -> ") AS fact"
+                                run_query = re.sub(r'\)\s+(fact|sub|cs|sh|t)\b', r') AS \1', run_query, flags=re.IGNORECASE)
+
+                                # Auto-heal Customer Master join on leading zeros if LTRIM was omitted by LLM
+                                if ("cm.kunnr" in run_query.lower() or "zivf_customermaster_01_md" in run_query.lower()) and "ltrim" not in run_query.lower():
+                                    run_query = re.sub(
+                                        r'(?:fact\.)?\"?dealer_code\"?\s*=\s*(?:cm\.)?\"?KUNNR\"?',
+                                        r'(fact."dealer_code" = cm.KUNNR OR LTRIM(fact."dealer_code", \'0\') = LTRIM(cm.KUNNR, \'0\'))',
+                                        run_query,
+                                        flags=re.IGNORECASE
+                                    )
+                                    run_query = re.sub(
+                                        r'(?:cm\.)?\"?KUNNR\"?\s*=\s*(?:fact\.)?\"?dealer_code\"?',
+                                        r'(fact."dealer_code" = cm.KUNNR OR LTRIM(fact."dealer_code", \'0\') = LTRIM(cm.KUNNR, \'0\'))',
+                                        run_query,
+                                        flags=re.IGNORECASE
+                                    )
+
+                                # Auto-heal single-column COALESCE(cm.NAME1, fact."dealer_code") to include BNAME fallback
+                                run_query = re.sub(
+                                    r'COALESCE\s*\(\s*(?:cm\.)?\"?NAME1\"?\s*,\s*(?:fact\.)?\"?dealer_code\"?\s*\)',
+                                    r'COALESCE(NULLIF(TRIM(cm.NAME1), \'\'), NULLIF(TRIM(cm.BNAME), \'\'), fact."dealer_code")',
+                                    run_query,
+                                    flags=re.IGNORECASE
+                                )
+
+                                # Ensure Territory, Region, and Zone Master use LEFT JOIN so missing territories never drop customer sales
+                                run_query = re.sub(
+                                    r'(?<!LEFT\s)\bJOIN\s+(\"?SAP_S4\"?\.)?\"?(ZIVF_TerritoryMaster_01_TR|ZIVF_RegionMaster_MD_01|ZIVF_ZoneMaster_01_TR)\"?',
+                                    r'LEFT JOIN \1"\2"',
+                                    run_query,
+                                    flags=re.IGNORECASE
+                                )
+                                # Collapse any accidental duplicated LEFT JOINs (e.g. "LEFT LEFT JOIN" -> "LEFT JOIN")
+                                run_query = re.sub(r'\b(?:LEFT\s+)+JOIN\b', 'LEFT JOIN', run_query, flags=re.IGNORECASE)
+
+                                # Auto-heal exact string equality on names/descriptions to case-insensitive UPPER LIKE in HANA
+                                run_query = re.sub(
+                                    r'((?:[a-zA-Z0-9_]+\.)?\"?(?:region_name|zone_name|NAME|BRAND|CAT_DESC|TYRE_TYPE)\"?)\s*=\s*\'([^\']+)\'',
+                                    lambda m: m.group(0) if m.group(2) in ('10', 'X', 'Y', '1') else f"UPPER(TRIM({m.group(1)})) LIKE UPPER('%{m.group(2)}%')",
+                                    run_query,
+                                    flags=re.IGNORECASE
+                                )
+
+                                # Auto-heal CTE joins missing LTRIM: ad.dealer_code = rs.dealer_code -> LTRIM(...) = LTRIM(...)
+                                run_query = re.sub(
+                                    r'([a-zA-Z0-9_]+)\.(?:dealer_code|customer_code|kunnr)\s*=\s*([a-zA-Z0-9_]+)\.(?:dealer_code|customer_code|kunnr)',
+                                    r"(LTRIM(\1.dealer_code, '0') = LTRIM(\2.dealer_code, '0'))",
+                                    run_query,
+                                    flags=re.IGNORECASE
+                                )
+
+                                # Auto-heal cm.KTOKD = 'Dealer' to case-insensitive match
+                                run_query = re.sub(
+                                    r'(?:cm\.)?\"?KTOKD\"?\s*=\s*\'([^\']+)\'',
+                                    r"UPPER(TRIM(cm.KTOKD)) LIKE UPPER('%\1%')",
+                                    run_query,
+                                    flags=re.IGNORECASE
+                                )
+
+                                # Auto-heal: Prevent 30x Cartesian blow-up in Target Fact if LLM joined DayAttribute on YMONTH
+                                if "ZIVF_SD_Sales_Plan_Target_01_TR" in run_query and "ZITR_DayAttribute_01_TR" in run_query:
+                                    run_query = re.sub(
+                                        r'\bJOIN\s+(?:\"?SAP_S4\"?\.)?\"?ZITR_DayAttribute_01_TR\"?\s+(?:AS\s+)?([a-zA-Z0-9_]+)\s+ON\s+[a-zA-Z0-9_]+\.YMONTH\s*=\s*\1\.YMONTH',
+                                        ' ',
+                                        run_query,
+                                        flags=re.IGNORECASE
+                                    )
+
+                                # Auto-heal: Prevent Name = Code join in CTE comparisons (e.g. a.territory_name = t.terr_code)
+                                run_query = re.sub(
+                                    r'\b([a-zA-Z0-9_]+)\.territory_name\s*=\s*([a-zA-Z0-9_]+)\.(?:terr_code|territory_code)\b',
+                                    r'(\1.territory_name = \2.terr_code OR \1.territory_name = \2.territory_code)',
+                                    run_query,
+                                    flags=re.IGNORECASE
+                                )
+
+                                # For ranking queries (Top N / Worst N customers), upgrade LEFT JOIN to JOIN on Customer Master
+                                # so unprofiled internal codes without customer names (e.g. 102425) are excluded
+                                if re.search(r'ORDER\s+BY\s+.*?(?:total_sales|total_qty|invoice_value)', run_query, re.I) and "customermaster" in run_query.lower():
+                                    run_query = re.sub(
+                                        r'\bLEFT\s+JOIN\s+(\"?SAP_S4\"?\.)?\"?ZIVF_CustomerMaster_01_MD\"?',
+                                        r'JOIN \1"ZIVF_CustomerMaster_01_MD"',
+                                        run_query,
+                                        flags=re.IGNORECASE
+                                    )
+                                    run_query = re.sub(
+                                        r'(?:cm\.)?\"?KUNNR\"?\s*IS\s*NULL\s*OR\s*',
+                                        '',
+                                        run_query,
+                                        flags=re.IGNORECASE
+                                    )
+                                    run_query = re.sub(
+                                        r'\s*OR\s*(?:cm\.)?\"?KUNNR\"?\s*IS\s*NULL\b',
+                                        '',
+                                        run_query,
+                                        flags=re.IGNORECASE
+                                    )
+
+                                print(f"[SQL_EXEC] Executing on SAP HANA:\n{run_query}")
+
+                            _t_exec_start = time.time()
                             cur_sql.execute(run_query)
+                            _t_exec_done = time.time()
+                            print(f"[SQL_EXEC] cur_sql.execute() finished in {_t_exec_done - _t_exec_start:.3f}s. Fetching all rows...")
+
+                            _t_fetch_start = time.time()
                             rows = cur_sql.fetchall()
+                            _t_fetch_done = time.time()
+                            print(f"[SQL_EXEC] cur_sql.fetchall() finished in {_t_fetch_done - _t_fetch_start:.3f}s. Rows fetched: {len(rows) if rows else 0}")
+
                             if is_hana:
                                 cols = [desc[0] for desc in cur_sql.description] if cur_sql.description else []
                                 sql_results = [dict(zip(cols, r)) for r in rows]
@@ -2582,6 +3051,106 @@ def session_rag_chat_controller(get_connection_func):
                                     sql_results = [dict(zip(cols, r)) for r in rows]
                                 else:
                                     sql_results = [dict(r) for r in rows]
+                            print(f"[SQL_EXEC] Dictionary mapping done. sql_results count = {len(sql_results)}")
+                            if status_callback:
+                                status_callback("computing", intent=intent, row_count=len(sql_results) if sql_results else 0)
+
+                            # ── SMART 0-ROW FALLBACK (SAP HANA) ──
+                            if is_hana and not sql_results:
+                                print("[SQL_EXEC] 0 rows returned from SAP HANA query. Attempting smart fallbacks...")
+                                
+                                # Fallback 1: If CurrentSales view returned 0 rows, try SalesHistory view
+                                if "ZPVF_SD_CurrentSales_01_TR" in run_query:
+                                    print("[SQL_EXEC] Fallback 1: Retrying on SalesHistory view instead of CurrentSales...")
+                                    alt_query = run_query.replace("ZPVF_SD_CurrentSales_01_TR", "ZPVF_SD_SalesHistory_01_TR")
+                                    try:
+                                        cur_sql.execute(alt_query)
+                                        h_rows = cur_sql.fetchall()
+                                        if h_rows:
+                                            cols = [desc[0] for desc in cur_sql.description] if cur_sql.description else []
+                                            sql_results = [dict(zip(cols, r)) for r in h_rows]
+                                            run_query = alt_query
+                                            sql_query = alt_query
+                                            print(f"[SQL_EXEC] SalesHistory fallback SUCCESS! Returned {len(sql_results)} rows.")
+                                    except Exception as h_ex:
+                                        print(f"[SQL_EXEC] SalesHistory fallback error: {h_ex}")
+
+                                # Fallback 1b: If SalesHistory view returned 0 rows, try CurrentSales view
+                                if not sql_results and "ZPVF_SD_SalesHistory_01_TR" in run_query:
+                                    print("[SQL_EXEC] Fallback 1b: Retrying on CurrentSales view instead of SalesHistory...")
+                                    alt_query = run_query.replace("ZPVF_SD_SalesHistory_01_TR", "ZPVF_SD_CurrentSales_01_TR")
+                                    try:
+                                        cur_sql.execute(alt_query)
+                                        h_rows = cur_sql.fetchall()
+                                        if h_rows:
+                                            cols = [desc[0] for desc in cur_sql.description] if cur_sql.description else []
+                                            sql_results = [dict(zip(cols, r)) for r in h_rows]
+                                            run_query = alt_query
+                                            sql_query = alt_query
+                                            print(f"[SQL_EXEC] CurrentSales fallback SUCCESS! Returned {len(sql_results)} rows.")
+                                    except Exception as h_ex:
+                                        print(f"[SQL_EXEC] CurrentSales fallback error: {h_ex}")
+
+                                # Fallback 2: If still 0 rows, check if distribution_channel = '10' is filtering out all records
+                                if not sql_results and "distribution_channel" in run_query:
+                                    if not re.search(r'\b(?:channel\s*10|dist(?:ribution)?\s*channel)\b', question, re.I):
+                                        print("[SQL_EXEC] Fallback 2: Relaxing distribution_channel = '10' constraint...")
+                                        relaxed_q = re.sub(r'(?:AND\s+)?(?:[a-zA-Z0-9_]+\.)?\"?distribution_channel\"?\s*=\s*\'?10\'?\s*(?:AND\s+)?', ' ', run_query, flags=re.IGNORECASE)
+                                        relaxed_q = re.sub(r'WHERE\s+(?:AND\s+)+', 'WHERE ', relaxed_q, flags=re.IGNORECASE)
+                                        relaxed_q = re.sub(r'WHERE\s*(GROUP|ORDER|\Z)', r'\1', relaxed_q, flags=re.IGNORECASE)
+                                        try:
+                                            cur_sql.execute(relaxed_q)
+                                            rel_rows = cur_sql.fetchall()
+                                            if rel_rows:
+                                                cols = [desc[0] for desc in cur_sql.description] if cur_sql.description else []
+                                                sql_results = [dict(zip(cols, r)) for r in rel_rows]
+                                                run_query = relaxed_q
+                                                sql_query = relaxed_q
+                                                print(f"[SQL_EXEC] Relaxed channel filter SUCCESS! Returned {len(sql_results)} rows.")
+                                        except Exception as rel_e:
+                                            print(f"[SQL_EXEC] Relaxed filter error: {rel_e}")
+
+                                # Fallback 3: Convert exact string equality in WHERE clause to case-insensitive UPPER LIKE
+                                if not sql_results and re.search(r"=\s*'([^']+)'", run_query):
+                                    print("[SQL_EXEC] Fallback 3: Converting exact string matches to UPPER LIKE in WHERE clause...")
+                                    like_q = re.sub(
+                                        r"((?:[a-zA-Z0-9_]+\.)?\"?[a-zA-Z0-9_]+\"?)\s*=\s*\'([^\']+)\'",
+                                        lambda m: m.group(0) if m.group(2) in ('10', 'X', 'Y', '1') else f"UPPER(TRIM({m.group(1)})) LIKE UPPER('%{m.group(2)}%')",
+                                        run_query
+                                    )
+                                    if like_q != run_query:
+                                        try:
+                                            cur_sql.execute(like_q)
+                                            l_rows = cur_sql.fetchall()
+                                            if l_rows:
+                                                cols = [desc[0] for desc in cur_sql.description] if cur_sql.description else []
+                                                sql_results = [dict(zip(cols, r)) for r in l_rows]
+                                                run_query = like_q
+                                                sql_query = like_q
+                                                print(f"[SQL_EXEC] Case-insensitive UPPER LIKE fallback SUCCESS! Returned {len(sql_results)} rows.")
+                                        except Exception as l_ex:
+                                            print(f"[SQL_EXEC] UPPER LIKE fallback error: {l_ex}")
+
+                                # Fallback 4: If still 0 rows, relax ALL dimension joins to LEFT JOIN
+                                if not sql_results and "JOIN" in run_query:
+                                    print("[SQL_EXEC] Fallback 4: Relaxing all master/dimension joins to LEFT JOIN...")
+                                    left_q = re.sub(r'\bINNER\s+JOIN\b', 'LEFT JOIN', run_query, flags=re.IGNORECASE)
+                                    left_q = re.sub(r'(?<!LEFT\s)\bJOIN\s+(\"?SAP_S4\"?\.)?\"?(ZIV[FR]_[a-zA-Z0-9_]+)\"?', r'LEFT JOIN \1"\2"', left_q, flags=re.IGNORECASE)
+                                    # Also relax cm.KLABC or cm.KTOKD if dropping rows
+                                    left_q = re.sub(r'(?:AND\s+)?\(?\s*(?:cm\.)?KLABC\s*IS\s*NULL\s*OR\s*(?:cm\.)?KLABC\s*<>\s*\'X\'\s*\)?\s*(?:AND\s+)?', ' ', left_q, flags=re.IGNORECASE)
+                                    left_q = re.sub(r'WHERE\s+(?:AND\s+)+', 'WHERE ', left_q, flags=re.IGNORECASE)
+                                    left_q = re.sub(r'WHERE\s*(GROUP|ORDER|\Z)', r'\1', left_q, flags=re.IGNORECASE)
+                                    try:
+                                        cur_sql.execute(left_q)
+                                        j_rows = cur_sql.fetchall()
+                                        if j_rows:
+                                            cols = [desc[0] for desc in cur_sql.description] if cur_sql.description else []
+                                            sql_results = [dict(zip(cols, r)) for r in j_rows]
+                                            run_query = left_q
+                                            sql_query = left_q
+                                            print(f"[SQL_EXEC] Relaxed LEFT JOIN fallback SUCCESS! Returned {len(sql_results)} rows.")
+                                    except Exception as j_ex:
+                                        print(f"[SQL_EXEC] Relaxed LEFT JOIN fallback error: {j_ex}")
 
                             # Convert Decimal, Date, and non-serializable objects
                             import decimal
@@ -2596,15 +3165,19 @@ def session_rag_chat_controller(get_connection_func):
                             print(f"[SQL_EXEC] Success! Returned {len(sql_results)} rows.")
                             break
                         except Exception as ex:
-                            agg_sql_error = str(ex)
-                            print(f"[SQL_EXEC] Attempt {_attempt + 1} failed: {ex}")
+                            import traceback
+                            agg_sql_error = f"{type(ex).__name__}: {ex}"
+                            print(f"[SQL_EXEC] Attempt {_attempt + 1} FAILED! Type: {type(ex).__name__} | Error: {ex}")
+                            print(f"[SQL_EXEC] Traceback:\n{traceback.format_exc()}")
 
                             # Self-healing for HANA memory limits and column reference errors
                             if is_hana and ("cannot allocate enough memory" in str(ex).lower() or "allocation failed" in str(ex).lower()):
                                 try:
-                                    print("[SQL_EXEC] HANA memory limit hit — attempting auto-repair without CancelledSalesInvoice join...")
+                                    print("[SQL_EXEC] HANA memory limit hit — attempting auto-repair (lean CurrentSales / no join)...")
                                     repaired_sql = re.sub(r'LEFT\s+JOIN\s+.*?CancelledSalesInvoice.*?(?=WHERE|GROUP|ORDER|\n\s*WHERE|\Z)', ' ', sql_query, flags=re.IGNORECASE | re.DOTALL)
                                     repaired_sql = re.sub(r'\b(?:can|c)\.[a-zA-Z0-9_]+\s*IS\s*NULL', '1=1', repaired_sql, flags=re.IGNORECASE)
+                                    # Fallback: if UNION ALL on 30M SalesHistory caused OOM, switch to CurrentSales
+                                    repaired_sql = re.sub(r'UNION\s+ALL\s+SELECT\b.*?(?:ZPVF_SD_SalesHistory_01_TR|saleshistory).*?\)\s*(?:AS\s+)?(\w+)', r') AS \1', repaired_sql, flags=re.DOTALL | re.IGNORECASE)
                                     if repaired_sql != sql_query:
                                         sql_query = repaired_sql
                                         continue
@@ -2622,10 +3195,11 @@ def session_rag_chat_controller(get_connection_func):
                             if is_hana:
                                 repair_user += (
                                     "Common fixes for SAP HANA:\n"
-                                    "- Do NOT join 'ZPVF_SD_CancelledSalesInvoice_01_TR' if querying total sales from 'ZPVF_SD_SalesHistory_01_TR' (30M rows). Use: AND (fact.indicator_cancel IS NULL OR fact.indicator_cancel NOT IN ('X', 'Y', '1')).\n"
-                                    "- Do NOT put double quotes around column names; only quote schema \"SAP_S4\" and view names.\n"
-                                    "- Ensure column aliases match joined tables (e.g. do not reference C.INVOICE_NUMBER if table alias is 'can').\n"
-                                    "- Filter customer master with (cm.KLABC IS NULL OR cm.KLABC <> 'X').\n\n"
+                                    "- For current period / MTD questions, query directly from \"SAP_S4\".\"ZPVF_SD_CurrentSales_01_TR\". For general / historical questions, query \"SAP_S4\".\"ZPVF_SD_SalesHistory_01_TR\".\n"
+                                    "- Fact view columns are case-sensitive and must be double-quoted: fact.\"dealer_code\", fact.\"invoice_value\", fact.\"Tyre_Quantity\", fact.\"distribution_channel\".\n"
+                                    "- Customer master: For rankings (Top/Worst N), ALWAYS use JOIN (INNER JOIN) on \"SAP_S4\".\"ZIVF_CustomerMaster_01_MD\" cm ON (fact.\"dealer_code\" = cm.KUNNR OR LTRIM(fact.\"dealer_code\", '0') = LTRIM(cm.KUNNR, '0')) and select COALESCE(NULLIF(TRIM(cm.NAME1), ''), NULLIF(TRIM(cm.BNAME), ''), fact.\"dealer_code\") AS customer_name. NEVER allow cm.KUNNR IS NULL in ranking queries.\n"
+                                    "- Filter fact.\"distribution_channel\" = '10' ONLY IF explicitly requested by the user.\n"
+                                    "- Do NOT join 'ZPVF_SD_CancelledSalesInvoice_01_TR'. Use: AND (fact.\"indicator_cancel\" IS NULL OR fact.\"indicator_cancel\" NOT IN ('X', 'Y', '1')).\n\n"
                                 )
                             else:
                                 repair_user += (
@@ -2655,8 +3229,10 @@ def session_rag_chat_controller(get_connection_func):
                             else:
                                 break
             except Exception as e:
-                agg_sql_error = str(e)
-                print(f"[SQL_EXEC] Execution failed: {e}")
+                import traceback
+                agg_sql_error = f"{type(e).__name__}: {e}"
+                print(f"[SQL_EXEC] Outer execution block FAILED! Type: {type(e).__name__} | Error: {e}")
+                print(f"[SQL_EXEC] Traceback:\n{traceback.format_exc()}")
             finally:
                 if cur_sql: 
                     try: cur_sql.close() 
@@ -2669,21 +3245,54 @@ def session_rag_chat_controller(get_connection_func):
                     except: pass
 
             if sql_results:
-                # Override context with SQL results for final LLM generation
-                context = f"SQL Query executed: {sql_query}\n\nSQL Results:\n" + json.dumps(sql_results, indent=2, default=str)
+                total_rows = len(sql_results)
+                if total_rows > 25:
+                    # Calculate metric totals across all returned rows for the LLM
+                    numeric_sums = {}
+                    sample_row = sql_results[0]
+                    for col, val in sample_row.items():
+                        if isinstance(val, (int, float)) and not any(id_w in col.lower() for id_w in ("year", "month", "id", "code", "pct", "percent")):
+                            try:
+                                col_sum = sum(float(r.get(col) or 0) for r in sql_results if r.get(col) is not None)
+                                numeric_sums[col] = f"{col_sum:,.2f}"
+                            except Exception:
+                                pass
+
+                    summary_header = f"Total Records Returned: {total_rows:,}\n"
+                    if numeric_sums:
+                        summary_header += "Overall Metric Totals Across All Records:\n" + "\n".join([f"  - Total {k}: {v}" for k, v in numeric_sums.items()]) + "\n"
+
+                    sample_rows = sql_results[:20]
+                    context = (
+                        f"SQL Query executed: {sql_query}\n\n"
+                        f"{summary_header}\n"
+                        f"Sample Records (Showing top 20 of {total_rows:,} records):\n"
+                        f"{json.dumps(sample_rows, indent=2, default=str)}\n\n"
+                        f"IMPORTANT: The database query successfully returned {total_rows:,} records. "
+                        f"Provide a clear, high-level executive summary of the overall totals and key highlights "
+                        f"from the top records shown above. DO NOT try to list all {total_rows:,} records in text."
+                    )
+                else:
+                    context = f"SQL Query executed: {sql_query}\n\nSQL Results ({len(sql_results)} records):\n" + json.dumps(sql_results, indent=2, default=str)
 
         # Fallback if no SQL rows were produced
         if intent == "AGGREGATION" and not sql_results:
             _detail = f" (error: {agg_sql_error})" if agg_sql_error else ""
-            print(f"[AGGREGATION] No SQL rows returned{_detail} — retrieving knowledge context")
-            retrieved_ctx = _retrieve(all_chunks, bm25_idx, col, question, understanding)
-            context = (
-                f"SQL Execution Note: Direct SQL computation returned no rows{_detail}.\n"
-                f"Attempted Query: {sql_query if 'sql_query' in locals() else 'N/A'}\n\n"
-                f"Available Session Knowledge Context & Views:\n{retrieved_ctx}\n\n"
-                "Instruction: Answer the user's question clearly and helpfully using the available session context, views, schema definitions, and records. "
-                "If the direct numerical computation could not be fetched from the database, explain the relevant data structure, tables, and available insights accurately."
-            )
+            print(f"[AGGREGATION] No SQL rows returned! agg_sql_error={agg_sql_error!r} — setting clean zero-row context")
+            if agg_sql_error and any(w in agg_sql_error.lower() for w in ["memory", "allocation", "timeout", "timed out", "statement"]):
+                context = (
+                    "CRITICAL INSTRUCTION: State clearly and politely that the data volume is too high to process this query. "
+                    "Instruct the user to add a time limit to their question, such as 'for 2024', 'for last 6 months', or 'current year'."
+                )
+            else:
+                context = (
+                    f"SQL Execution Note: Direct SQL computation returned 0 rows (no matching records found in the database){_detail}.\n"
+                    f"Attempted Query: {sql_query if 'sql_query' in locals() else 'N/A'}\n"
+                    f"Question: {question}\n\n"
+                    "CRITICAL INSTRUCTION: State clearly, politely, and directly in 1 or 2 sentences that no records or transactions were found matching the specified criteria in the database. "
+                    "DO NOT generate lengthy paragraphs, diagnostic checklists, troubleshooting steps, or alternative query approaches. "
+                    "DO NOT explain database schemas or internal table architectures. Keep your response direct, concise, and professional."
+                )
 
     # Graph
     if _is_graph(question):
@@ -2783,6 +3392,9 @@ def session_rag_chat_controller(get_connection_func):
     if understanding.get("intent") == "AGGREGATION":
         _answer_msg += "\n\nCRITICAL INSTRUCTION FOR VISUALIZATIONS: Because this is an aggregation query, your 'visualizations' array MUST ONLY contain a 'table' (type='table'). DO NOT generate 'line_chart', 'bar_chart', or any other charts. DO NOT hallucinate dates or months!"
 
+    if status_callback:
+        status_callback("finalizing")
+
     res = _mistral(system_prompt, _answer_msg)
     if not res:
         return jsonify({"status":"error","statusCode":500,"message":"LLM failed"}), 500
@@ -2803,28 +3415,69 @@ def session_rag_chat_controller(get_connection_func):
     visualizations = _safe_visualizations(
         _normalize_visualizations(res.get("visualizations", []))
     )
+    if status_callback and visualizations:
+        status_callback("visualizing")
 
-    if understanding.get("intent") == "AGGREGATION" and sql_results:
-        keys_lower = [k.lower() for k in sql_results[0].keys()]
-        has_time = any(t in k for k in keys_lower for t in ['month', 'date', 'year'])
-        
-        columns = [{"key": k, "label": str(k).replace("_", " ").title()} for k in sql_results[0].keys()]
-        table_vis = {
-            "type": "table",
-            "title": "Data Table",
-            "columns": columns,
-            "data": sql_results
-        }
-        
-        if not has_time:
-            # Keep only bar_charts; drop hallucinated line/pie charts
-            visualizations = [v for v in visualizations if v.get("type") == "bar_chart"]
+    if understanding.get("intent") == "AGGREGATION":
+        if not sql_results:
+            # Zero rows: Drop all hallucinated charts/tables so frontend never renders blank widgets
+            visualizations = []
         else:
-            # Keep all non-table charts (like line_chart)
-            visualizations = [v for v in visualizations if v.get("type") != "table"]
+            keys = list(sql_results[0].keys())
+            keys_lower = [k.lower() for k in keys]
+            has_time = any(t in k for k in keys_lower for t in ['month', 'date', 'year'])
             
-        # ALWAYS append the perfectly formatted Python table, replacing any broken LLM table
-        visualizations.append(table_vis)
+            total_rows = len(sql_results)
+            # Read configurable threshold from system_configurations
+            csv_threshold = 30
+            try:
+                _cconn = get_connection_func()
+                from helper.system_config_service import get_system_config
+                csv_threshold = get_system_config(_cconn, "csv_export_threshold", default=30)
+                try: _cconn.close()
+                except: pass
+            except Exception:
+                csv_threshold = 30
+
+            columns = [{"key": k, "label": str(k).replace("_", " ").title()} for k in keys]
+            table_vis = None
+            if total_rows <= csv_threshold:
+                # If row count <= threshold: show ALL rows in chat table
+                table_vis = {
+                    "type": "table",
+                    "title": f"Data Table ({total_rows:,} records)",
+                    "columns": columns,
+                    "data": sql_results,
+                    "total_records": total_rows,
+                    "displayed_records": total_rows
+                }
+            
+            # Align and sanitize chart xKey, yKey, and data against actual SQL keys
+            # Charts display top 25 data points to guarantee clean readability and instant DOM rendering
+            MAX_CHART_POINTS = 25
+            chart_data = sql_results[:MAX_CHART_POINTS]
+            for v in visualizations:
+                if v.get("type") in ("bar_chart", "line_chart"):
+                    x_key = v.get("xKey")
+                    y_key = v.get("yKey")
+                    if x_key not in keys:
+                        cand_x = next((k for k in keys if any(m in k.lower() for m in ("name", "title", "code", "desc", "month", "year", "date"))), keys[0] if keys else "")
+                        v["xKey"] = cand_x
+                    if y_key not in keys:
+                        cand_y = next((k for k in keys if any(m in k.lower() for m in ("sales", "value", "qty", "quantity", "total", "count", "achv", "pct"))), keys[-1] if keys else "")
+                        v["yKey"] = cand_y
+                    v["data"] = chart_data
+
+            if not has_time:
+                # Keep only bar_charts; drop hallucinated line/pie charts
+                visualizations = [v for v in visualizations if v.get("type") == "bar_chart"]
+            else:
+                # Keep all non-table charts (like line_chart)
+                visualizations = [v for v in visualizations if v.get("type") != "table"]
+                
+            # ALWAYS append the perfectly formatted Python table ONLY if row count <= threshold
+            if table_vis:
+                visualizations.append(table_vis)
 
     # If user explicitly asked for table → keep only table
     if "table" in question.lower():
@@ -2842,6 +3495,38 @@ def session_rag_chat_controller(get_connection_func):
     if "table" in question.lower():
         visualizations = [v for v in visualizations if v.get("type") == "table"]
 
+    # ── Configurable CSV Export Check ──
+    from helper.system_config_service import get_system_config, generate_relevant_filename
+    _conf_th = 30
+    try:
+        _cconn = get_connection_func()
+        _conf_th = get_system_config(_cconn, "csv_export_threshold", default=30)
+        try: _cconn.close()
+        except: pass
+    except Exception:
+        _conf_th = 30
+
+    is_csv_export = False
+    csv_filename = ""
+    total_sql_count = len(sql_results) if sql_results else 0
+
+    if total_sql_count > _conf_th:
+        is_csv_export = True
+        csv_filename = generate_relevant_filename(question)
+        # Suppress table from chat when exceeding threshold
+        visualizations = [v for v in visualizations if v.get("type") != "table"]
+        csv_vis = {
+            "type": "csv_export",
+            "title": f"Data Export ({total_sql_count:,} records)",
+            "filename": csv_filename,
+            "total_records": total_sql_count,
+            "threshold": _conf_th,
+            "sql_query": sql_query,
+            "session_id": session_id
+        }
+        visualizations.append(csv_vis)
+        clean_answer = f"Total {total_sql_count:,} records found matching your query. The complete dataset is available for download as a CSV file below."
+
     _advance_turn(session_id)
     actual_visit = _save_history(get_connection_func, session_id, user_id,
                   question, clean_answer, fuq, understanding["intent"], "answer",
@@ -2855,6 +3540,9 @@ def session_rag_chat_controller(get_connection_func):
         "sql_query":           sql_query,
         "follow_up_questions": fuq,
         "visualizations":      visualizations,
+        "is_csv_export":       is_csv_export,
+        "csv_filename":        csv_filename,
+        "total_records":       total_sql_count,
         "chat_id":             active_chat_id,
         "visit_number":        actual_visit
     }), 200
@@ -2866,2489 +3554,4 @@ def session_rag_chat_controller(get_connection_func):
 
 
 
-
-
-## --------------------------------------- BKP --------------------------------------
-
-
-# import re, json, time, hashlib, math, requests, mysql.connector, threading, os
-# try:
-#     import psycopg2
-#     import psycopg2.extras
-#     PSYCOPG2_AVAILABLE = True
-# except ImportError:
-#     PSYCOPG2_AVAILABLE = False
-#     print("[RAG] psycopg2 not installed — PostgreSQL support disabled")
-# from collections import defaultdict
-# from flask import request, jsonify
-# from controllers.intent_router import classify_intent
-# from controllers.query_branches import execute_hybrid
-# from database.config import MISTRAL_API_KEY, MISTRAL_MODEL, MYSQL_CONFIG
-# from controllers.kgraph_service import (
-#     load_kgraph, build_sql_rules, resolve_grouping, detect_drilldown, validate_sql)
-# # ChromaDB persistent storage — vectors survive server restarts
-# CHROMA_PERSIST_DIR = os.path.join(
-#     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "chroma_store"
-# )
-# os.makedirs(CHROMA_PERSIST_DIR, exist_ok=True)
-
-# MISTRAL_URL        = "https://api.mistral.ai/v1/chat/completions"
-# MAX_ROWS           = 200
-# TOP_K              = 80
-# CACHE_TTL          = 600
-# MAX_CTX_CHARS      = 15000
-
-# _CACHE   = {}
-# _CLIENTS = {}
-# _LOCKS   = {}
-
-# _FOLLOWUP_CYCLE = ["What", "Where", "Why"]
-# _TURN_COUNTER   = {}
-
-# def _next_followup_type(session_id):
-#     turn = _TURN_COUNTER.get(session_id, 0)
-#     return _FOLLOWUP_CYCLE[turn % 3]
-
-# def _advance_turn(session_id):
-#     _TURN_COUNTER[session_id] = _TURN_COUNTER.get(session_id, 0) + 1
-
-# def _followup_instruction(ftype):
-
-#     if ftype.lower() == "what":
-#         count = 5
-#     elif ftype.lower() == "where":
-#         count = 3
-#     elif ftype.lower() == "why":
-#         count = 3
-#     else:
-#         count = 3
-
-#     questions = ",\n".join([f'"{ftype} ...?"' for _ in range(count)])
-
-#     return f"""
-# Generate exactly {count} intelligent follow-up questions based on the previous answer.
-
-# STRICT RULES:
-# 1. Questions must be high-level BUSINESS INSIGHT questions.
-# 2. Questions must be directly related to the returned data.
-
-# Do not assume:
-# - causes
-# - risks
-# - opportunities
-# - business strategy
-# - customer behaviour
-# - operational issues
-
-# Only ask questions supported by the data.
-# 3. Questions must encourage deeper analysis, strategic thinking, or early problem detection.
-# 4. DO NOT mention table names, database names, column names, or technical terms.
-# 5. Questions should sound like executive/business analyst questions.
-# 6. Each question must start with "{ftype}".
-
-# Return ONLY:
-
-# "follow_up_questions":[
-# {questions}
-# ]
-# """
-
-# GRAPH_KW  = {"graph","chart","plot","visualize","visualise","bar","pie","line","histogram","scatter"}
-# REPORT_KW = {"report","summary report","generate report","make a report","create a report","write a report"}
-# GREET_RE  = re.compile(r'^\s*(hi+|hello+|hey+|howdy|greetings|sup|yo+|hiya|good\s*(morning|afternoon|evening|night)|what\'?s\s*up)\s*[!?.]*\s*$', re.I)
-
-
-# # ══════════════════════════════════════════════════════
-# # OPTIMIZATION 1: Global models loaded once at startup
-# # ══════════════════════════════════════════════════════
-
-# _EMBED_MODEL   = None
-# _CROSS_ENCODER = None
-# _MODEL_LOCK    = threading.Lock()
-
-# # OPTIMIZATION 2: Embedding cache
-# _EMBED_CACHE   = {}
-
-
-# def _get_embed_model():
-#     global _EMBED_MODEL
-#     if _EMBED_MODEL is None:
-#         with _MODEL_LOCK:
-#             if _EMBED_MODEL is None:
-#                 from sentence_transformers import SentenceTransformer
-#                 print("[RAG] Loading SentenceTransformer globally...")
-#                 _EMBED_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
-#                 print("[RAG] SentenceTransformer ready")
-#     return _EMBED_MODEL
-
-
-# def _get_cross_encoder():
-#     global _CROSS_ENCODER
-#     if _CROSS_ENCODER is None:
-#         with _MODEL_LOCK:
-#             if _CROSS_ENCODER is None:
-#                 from sentence_transformers.cross_encoder import CrossEncoder
-#                 print("[RAG] Loading CrossEncoder globally...")
-#                 _CROSS_ENCODER = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
-#                 print("[RAG] CrossEncoder ready")
-#     return _CROSS_ENCODER
-
-
-# def _encode_texts(texts):
-#     """OPTIMIZATION 2+3: Cache-aware batch embedding."""
-#     model  = _get_embed_model()
-#     result = [None] * len(texts)
-#     uncached_idx   = []
-#     uncached_texts = []
-
-#     for i, t in enumerate(texts):
-#         if t in _EMBED_CACHE:
-#             result[i] = _EMBED_CACHE[t]
-#         else:
-#             uncached_idx.append(i)
-#             uncached_texts.append(t)
-
-#     if uncached_texts:
-#         new_embeds = model.encode(uncached_texts, batch_size=128, show_progress_bar=False).tolist()
-#         for idx, emb, txt in zip(uncached_idx, new_embeds, uncached_texts):
-#             _EMBED_CACHE[txt] = emb
-#             result[idx] = emb
-
-#     return result
-
-
-# # ══════════════════════════════════════════════════════
-# # BM25
-# # ══════════════════════════════════════════════════════
-
-# class BM25:
-#     def __init__(self, docs, k1=1.5, b=0.75):
-#         self.k1, self.b = k1, b
-#         self.docs = docs
-#         self.N = len(docs)
-#         self.tokenized = [self._tok(d) for d in docs]
-#         self.avgdl = sum(len(t) for t in self.tokenized) / max(self.N, 1)
-#         self.df = defaultdict(int)
-#         for td in self.tokenized:
-#             for w in set(td): self.df[w] += 1
-
-#     def _tok(self, text):
-#         return re.findall(r'\b\w+\b', text.lower())
-
-#     def score(self, query, top_k):
-#         q_terms = self._tok(query)
-#         scores  = []
-#         for i, td in enumerate(self.tokenized):
-#             tf_map = defaultdict(int)
-#             for w in td: tf_map[w] += 1
-#             s = 0.0
-#             for term in q_terms:
-#                 if term not in tf_map: continue
-#                 tf  = tf_map[term]
-#                 idf = math.log((self.N - self.df[term] + 0.5) / (self.df[term] + 0.5) + 1)
-#                 den = tf + self.k1 * (1 - self.b + self.b * len(td) / self.avgdl)
-#                 s  += idf * (tf * (self.k1 + 1)) / den
-#             if s > 0: scores.append((i, s))
-#         scores.sort(key=lambda x: -x[1])
-#         return scores[:top_k]
-
-
-# # ══════════════════════════════════════════════════════
-# # DATA LOADERS
-# # ══════════════════════════════════════════════════════
-
-# def _local_conn(fn):
-#     c = fn()
-#     if not c: raise RuntimeError("Local DB failed")
-#     return c
-
-
-# def _load_all(session_id, get_fn):
-#     chunks = []
-#     chunks += _load_db(session_id, get_fn)
-#     chunks += _load_sheets(session_id, get_fn)
-#     chunks += _load_web(session_id, get_fn)
-#     chunks += _load_analysis_report(session_id, get_fn)
-#     return chunks
-
-
-# def _load_analysis_report(session_id, get_fn):
-
-#     chunks = []
-#     local = cur = None
-#     try:
-#         local = _local_conn(get_fn)
-#         cur   = local.cursor(dictionary=True)
-
-#         # ── 1. saved_web_results: grouped by topic (richer than _load_web) ──
-#         cur.execute(
-#             """SELECT topic, title, url, brief FROM saved_web_results
-#                WHERE session_id=%s ORDER BY topic""",
-#             (session_id,)
-#         )
-#         web_rows = cur.fetchall()
-#         if web_rows:
-#             # Group by topic
-#             from collections import defaultdict as _dd
-#             by_topic = _dd(list)
-#             for r in web_rows:
-#                 by_topic[r["topic"]].append(r)
-#             for topic, items in by_topic.items():
-#                 lines = [f"[ANALYSIS_WEB] Web research topic: {topic} ({len(items)} results)"]
-#                 for item in items:
-#                     lines.append(f"  Title: {item['title']}")
-#                     if item.get("brief"):
-#                         lines.append(f"  Brief: {str(item['brief'])[:400]}")
-#                 chunks.append(_chunk("\n".join(lines), kind="analysis_web", table=topic))
-#             print(f"[RAG] analysis_web: {len(by_topic)} topics from saved_web_results")
-
-#         # ── 2. external_db_sync_log: DB + table metadata summary ──
-#         cur.execute(
-#             """SELECT DISTINCT external_database, new_user_db, table_name
-#                FROM external_db_sync_log
-#                WHERE session_id=%s AND new_user_db IS NOT NULL AND new_user_db!=''
-#                ORDER BY external_database, table_name""",
-#             (session_id,)
-#         )
-#         sync_rows = cur.fetchall()
-#         if sync_rows:
-#             from collections import defaultdict as _dd2
-#             by_db = _dd2(list)
-#             for r in sync_rows:
-#                 by_db[r["external_database"]].append(r)
-#             for ext_db, rows in by_db.items():
-#                 new_db  = rows[0]["new_user_db"]
-#                 tables  = [r["table_name"] for r in rows if r["table_name"]]
-#                 text = (
-#                     f"[ANALYSIS_DB_META] Database analyzed: {ext_db} "
-#                     f"(stored as: {new_db})\n"
-#                     f"Tables found: {', '.join(tables)}\n"
-#                     f"Total tables: {len(tables)}"
-#                 )
-#                 chunks.append(_chunk(text, kind="analysis_db_meta", db=new_db))
-#             print(f"[RAG] analysis_db_meta: {len(by_db)} databases from sync_log")
-
-#     except Exception as e:
-#         print(f"[RAG] analysis_report load error: {e}")
-#     finally:
-#         if cur:   cur.close()
-#         if local: local.close()
-
-#     return chunks
-
-
-# def _load_db(session_id, get_fn):
-#     """
-#     Loads DB chunks for RAG — supports both MySQL and PostgreSQL.
-#     For PostgreSQL:
-#       - If schema was specified during connection → only that schema's tables
-#       - If no schema → all non-system schemas (public + any custom ones)
-#     """
-#     chunks = []
-#     local = cur = None
-
-#     # ── 1. Fetch all DB credentials for this session ──
-#     try:
-#         local = _local_conn(get_fn)
-#         cur   = local.cursor(dictionary=True)
-
-#         # MySQL/MSSQL: get allocated db name from sync log
-#         cur.execute("""
-#             SELECT DISTINCT new_user_db
-#             FROM external_db_sync_log
-#             WHERE session_id=%s AND new_user_db IS NOT NULL AND new_user_db!=''
-#         """, (session_id,))
-#         sync_rows = cur.fetchall()
-
-#         # PostgreSQL: credentials stored in database_credential
-#         cur.execute("""
-#             SELECT credential, db_type
-#             FROM database_credential
-#             WHERE session_id=%s AND db_type IN ('postgresql', 'postgres')
-#             ORDER BY connection_id DESC
-#         """, (session_id,))
-#         pg_cred_rows = cur.fetchall()
-
-#     finally:
-#         if cur:   cur.close()
-#         if local: local.close()
-
-#     # ── 2. MySQL / MSSQL (sync log approach — existing logic) ──
-#     mysql_dbs = [r["new_user_db"] for r in sync_rows
-#                  if r.get("db_type", "mysql") not in ("postgresql", "postgres")]
-
-#     for db in mysql_dbs:
-#         if not re.match(r'^\w+$', db): continue
-#         conn = c2 = None
-#         try:
-#             conn = mysql.connector.connect(
-#                 host=MYSQL_CONFIG["host"], port=MYSQL_CONFIG["port"],
-#                 user=MYSQL_CONFIG["user"], password=MYSQL_CONFIG["password"],
-#                 database=db, connection_timeout=10)
-#             c2 = conn.cursor(dictionary=True)
-#             c2.execute("SHOW TABLES")
-#             tables   = [list(r.values())[0] for r in c2.fetchall()]
-#             all_rows = {}
-
-#             for t in tables:
-#                 if not re.match(r'^\w+$', t): continue
-#                 try:
-#                     c2.execute(f"SELECT * FROM `{t}` LIMIT %s", (MAX_ROWS,))
-#                     rows = c2.fetchall()
-#                     if not rows: continue
-#                     all_rows[t] = rows
-#                     cols = list(rows[0].keys())
-#                     chunks.append(_chunk(
-#                         f"[SCHEMA] db:{db} table:{t} columns:{','.join(cols)} total_rows:{len(rows)}",
-#                         db=db, table=t, kind="schema"))
-#                     lines = [
-#                         f"[COUNT] db:{db} table:{t} has {len(rows)} rows total.",
-#                         f"Number of {t}: {len(rows)}",
-#                         f"Total {t} count: {len(rows)}"
-#                     ]
-#                     for col in cols[:10]:
-#                         vals = list(dict.fromkeys(
-#                             str(r[col]) for r in rows if r[col] is not None and str(r[col]).strip()))
-#                         if vals:
-#                             lines.append(f"All values of {col} in {t}: {', '.join(vals[:40])}")
-#                     chunks.append(_chunk("\n".join(lines), db=db, table=t, kind="count"))
-#                     for i, row in enumerate(rows, 1):
-#                         parts = " | ".join(f"{k}:{v}" for k,v in row.items()
-#                                            if v is not None and str(v).strip())
-#                         chunks.append(_chunk(f"[ROW] db:{db} table:{t} row{i}: {parts}",
-#                                              db=db, table=t, kind="row"))
-#                     print(f"[RAG] {db}.{t}: {len(rows)} rows → {len(rows)+2} chunks")
-#                 except Exception as e:
-#                     print(f"[RAG] skip {t}: {e}")
-
-#             chunks += _build_joins(db, all_rows)
-#         except Exception as e:
-#             print(f"[RAG] db connect {db}: {e}")
-#         finally:
-#             if c2:   c2.close()
-#             if conn: conn.close()
-
-#     # ── 3. PostgreSQL (direct connection using stored credentials) ──
-#     if not PSYCOPG2_AVAILABLE:
-#         if pg_cred_rows:
-#             print("[RAG] PostgreSQL credentials found but psycopg2 not installed — skipping")
-#         return chunks
-
-#     seen_pg_dbs = set()
-#     for cred_row in pg_cred_rows:
-#         try:
-#             cred = cred_row["credential"]
-#             if isinstance(cred, str):
-#                 cred = json.loads(cred)
-
-#             pg_host     = cred.get("host", "localhost")
-#             pg_port     = int(cred.get("port", 5432))
-#             pg_user     = cred.get("username", "")
-#             pg_password = cred.get("password", "")
-#             pg_database = cred.get("database", "")
-#             pg_schema   = cred.get("schema")  # may be None/empty
-
-#             # Deduplicate same DB+schema combos
-#             dedup_key = f"{pg_host}:{pg_port}/{pg_database}/{pg_schema or '__all__'}"
-#             if dedup_key in seen_pg_dbs:
-#                 continue
-#             seen_pg_dbs.add(dedup_key)
-
-#             print(f"[RAG] Connecting PostgreSQL: {pg_host}:{pg_port}/{pg_database} schema={pg_schema or 'ALL'}")
-
-#             pg_conn = psycopg2.connect(
-#                 host=pg_host, port=pg_port,
-#                 user=pg_user, password=pg_password,
-#                 dbname=pg_database,
-#                 connect_timeout=10
-#             )
-#             pg_cur = pg_conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-
-#             # Determine which schemas to fetch
-#             if pg_schema and pg_schema.strip():
-#                 # User specified a schema → use only that
-#                 schemas_to_fetch = [pg_schema.strip()]
-#             else:
-#                 # No schema specified → fetch ALL non-system schemas
-#                 pg_cur.execute("""
-#                     SELECT schema_name
-#                     FROM information_schema.schemata
-#                     WHERE schema_name NOT IN ('pg_catalog', 'information_schema',
-#                                               'pg_toast', 'pg_temp_1', 'pg_toast_temp_1')
-#                       AND schema_name NOT LIKE 'pg_temp_%'
-#                       AND schema_name NOT LIKE 'pg_toast_temp_%'
-#                     ORDER BY schema_name
-#                 """)
-#                 schemas_to_fetch = [r["schema_name"] for r in pg_cur.fetchall()]
-#                 print(f"[RAG] PostgreSQL schemas found: {schemas_to_fetch}")
-
-#             all_rows_pg = {}
-
-#             for schema in schemas_to_fetch:
-#                 # Get all tables in this schema
-#                 pg_cur.execute("""
-#                     SELECT table_name
-#                     FROM information_schema.tables
-#                     WHERE table_schema = %s
-#                       AND table_type = 'BASE TABLE'
-#                     ORDER BY table_name
-#                 """, (schema,))
-#                 tables = [r["table_name"] for r in pg_cur.fetchall()]
-#                 print(f"[RAG] PG schema '{schema}' tables: {tables}")
-
-#                 for t in tables:
-#                     qualified = f"{schema}.{t}"
-#                     label     = f"{pg_database}.{qualified}"
-#                     try:
-#                         pg_cur.execute(
-#                             f'SELECT * FROM "{schema}"."{t}" LIMIT %s',
-#                             (MAX_ROWS,)
-#                         )
-#                         rows = [dict(r) for r in pg_cur.fetchall()]
-#                         if not rows:
-#                             continue
-
-#                         # Convert non-serialisable types (dates, Decimal, etc.)
-#                         for row in rows:
-#                             for k, v in row.items():
-#                                 if v is not None and not isinstance(v, (str, int, float, bool)):
-#                                     row[k] = str(v)
-
-#                         all_rows_pg[qualified] = rows
-#                         cols = list(rows[0].keys())
-
-#                         chunks.append(_chunk(
-#                             f"[SCHEMA] db:{label} table:{qualified} schema:{schema} "
-#                             f"columns:{','.join(cols)} total_rows:{len(rows)}",
-#                             db=pg_database, table=qualified, kind="schema"))
-
-#                         lines = [
-#                             f"[COUNT] db:{label} table:{qualified} has {len(rows)} rows total.",
-#                             f"Number of {t}: {len(rows)}",
-#                             f"Total {t} count: {len(rows)}"
-#                         ]
-#                         for col in cols[:10]:
-#                             vals = list(dict.fromkeys(
-#                                 str(r[col]) for r in rows
-#                                 if r[col] is not None and str(r[col]).strip()))
-#                             if vals:
-#                                 lines.append(f"All values of {col} in {t}: {', '.join(vals[:40])}")
-#                         chunks.append(_chunk("\n".join(lines), db=pg_database, table=qualified, kind="count"))
-
-#                         for i, row in enumerate(rows, 1):
-#                             parts = " | ".join(
-#                                 f"{k}:{v}" for k, v in row.items()
-#                                 if v is not None and str(v).strip()
-#                             )
-#                             chunks.append(_chunk(
-#                                 f"[ROW] db:{label} schema:{schema} table:{t} row{i}: {parts}",
-#                                 db=pg_database, table=qualified, kind="row"))
-
-#                         print(f"[RAG] PG {label}: {len(rows)} rows → {len(rows)+2} chunks")
-
-#                     except Exception as e:
-#                         print(f"[RAG] PG skip {qualified}: {e}")
-#                         pg_conn.rollback()
-
-#             pg_cur.close()
-#             pg_conn.close()
-
-#         except Exception as e:
-#             print(f"[RAG] PostgreSQL connect error: {e}")
-
-#     return chunks
-
-
-# def _build_joins(db, all_rows):
-#     chunks = []
-#     user_tables = [t for t in all_rows if re.search(r'\busers?\b', t, re.I)]
-#     for ut in user_tables:
-#         u_rows = all_rows[ut]
-#         if not u_rows: continue
-#         ucols  = list(u_rows[0].keys())
-#         id_col = next((c for c in ucols if c in ('id','user_id','uid')), ucols[0])
-#         nm_col = next((c for c in ucols if re.search(r'\b(name|username)\b', c, re.I)), None)
-#         for ur in u_rows:
-#             uid   = str(ur.get(id_col,"")).strip()
-#             uname = str(ur.get(nm_col, uid)).strip() if nm_col else uid
-#             if not uid: continue
-#             for at, a_rows in all_rows.items():
-#                 if at == ut or not a_rows: continue
-#                 acols   = list(a_rows[0].keys())
-#                 ref_col = next((c for c in acols if re.search(r'\buser_id\b|\buid\b|\bauthor\b', c, re.I)), None)
-#                 if not ref_col: continue
-#                 acts = [r for r in a_rows if str(r.get(ref_col,"")).strip() == uid]
-#                 if not acts: continue
-#                 detail = " || ".join(
-#                     " | ".join(f"{k}:{v}" for k,v in r.items() if v is not None and str(v).strip())
-#                     for r in acts[:15])
-#                 chunks.append(_chunk(
-#                     f"[JOIN] db:{db} user:'{uname}' (id:{uid}) from:{ut} "
-#                     f"has {len(acts)} record(s) in table:{at}. data: {detail}",
-#                     db=db, table=f"{ut}+{at}", kind="join"))
-#     return chunks
-
-
-# def _load_sheets(session_id, get_fn):
-#     chunks = []
-#     local = cur = None
-#     try:
-#         local = _local_conn(get_fn)
-#         cur   = local.cursor(dictionary=True)
-#         cur.execute("SELECT table_name,sheet_url FROM sheet_scans WHERE session_id=%s", (session_id,))
-#         for sc in cur.fetchall():
-#             t = sc["table_name"]
-#             if not re.match(r'^sheet_\w+$', t): continue
-#             try:
-#                 cur.execute(f"SELECT * FROM `{t}` LIMIT %s", (MAX_ROWS,))
-#                 rows = cur.fetchall()
-#                 if not rows: continue
-#                 cols = [c for c in rows[0].keys() if c != "_row_id"]
-#                 chunks.append(_chunk(f"[SCHEMA] sheet:{t} url:{sc.get('sheet_url','')} columns:{','.join(cols)} rows:{len(rows)}", table=t, kind="schema"))
-#                 lines = [f"[COUNT] sheet:{t} has {len(rows)} rows total."]
-#                 for col in cols[:6]:
-#                     vals = list(dict.fromkeys(str(r[col]) for r in rows if r.get(col) is not None))
-#                     lines.append(f"All values of {col}: {', '.join(vals[:20])}")
-#                 chunks.append(_chunk("\n".join(lines), table=t, kind="count"))
-#                 for i, row in enumerate(rows, 1):
-#                     parts = " | ".join(f"{k}:{v}" for k,v in row.items()
-#                                        if k!="_row_id" and v is not None and str(v).strip())
-#                     chunks.append(_chunk(f"[ROW] sheet:{t} row{i}: {parts}", table=t, kind="row"))
-#             except Exception as e:
-#                 print(f"[RAG] sheet {t}: {e}")
-#     except Exception as e:
-#         print(f"[RAG] sheets: {e}")
-#     finally:
-#         if cur:   cur.close()
-#         if local: local.close()
-#     return chunks
-
-
-# def _load_web(session_id, get_fn):
-#     chunks = []
-#     local = cur = None
-#     try:
-#         local = _local_conn(get_fn)
-#         cur   = local.cursor(dictionary=True)
-#         cur.execute("SELECT title,url,brief,topic FROM saved_web_results WHERE session_id=%s", (session_id,))
-#         for r in cur.fetchall():
-#             chunks.append(_chunk(
-#                 f"[WEB] title:{r['title']} url:{r['url']} topic:{r.get('topic','')} content:{r.get('brief','')}",
-#                 kind="web"))
-#     except Exception as e:
-#         print(f"[RAG] web: {e}")
-#     finally:
-#         if cur:   cur.close()
-#         if local: local.close()
-#     return chunks
-
-
-# def _chunk(text, db="", table="", kind="row"):
-#     return {"text": text, "db": db, "table": table, "kind": kind}
-
-
-# # ══════════════════════════════════════════════════════
-# # VECTOR STORE (ChromaDB)
-# # ══════════════════════════════════════════════════════
-
-# def _get_or_create_lock(session_id):
-#     if session_id not in _LOCKS:
-#         _LOCKS[session_id] = threading.Lock()
-#     return _LOCKS[session_id]
-
-
-# def _col_safe_count(col):
-#     try:    return col.count()
-#     except: return 0
-
-
-# def _build_store(session_id, get_fn):
-#     import chromadb
-#     lock = _get_or_create_lock(session_id)
-#     with lock:
-#         now = time.time()
-#         if session_id in _CACHE:
-#             chunks, bm25, col, ts = _CACHE[session_id]
-#             if now - ts < CACHE_TTL and _col_safe_count(col) > 0:
-#                 print(f"[RAG] cache hit — {len(chunks)} chunks")
-#                 return chunks, bm25, col
-#             else:
-#                 _CACHE.pop(session_id, None)
-
-#         print(f"[RAG] building store for {session_id[:8]}...")
-#         all_chunks = _load_all(session_id, get_fn)
-#         if not all_chunks:
-#             return None, None, None
-
-#         # OPTIMIZATION 4: Deduplicate chunks before indexing
-#         seen_texts = set()
-#         deduped    = []
-#         for c in all_chunks:
-#             if c["text"] not in seen_texts:
-#                 seen_texts.add(c["text"])
-#                 deduped.append(c)
-#         removed = len(all_chunks) - len(deduped)
-#         if removed > 0:
-#             print(f"[RAG] deduped {removed} duplicates → {len(deduped)} unique chunks")
-#         all_chunks = deduped
-
-#         texts    = [c["text"] for c in all_chunks]
-#         bm25_idx = BM25(texts)
-
-#         # Batch encode using global model + cache
-#         embeds = _encode_texts(texts)
-
-#         # Fetch workspace_chroma_collection from DB
-#         col_name = "s_" + hashlib.md5(session_id.encode()).hexdigest()[:12]
-#         try:
-#             conn = get_fn()
-#             cur = conn.cursor(dictionary=True)
-#             cur.execute("SELECT workspace_chroma_collection FROM workspaces WHERE session_id = %s", (session_id,))
-#             row = cur.fetchone()
-#             if row and row.get("workspace_chroma_collection"):
-#                 col_name = row["workspace_chroma_collection"]
-#         except Exception as e:
-#             print(f"[RAG] Error fetching workspace_chroma_collection: {e}")
-#         finally:
-#             if 'cur' in locals() and cur: cur.close()
-#             if 'conn' in locals() and conn: conn.close()
-
-#         if session_id not in _CLIENTS:
-#             _CLIENTS[session_id] = chromadb.PersistentClient(path=CHROMA_PERSIST_DIR)
-#         client = _CLIENTS[session_id]
-#         try: client.delete_collection(col_name)
-#         except: pass
-#         col = client.create_collection(col_name)
-
-#         for i in range(0, len(all_chunks), 500):
-#             b = all_chunks[i:i+500]
-#             col.add(
-#                 documents  = [c["text"]  for c in b],
-#                 embeddings = embeds[i:i+500],
-#                 metadatas  = [{"db":c["db"],"table":c["table"],"kind":c["kind"]} for c in b],
-#                 ids        = [f"c{i+j}" for j in range(len(b))]
-#             )
-
-#         _CLIENTS[session_id] = client
-#         _CACHE[session_id]   = (all_chunks, bm25_idx, col, now)
-#         print(f"[RAG] ✓ {len(all_chunks)} chunks indexed")
-#         return all_chunks, bm25_idx, col
-
-
-# # ══════════════════════════════════════════════════════
-# # QUERY UNDERSTANDING
-# # ══════════════════════════════════════════════════════
-
-# def _understand(question, all_chunks):
-#     q      = question.lower()
-#     tokens = set(re.findall(r'\b\w{3,}\b', q))
-#     known_tables = list(dict.fromkeys(c["table"] for c in all_chunks if c["table"]))
-
-#     table_hints = []
-#     for t in known_tables:
-#         t_parts = set(re.findall(r'\b\w{3,}\b', t.lower()))
-#         overlap = tokens & t_parts
-#         if overlap: table_hints.append((t, len(overlap)))
-#     table_hints.sort(key=lambda x: -x[1])
-#     matched_tables = [t for t,_ in table_hints[:5]]
-
-#     intent = "lookup"
-#     if re.search(r'\bhow\s+many\b|\bcount\b|\btotal\b|\bnumber\s+of\b|\bhow\s+much\b', q):
-#         intent = "count"
-#     elif re.search(r'\blist\b|\ball\b|\beveryone\b|\bnames?\b|\bshow\s+(me\s+)?all\b', q):
-#         intent = "list"
-#     elif re.search(r'\bwho\b|\bwhich\s+user\b|\bwhose\b', q):
-#         intent = "who"
-#     elif re.search(r'\bcreated\s+by\b|\bbelongs?\s+to\b|\bby\s+whom\b|\bowned\s+by\b', q):
-#         intent = "join"
-#     elif re.search(r'\bwhat\s+is\b|\bwhat\s+are\b|\btell\s+me\b|\bfind\b|\bget\b', q):
-#         intent = "lookup"
-
-#     entities = re.findall(r"'([^']+)'|\"([^\"]+)\"", question)
-#     entities = [e[0] or e[1] for e in entities]
-
-#     queries = [question]
-#     if intent == "count" and matched_tables:
-#         for t in matched_tables[:3]:
-#             queries += [f"COUNT {t} total rows", f"Number of {t}", f"how many {t}", f"[COUNT] {t}"]
-#     elif intent == "list" and matched_tables:
-#         for t in matched_tables[:2]:
-#             queries += [f"All values of", f"list all {t}", f"[COUNT] {t}"]
-#     elif intent == "join":
-#         queries += ["[JOIN]"] + [f"user '{e}'" for e in entities]
-#     elif entities:
-#         queries += [f"'{e}'" for e in entities] + [f"{e}" for e in entities]
-
-#     if not matched_tables:
-#         for t in known_tables:
-#             for tok in tokens:
-#                 if tok in t.lower() and len(tok) > 3:
-#                     matched_tables.append(t); break
-#         matched_tables = list(dict.fromkeys(matched_tables))[:5]
-
-#     return {
-#         "intent":      intent,
-#         "table_hints": matched_tables,
-#         "entities":    entities,
-#         "queries":     list(dict.fromkeys(queries))
-#     }
-
-
-# # ══════════════════════════════════════════════════════
-# # HYBRID RETRIEVAL (BM25 + Vector + Cross-Encoder Rerank)
-# # ══════════════════════════════════════════════════════
-
-# def _retrieve(all_chunks, bm25_idx, col, question, understanding):
-#     intent   = understanding["intent"]
-#     hints    = understanding["table_hints"]
-#     queries  = understanding["queries"]
-#     entities = understanding["entities"]
-
-#     scores = defaultdict(float)
-
-#     # BM25
-#     for q in queries:
-#         for idx, s in bm25_idx.score(q, top_k=80):
-#             scores[idx] += s * 1.0
-
-#     # OPTIMIZATION 3: Batch encode all queries at once
-#     q_embeds = _encode_texts(queries)
-#     per_q    = max(8, TOP_K // len(queries))
-#     seen     = set()
-#     for q_emb in q_embeds:
-#         n = min(per_q, _col_safe_count(col))
-#         if n == 0: continue
-#         res = col.query(query_embeddings=[q_emb], n_results=n,
-#                         include=["documents","metadatas"])
-#         for doc, meta in zip(res["documents"][0], res["metadatas"][0]):
-#             key = doc[:100]
-#             if key in seen: continue
-#             seen.add(key)
-#             for i, c in enumerate(all_chunks):
-#                 if c["text"][:100] == key:
-#                     scores[i] += 2.0; break
-
-#     # Boosts
-#     for i, c in enumerate(all_chunks):
-#         if c["table"] in hints:                               scores[i] += 5.0
-#         if intent == "count" and c["kind"] == "count":        scores[i] += 8.0
-#         elif intent == "list" and c["kind"] == "count":       scores[i] += 6.0
-#         elif intent == "join" and c["kind"] == "join":        scores[i] += 8.0
-#         for ent in entities:
-#             if ent.lower() in c["text"].lower():              scores[i] += 4.0
-
-#     ranked = sorted(scores.items(), key=lambda x: -x[1])
-
-#     forced = {i for i, c in enumerate(all_chunks)
-#               if c["kind"] == "count" and c["table"] in hints}
-
-#     candidate_indices = list(forced)
-#     for i, _ in ranked:
-#         if i not in forced: candidate_indices.append(i)
-#         if len(candidate_indices) >= TOP_K: break
-
-#     # OPTIMIZATION 5: Cross-encoder reranking top-40 → keep best 20
-#     RERANK_TOP  = 40
-#     RERANK_KEEP = 20
-#     rerank_pool = candidate_indices[:RERANK_TOP]
-
-#     if len(rerank_pool) > RERANK_KEEP:
-#         try:
-#             ce_model  = _get_cross_encoder()
-#             pairs     = [(question, all_chunks[i]["text"][:512]) for i in rerank_pool]
-#             ce_scores = ce_model.predict(pairs)
-#             reranked  = sorted(zip(rerank_pool, ce_scores), key=lambda x: -x[1])
-#             forced_in = [i for i in rerank_pool if i in forced]
-#             reranked_nf = [i for i, _ in reranked if i not in forced]
-#             rerank_pool = forced_in + reranked_nf[:RERANK_KEEP]
-#             candidate_indices = rerank_pool + candidate_indices[RERANK_TOP:]
-#             print(f"[RAG] cross-encoder reranked {RERANK_TOP} → kept {len(rerank_pool)}")
-#         except Exception as e:
-#             print(f"[RAG] cross-encoder skipped: {e}")
-
-#     parts, total = [], 0
-#     for i in candidate_indices:
-#         txt   = all_chunks[i]["text"]
-#         if total + len(txt) > MAX_CTX_CHARS: break
-#         parts.append(txt)
-#         total += len(txt)
-
-#     return "\n\n".join(parts)
-
-
-# # ══════════════════════════════════════════════════════
-# # AUTO CHAT HISTORY SAVE
-# # ══════════════════════════════════════════════════════
-
-# _HISTORY_TABLE_SQL = """
-# CREATE TABLE IF NOT EXISTS session_chat_history (
-#     id                  INT AUTO_INCREMENT PRIMARY KEY,
-#     session_id          VARCHAR(100) NOT NULL,
-#     user_id             INT          NOT NULL,
-#     turn_index          INT          NOT NULL DEFAULT 0,
-#     visit_number        INT          NOT NULL DEFAULT 1,
-#     question            TEXT         NOT NULL,
-#     answer              LONGTEXT     NOT NULL,
-#     follow_up_questions JSON         DEFAULT NULL,
-#     visualizations      JSON         DEFAULT NULL,
-#     intent              VARCHAR(50)  DEFAULT NULL,
-#     mode                VARCHAR(30)  DEFAULT 'answer',
-#     created_at          DATETIME     DEFAULT CURRENT_TIMESTAMP,
-#     INDEX idx_session      (session_id),
-#     INDEX idx_user         (user_id),
-#     INDEX idx_session_user (session_id, user_id)
-# );
-# """
-
-# def _save_history(get_fn, session_id, user_id, question, answer, follow_ups, intent, mode, visualizations=None, visit_number=1):
-#     if not user_id: return
-#     conn = cur = None
-#     try:
-#         conn = get_fn()
-#         cur  = conn.cursor(dictionary=True)
-#         cur.execute(_HISTORY_TABLE_SQL)
-#         cur.execute("""
-#             SELECT COALESCE(MAX(turn_index), -1) AS last_turn
-#             FROM session_chat_history
-#             WHERE session_id = %s AND user_id = %s
-#         """, (session_id, int(user_id)))
-#         row        = cur.fetchone()
-#         turn_index = (row["last_turn"] + 1) if row else 0
-#         cur.execute("""
-#             INSERT INTO session_chat_history
-#                 (session_id, user_id, turn_index, visit_number, question, answer,
-#                  follow_up_questions, visualizations, intent, mode)
-#             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-#         """, (session_id, int(user_id), turn_index, visit_number, question, answer,
-#               json.dumps(follow_ups) if follow_ups else None,
-#               json.dumps(visualizations) if visualizations else None,
-#               intent or None, mode))
-#         conn.commit()
-#     except Exception as e:
-#         print(f"[History] save error: {e}")
-#     finally:
-#         if cur:  cur.close()
-#         if conn: conn.close()
-
-
-# # ══════════════════════════════════════════════════════
-# # MISTRAL
-# # ══════════════════════════════════════════════════════
-
-# from model.llm_client import call_llm_chat
-
-# def _mistral(system, user, retries=2, temperature=0.15):
-#     # Trim from the middle if too long, preserving both context start and prompt instructions at the end
-#     if len(user) > 28000:
-#         half = 13500
-#         user = user[:half] + "\n\n[...context trimmed for token limit...]\n\n" + user[-half:]
-#         print(f"[LLM] prompt trimmed")
-        
-#     messages = [
-#         {"role":"system","content":system},
-#         {"role":"user","content":user}
-#     ]
-    
-#     for attempt in range(retries + 1):
-#         try:
-#             response = call_llm_chat(messages, json_mode=True, temperature=temperature)
-#             if response:
-#                 if response.startswith("[LLM Error]"):
-#                     raise Exception(response)
-#                 cleaned = response.strip()
-#                 if cleaned.startswith("```json"):
-#                     cleaned = cleaned[7:]
-#                 elif cleaned.startswith("```"):
-#                     cleaned = cleaned[3:]
-#                 if cleaned.endswith("```"):
-#                     cleaned = cleaned[:-3]
-#                 return json.loads(cleaned.strip())
-#             return None
-#         except Exception as e:
-#             print(f"[LLM] error attempt {attempt+1}: {e}")
-#             if attempt == retries: return None
-#             import time
-#             time.sleep(1)
-#     return None
-
-
-# def _history(raw):
-#     if not raw or not isinstance(raw, list): return ""
-#     lines = [f"{str(t.get('role','user')).capitalize()}: {str(t.get('content',''))}"
-#              for t in raw[-6:] if isinstance(t, dict)]
-#     return ("Chat history:\n" + "\n".join(lines) + "\n\n") if lines else ""
-
-
-# def _is_graph(q):  return bool(set(q.lower().split()) & GRAPH_KW)
-# def _is_report(q): return any(k in q.lower() for k in REPORT_KW)
-# def _is_greet(q):  return bool(GREET_RE.match(q.strip()))
-
-# ANALYTICAL_KW = {"top", "highest", "average", "total", "trend", "dashboard", "how many", "sum", "vs", "compare", "lowest", "distribution", "revenue", "sales", "discount", "count", "maximum", "minimum", "profit", "ratio", "fastest", "declining", "percentage"}
-# def _is_analytical(q): return bool(set(q.lower().split()) & ANALYTICAL_KW) or "how many" in q.lower()
-
-# # ─────────────────────────────────────────────
-# # VISUALIZATION SUPPORT
-# # ─────────────────────────────────────────────
-
-# def _normalize_visualizations(viz_list):
-
-#     if not isinstance(viz_list, list):
-#         return []
-
-#     normalized = []
-
-#     for v in viz_list:
-
-#         if not isinstance(v, dict):
-#             continue
-
-#         vtype = str(v.get("type","")).lower()
-
-#         if vtype in ("bar","barchart","bar-chart"):
-#             vtype = "bar_chart"
-
-#         elif vtype in ("line","linechart"):
-#             vtype = "line_chart"
-
-#         elif vtype in ("pie","piechart"):
-#             vtype = "pie_chart"
-
-#         elif vtype in ("table","grid"):
-#             vtype = "table"
-
-#         item = {
-#             "type": vtype,
-#             "title": v.get("title","")
-#         }
-
-#         # if vtype in ("bar_chart","line_chart"):
-
-#         #     item["xKey"] = v.get("xKey","")
-#         #     item["yKey"] = v.get("yKey","")
-#         #     item["data"] = v.get("data",[])
-
-#         if vtype in ("bar_chart","line_chart"):
-
-#             item["xKey"] = v.get("xKey","")
-#             item["yKey"] = v.get("yKey","")
-#             item["seriesKey"] = v.get("seriesKey","")
-#             item["data"] = v.get("data",[])
-
-#         elif vtype == "pie_chart":
-
-#             item["data"] = v.get("data",[])
-
-#         elif vtype == "table":
-
-#             item["columns"] = v.get("columns",[])
-#             item["data"] = v.get("data",[])
-
-#         normalized.append(item)
-
-#     return normalized
-
-# def _safe_visualizations(vizs):
-
-#     safe = []
-
-#     for v in vizs:
-
-#         if not isinstance(v, dict):
-#             continue
-
-#         if not v.get("type"):
-#             continue
-
-#         if not v.get("title"):
-#             continue
-
-#         safe.append(v)
-
-#     return safe
-
-
-# def _to_str(val):
-#     if isinstance(val, str): return val
-#     if isinstance(val, dict):
-#         lines = []
-#         for k, v in val.items():
-#             if isinstance(v, list):
-#                 lines.append(f"{k}:")
-#                 for item in v:
-#                     if isinstance(item, dict):
-#                         lines.append("  • " + " | ".join(f"{ik}: {iv}" for ik, iv in item.items()))
-#                     else:
-#                         lines.append(f"  • {item}")
-#             else:
-#                 lines.append(f"{k}: {v}")
-#         return "\n".join(lines)
-#     if isinstance(val, list):
-#         lines = []
-#         for item in val:
-#             if isinstance(item, dict):
-#                 lines.append("• " + " | ".join(f"{k}: {v}" for k, v in item.items()))
-#             else:
-#                 lines.append(f"• {item}")
-#         return "\n".join(lines)
-#     return str(val) if val else ""
-
-
-# SYS = """You are a senior data analyst and database expert with deep analytical reasoning capabilities.
-# You have access to the user's actual database records as retrieved chunks.
-
-# Chunk types:
-#   [SCHEMA]           — table structure, column names, total row count
-#   [COUNT]            — exact row counts AND all distinct values per column — PRIMARY source for counts/lists
-#   [ROW]              — individual database records with all field values
-#   [JOIN]             — pre-computed cross-table joins: user X has N records in table Y with details
-#   [WEB]              — saved web content (raw)
-#   [ANALYSIS_WEB]     — web research grouped by topic with titles and summaries
-#   [ANALYSIS_DB_META] — database metadata: which databases and tables were analyzed
-
-# DEEP ANALYSIS RULES:
-# 1. Read EVERY chunk exhaustively before forming your answer.
-# 2. For COUNT questions: find [COUNT] chunk with "Number of X: N" — this is authoritative.
-# 3. For LIST questions: find [COUNT] chunk "All values of column_name:" — gives complete list.
-# 4. For JOIN/relationship questions: find [JOIN] chunks — they show cross-table activity per user.
-# 5. For WHY questions: analyze patterns, dates, sequences, frequencies across chunks to infer reasons.
-# 6. For TREND questions: compare timestamps, sequences, values across [ROW] chunks.
-# 7. For COMPARISON questions: pull data from multiple tables and compare side by side.
-# 8. For DEEP questions: combine ROW + JOIN + COUNT chunks to give comprehensive multi-part answers.
-# 9. CRITICAL: If the requested data (e.g. specific columns or metrics) does NOT exist in the context, clearly state that it is unavailable. NEVER hallucinate or invent fake names, metrics, or records.
-# 10. Always answer in full sentences with specifics — no vague responses.
-# 11. DO NOT include source citations in the answer text — keep answer clean.
-# 12. follow_up_questions MUST follow the EXACT format specified in the user prompt.
-# 13. Respond ONLY in valid JSON."""
-
-
-# # ══════════════════════════════════════════════════════
-# # SCHEMA GROUNDING — column ownership index + join keys
-# # ══════════════════════════════════════════════════════
-# # The SQL model used to *guess* which table a column lived on (e.g. it would
-# # write `invoice`.`construction` when `construction` actually only exists on a
-# # dimension table), causing MySQL error 1054. These helpers turn that guess
-# # into a lookup: we parse the real [SCHEMA] lines and tell the model exactly
-# # which table owns each column, plus the likely join keys to pull a column in
-# # from another table. Data-driven, so it works for any schema.
-
-# # Generic/structural names that are NOT meaningful join keys even if shared.
-# _GENERIC_JOIN_COLS = {
-#     "id", "sl", "sno", "srno", "sr", "no", "index", "idx", "row", "rownum",
-#     "date", "created_at", "updated_at", "createddate", "timestamp", "ts",
-#     "month", "year", "day", "status", "type", "name", "description", "value",
-# }
-
-
-# def _parse_schema_chunks(schema_chunks):
-#     """Return {table_name: [original_col, ...]} parsed from the [SCHEMA] lines.
-
-#     The [SCHEMA] line lists the FULL column set (it is built from row.keys()),
-#     so it is authoritative. As a safety net we also harvest column names from
-#     the '[COUNT] ... table:T' / 'All values of C in T:' lines, so a table is
-#     still indexed even if its [SCHEMA] line is somehow missing from context."""
-#     table_cols = {}
-
-#     def _add(table, cols):
-#         if not table:
-#             return
-#         existing = table_cols.setdefault(table, [])
-#         seen = {c.lower() for c in existing}
-#         for c in cols:
-#             if c and c.lower() not in seen:
-#                 existing.append(c)
-#                 seen.add(c.lower())
-
-#     for text in schema_chunks:
-#         # current table context for "All values of C in T" lines
-#         for line in str(text).splitlines():
-#             if "[SCHEMA]" in line:
-#                 m_tbl = re.search(r'(?:table|sheet):(\S+)', line)
-#                 m_cols = re.search(r'columns:(.*?)\s+(?:total_rows|rows):', line)
-#                 if not m_cols:
-#                     m_cols = re.search(r'columns:(.+)$', line)
-#                 if m_tbl and m_cols:
-#                     cols = [c.strip() for c in m_cols.group(1).split(',') if c.strip()]
-#                     _add(m_tbl.group(1), cols)
-#             else:
-#                 # Fallback: "All values of <col> in <table>: ..."
-#                 mv = re.search(r'All values of (.+?) in (\S+?):', line)
-#                 if mv:
-#                     _add(mv.group(2), [mv.group(1).strip()])
-#     return table_cols
-
-
-# def _build_schema_grounding(schema_chunks):
-#     """Build an authoritative column-location index + join-key hints string
-#     that is injected into the SQL prompt so the model never mis-attributes a
-#     column to the wrong table."""
-#     table_cols = _parse_schema_chunks(schema_chunks)
-#     if not table_cols:
-#         return "", {}
-
-#     # column (lowercased) -> set of (table, original_col)
-#     col_to_tables = {}
-#     for table, cols in table_cols.items():
-#         for c in cols:
-#             col_to_tables.setdefault(c.lower(), set()).add((table, c))
-
-#     lines = [
-#         "COLUMN LOCATION INDEX (authoritative). A column may be referenced ONLY "
-#         "on a table whose list below includes it. If a column you need is not in "
-#         "the table you are selecting FROM, JOIN the table that owns it.",
-#     ]
-#     for table, cols in table_cols.items():
-#         lines.append(f"- `{table}` owns: " + ", ".join(f"`{c}`" for c in cols))
-
-#     # Columns unique to one table are always safe to reference there.
-#     # Columns shared across tables are the likely join keys.
-#     join_hints = set()
-#     for col, locs in col_to_tables.items():
-#         tabs = sorted({t for t, _ in locs})
-#         if col in _GENERIC_JOIN_COLS or len(tabs) < 2 or len(tabs) > 4:
-#             continue
-#         for i in range(len(tabs)):
-#             for j in range(i + 1, len(tabs)):
-#                 a, b = tabs[i], tabs[j]
-#                 ca = next(oc for (t, oc) in locs if t == a)
-#                 cb = next(oc for (t, oc) in locs if t == b)
-#                 join_hints.add(f"- `{a}`.`{ca}` = `{b}`.`{cb}`")
-
-#     out = "\n".join(lines)
-#     if join_hints:
-#         out += ("\n\nLIKELY JOIN KEYS (shared columns — use these to bring a "
-#                 "column in from another table):\n" + "\n".join(sorted(join_hints)))
-#     return out, col_to_tables
-
-
-# def _unknown_column_hint(error_msg, col_to_tables):
-#     """If a MySQL 1054 'Unknown column X.Y' error occurred, return a targeted
-#     correction telling the model which table actually owns column Y."""
-#     if not col_to_tables:
-#         return ""
-#     m = re.search(r"Unknown column '([^']+)'", str(error_msg))
-#     if not m:
-#         return ""
-#     ref = m.group(1)
-#     col = ref.split(".")[-1].strip("`")            # T.C or just C
-#     owners = sorted({t for t, _ in col_to_tables.get(col.lower(), set())})
-#     if not owners:
-#         return (f"\n\nIMPORTANT: column `{col}` does not exist anywhere in the "
-#                 f"schema. Do not reference it; use only columns from the COLUMN "
-#                 f"LOCATION INDEX.")
-#     owner_list = ", ".join(f"`{t}`" for t in owners)
-#     return (f"\n\nIMPORTANT: column `{col}` does NOT exist on the table you "
-#             f"referenced it on. It exists ONLY on: {owner_list}. Reference "
-#             f"`{col}` on one of those tables, JOINing it in via a LIKELY JOIN "
-#             f"KEY if needed.")
-
-
-# def _validate_column_refs(sql, table_cols):
-#     """Statically check a generated SQL string for column references that point
-#     at the WRONG base table (the cause of MySQL 1054). Returns a de-duplicated
-#     list of (qualifier, column) violations.
-
-#     Only references whose qualifier is a KNOWN BASE TABLE are checked. CTE names
-#     and short aliases (wd, cs, i, d, ...) are NOT base tables, so references like
-#     `wd`.`dealer` are correctly ignored — we cannot and should not validate
-#     derived columns."""
-#     if not sql or not table_cols:
-#         return []
-#     lower_cols = {t: {c.lower() for c in cols} for t, cols in table_cols.items()}
-#     base_tables = set(table_cols.keys())
-#     violations = {}
-
-#     # Backticked  `table`.`column`
-#     for m in re.finditer(r"`([^`]+)`\s*\.\s*`([^`]+)`", sql):
-#         q, c = m.group(1), m.group(2)
-#         if q in base_tables and c.lower() not in lower_cols[q]:
-#             violations[(q, c)] = True
-
-#     # Unbackticked  table.column  (qualifier still must be a real base table)
-#     for m in re.finditer(r"\b(\w+)\s*\.\s*(\w+)\b", sql):
-#         q, c = m.group(1), m.group(2)
-#         if q in base_tables and c.lower() not in lower_cols[q]:
-#             violations[(q, c)] = True
-
-#     return list(violations.keys())
-
-
-# def _column_ref_correction(violations, col_to_tables):
-#     """Build a forceful correction message naming each wrong reference and the
-#     table that actually owns the column."""
-#     lines = []
-#     for (q, c) in violations:
-#         owners = sorted({t for t, _ in col_to_tables.get(c.lower(), set())})
-#         if owners:
-#             owner_list = ", ".join(f"`{o}`" for o in owners)
-#             lines.append(
-#                 f"- `{q}`.`{c}` is INVALID: `{c}` is NOT a column of `{q}`. "
-#                 f"`{c}` exists ONLY on {owner_list}. JOIN that table using a "
-#                 f"LIKELY JOIN KEY and reference `{c}` there."
-#             )
-#         else:
-#             lines.append(
-#                 f"- `{q}`.`{c}` is INVALID: column `{c}` does not exist in any "
-#                 f"table. Remove it / use only columns from the COLUMN LOCATION INDEX."
-#             )
-#     return ("Your previous SQL referenced columns on the WRONG table. This will "
-#             "fail with error 1054. Fix EVERY issue below and return the same JSON "
-#             "shape:\n" + "\n".join(lines))
-
-
-# # ══════════════════════════════════════════════════════
-# # BUSINESS SCHEMA MAP  (drill-down + correct dimension joins + word→column)
-# # ══════════════════════════════════════════════════════
-# # Fixes three failure modes that produced wrong numbers:
-# #   1. Product attributes (CATEGORY/CONSTRUCTION/vehicle type) were joined from
-# #      the WRONG table (a customer-keyed dealer table), causing fan-out and
-# #      inflated sums. We pin them to the real product dimension joined on
-# #      Material, and forbid any other source.
-# #   2. "vehicle" / "vehicle type" was mapped to CATEGORY. We map words to the
-# #      exact column.
-# #   3. Drill-down: "top 3 tyre categories" => WHERE CATEGORY='Tyre' GROUP BY the
-# #      next level (CONSTRUCTION).
-# #
-# # IMPORTANT: edit the CONFIG below to match your real schema. Tables are matched
-# # by the columns they contain (robust to munged table names), so you usually
-# # only need to keep the column/measure names correct.
-
-# # ── CONFIG ───────────────────────────────────────────────────────────────────
-# FACT_TABLE_HINTS = ["invoice"]          # name substring(s) of the fact table
-# MEASURE_COLUMN   = "Invoice_Value"      # the Sales measure column on the fact table
-
-# # Dimensions: each is auto-located as the (non-fact) table that contains its
-# # `dim_key` AND the most of its `owns` columns. `fact_key` is the column on the
-# # fact table that joins to `dim_key` on the dimension.
-# DIMENSIONS = [
-#     {
-#         "label":    "product",
-#         "fact_key": "Material",
-#         "dim_key":  "Material",
-#         "owns":     ["CATEGORY", "CONSTRUCTION", "vehicle type", "OLD CODE"],
-#     },
-#     {
-#         "label":    "customer",
-#         "fact_key": "Customer",
-#         "dim_key":  "Customer",
-#         "owns":     ["CUSTOMER_CATEGORY", "Region", "Zone", "Account group"],
-#     },
-# ]
-
-# # Product hierarchy ROOT → LEAF (column names; matched case/space/underscore-insensitively)
-# PRODUCT_HIERARCHY = ["CATEGORY", "CONSTRUCTION", "vehicle type"]
-
-# # Natural-language phrase → exact column name. Longest phrase wins.
-# COLUMN_SYNONYMS = {
-#     "product category": "CATEGORY", "category": "CATEGORY", "categories": "CATEGORY",
-#     "construction": "CONSTRUCTION", "tyre type": "CONSTRUCTION", "tire type": "CONSTRUCTION",
-#     "vehicle category": "vehicle type", "vehicle type": "vehicle type",
-#     "vehicle": "vehicle type", "by vehicle": "vehicle type",
-#     "region": "Region", "zone": "Zone",
-#     "dealer": "Customer", "customer": "Customer",
-# }
-# # ── END CONFIG ───────────────────────────────────────────────────────────────
-
-# # Words that signal the user wants a ranked breakdown (so we apply the GROUP BY).
-# _RANK_OR_BREAKDOWN_RE = re.compile(
-#     r'\b(top|bottom|best|worst|highest|lowest|leading|poor|performing|rank|'
-#     r'ranking|wise|breakdown|break\s*down|split|distribution|each|per|'
-#     r'types?|kinds?|categor(?:y|ies)|segments?|variants?|constructions?)\b', re.I)
-
-
-# def _norm_ident(s):
-#     return re.sub(r'[\s_]+', '', str(s).lower())
-
-
-# def _parse_value_index(schema_chunks):
-#     """From '[COUNT] ...' lines 'All values of <col> in <table>: v1, v2, ...'
-#     return {(table, col): [distinct original values]}."""
-#     out = {}
-#     for text in schema_chunks:
-#         for line in str(text).splitlines():
-#             m = re.search(r'All values of (.+?) in (\S+?):\s*(.+)$', line)
-#             if not m:
-#                 continue
-#             col, table, rest = m.group(1).strip(), m.group(2).strip(), m.group(3)
-#             vals = [v.strip() for v in rest.split(',') if v.strip()]
-#             if not vals:
-#                 continue
-#             bucket = out.setdefault((table, col), [])
-#             seen = {v.lower() for v in bucket}
-#             for v in vals:
-#                 if v.lower() not in seen:
-#                     bucket.append(v)
-#                     seen.add(v.lower())
-#     return out
-
-
-# def _orig_col(table_cols, table, col_name):
-#     """Return the original-cased column name on `table` matching col_name."""
-#     for c in table_cols.get(table, []):
-#         if _norm_ident(c) == _norm_ident(col_name):
-#             return c
-#     return None
-
-
-# def _build_business_map(table_cols):
-#     """Resolve the CONFIG against the actually-loaded schema. Returns a dict with
-#     the fact table, each dimension's real table + join keys, the column→source map
-#     (so product attributes are pinned to the product table), the resolved synonym
-#     map, and the ordered hierarchy levels as (table, col)."""
-#     norm_tables = {t: {_norm_ident(c) for c in cols} for t, cols in table_cols.items()}
-
-#     # Fact table: name hint match, else the table that has the measure column.
-#     fact = None
-#     for t in table_cols:
-#         if any(h in t.lower() for h in FACT_TABLE_HINTS):
-#             fact = t
-#             break
-#     if not fact:
-#         for t, ncols in norm_tables.items():
-#             if _norm_ident(MEASURE_COLUMN) in ncols:
-#                 fact = t
-#                 break
-
-#     # Locate each dimension as the non-fact table containing dim_key + most owns.
-#     dim_resolved = []          # list of {table, fact_key, dim_key, owns:[orig...]}
-#     attr_source = {}           # norm(col) -> (table, orig_col, fact_key, dim_key)
-#     for d in DIMENSIONS:
-#         dk = _norm_ident(d["dim_key"])
-#         owns_norm = [_norm_ident(c) for c in d["owns"]]
-#         best, best_score = None, -1
-#         for t, ncols in norm_tables.items():
-#             if t == fact or dk not in ncols:
-#                 continue
-#             score = sum(1 for c in owns_norm if c in ncols)
-#             if score <= 0:
-#                 continue
-#             # Prefer a leaner table (true dimension) on ties.
-#             score = score * 100 - len(ncols)
-#             if any(h in t.lower() for h in [d["label"]]):
-#                 score += 50
-#             if score > best_score:
-#                 best, best_score = t, score
-#         if not best:
-#             continue
-#         owns_present = [_orig_col(table_cols, best, c) for c in d["owns"]
-#                         if _orig_col(table_cols, best, c)]
-#         fk = _orig_col(table_cols, fact, d["fact_key"]) or d["fact_key"]
-#         dkey = _orig_col(table_cols, best, d["dim_key"]) or d["dim_key"]
-#         dim_resolved.append({"table": best, "fact_key": fk, "dim_key": dkey,
-#                              "owns": owns_present, "label": d["label"]})
-#         for oc in owns_present:
-#             attr_source[_norm_ident(oc)] = (best, oc, fk, dkey)
-
-#     # Hierarchy levels resolved to (table, orig_col), pinned to their source table.
-#     levels = []
-#     for h in PRODUCT_HIERARCHY:
-#         nh = _norm_ident(h)
-#         if nh in attr_source:
-#             t, oc, _, _ = attr_source[nh]
-#             levels.append((t, oc))
-#         elif fact and nh in norm_tables.get(fact, set()):
-#             levels.append((fact, _orig_col(table_cols, fact, h)))
-
-#     # Resolve synonyms to real (table, col): prefer a pinned source, else fact.
-#     def _plurals(p):
-#         out = {p}
-#         out.add(p + "s")
-#         if p.endswith("y"):
-#             out.add(p[:-1] + "ies")
-#         return out
-#     syn_resolved = {}
-#     for phrase, colname in COLUMN_SYNONYMS.items():
-#         nc = _norm_ident(colname)
-#         loc = None
-#         if nc in attr_source:
-#             t, oc, _, _ = attr_source[nc]
-#             loc = (t, oc)
-#         elif fact and nc in norm_tables.get(fact, set()):
-#             loc = (fact, _orig_col(table_cols, fact, colname))
-#         if loc:
-#             for variant in _plurals(phrase.lower()):
-#                 syn_resolved.setdefault(variant, loc)
-
-#     measure = _orig_col(table_cols, fact, MEASURE_COLUMN) if fact else None
-
-#     return {
-#         "fact": fact, "measure": measure or MEASURE_COLUMN,
-#         "dims": dim_resolved, "attr_source": attr_source,
-#         "synonyms": syn_resolved, "levels": levels,
-#     }
-
-
-# def _business_prompt(biz):
-#     """Authoritative instruction block: exact dimension joins, the measure, the
-#     forbidden sources, and word→column mapping."""
-#     if not biz.get("fact"):
-#         return ""
-#     fact = biz["fact"]
-#     out = [f"AUTHORITATIVE SCHEMA MAP (follow EXACTLY — overrides any guess):",
-#            f"- Fact table: `{fact}`. Sales / performance / revenue = "
-#            f"SUM(`{fact}`.`{biz['measure']}`)."]
-#     forbid = []
-#     for d in biz["dims"]:
-#         if not d["owns"]:
-#             continue
-#         cols = ", ".join(f"`{c}`" for c in d["owns"])
-#         out.append(
-#             f"- {cols} live ONLY on `{d['table']}`. To use any of them you MUST "
-#             f"JOIN `{d['table']}` ON `{fact}`.`{d['fact_key']}` = "
-#             f"`{d['table']}`.`{d['dim_key']}`. NEVER read these columns from any "
-#             f"other table, and NEVER join them on a different key (doing so "
-#             f"multiplies rows and inflates the totals).")
-#         forbid.append(f"`{d['table']}` only via `{d['fact_key']}`")
-#     if biz["synonyms"]:
-#         # Compact, de-duplicated word→column list
-#         seen = {}
-#         for phrase, (t, c) in biz["synonyms"].items():
-#             seen.setdefault((t, c), []).append(phrase)
-#         word_lines = []
-#         for (t, c), phrases in seen.items():
-#             ph = ", ".join(f'"{p}"' for p in sorted(set(phrases), key=len))
-#             word_lines.append(f"  {ph} -> `{c}` (on `{t}`)")
-#         out.append("WORD -> COLUMN (map the user's wording to the EXACT column):\n"
-#                    + "\n".join(word_lines))
-#     out.append("FAN-OUT GUARD: every dimension JOIN must be on the key above so "
-#                "each fact row matches at most one dimension row. If a column name "
-#                "exists on more than one table, use the table named in this map.")
-#     return "\n".join(out)
-
-
-# def _detect_group_columns(question, biz):
-#     """Map the user's wording to the column(s) they want grouped, via synonyms.
-#     Longest matching phrase wins on any overlapping span, so 'vehicle categories'
-#     resolves to `vehicle type` and suppresses the bare 'categories'→CATEGORY."""
-#     ql = question.lower()
-#     candidates = []  # (start, end, table, col, phrase)
-#     for phrase, (t, c) in biz.get("synonyms", {}).items():
-#         for m in re.finditer(r'\b' + re.escape(phrase) + r'\b', ql):
-#             candidates.append((m.start(), m.end(), t, c, phrase))
-#     # Longest phrase first; greedily accept non-overlapping spans.
-#     candidates.sort(key=lambda x: (-(x[1] - x[0]), x[0]))
-#     taken, out, seen = [], [], set()
-#     for s, e, t, c, p in candidates:
-#         if any(not (e <= ts or s >= te) for ts, te in taken):
-#             continue  # overlaps an already-accepted (longer) phrase
-#         taken.append((s, e))
-#         if (t, c) not in seen:
-#             seen.add((t, c))
-#             out.append((t, c, p))
-#     return out
-
-
-# def _detect_drilldown(question, values_by_col, biz):
-#     """If the question names a value at some hierarchy level (e.g. 'tyre'),
-#     return {'filter': (table,col,value), 'group': (table,col)|None}."""
-#     levels = biz.get("levels") or []
-#     if not levels:
-#         return None
-#     ql = question.lower()
-
-#     matched = None  # (level_idx, table, col, original_value)
-#     for idx, (t, c) in enumerate(levels):
-#         for v in values_by_col.get((t, c), []):
-#             if len(v) < 2:
-#                 continue
-#             if re.search(r'\b' + re.escape(v.lower()) + r'\b', ql):
-#                 if matched is None or len(v) > len(matched[3]):
-#                     matched = (idx, t, c, v)
-#     if not matched:
-#         return None
-#     f_idx, f_t, f_c, f_val = matched
-
-#     # Group level: explicit deeper level the user named (via synonyms or name),
-#     # else the next level down.
-#     group = None
-#     named = _detect_group_columns(question, biz)
-#     for (gt, gc, _ph) in named:
-#         for idx in range(f_idx + 1, len(levels)):
-#             if (gt, gc) == levels[idx]:
-#                 group = (gt, gc)
-#                 break
-#         if group:
-#             break
-#     if group is None and f_idx + 1 < len(levels):
-#         group = levels[f_idx + 1]
-
-#     return {"filter": (f_t, f_c, f_val), "group": group}
-
-
-# def _drilldown_hint(spec, want_breakdown, biz):
-#     f_t, f_c, f_val = spec["filter"]
-#     fact = biz.get("fact") or "invoice"
-#     measure = biz.get("measure") or "Invoice_Value"
-#     s = (f"\n\nHIERARCHY DRILL-DOWN (apply this):\n"
-#          f"- The question names '{f_val}', a value of `{f_c}` on `{f_t}`. Use it as "
-#          f"a FILTER: WHERE `{f_t}`.`{f_c}` = '{f_val}' (exact value, case included).")
-#     grp = spec.get("group")
-#     if grp and want_breakdown:
-#         g_t, g_c = grp
-#         s += (f"\n- Break it down WITHIN '{f_val}': GROUP BY `{g_t}`.`{g_c}` (the "
-#               f"next level down) and rank by SUM(`{fact}`.`{measure}`) DESC, applying "
-#               f"the requested Top/Bottom N. Do NOT group by `{f_c}` itself. JOIN the "
-#               f"dimension table(s) per the AUTHORITATIVE SCHEMA MAP.")
-#     else:
-#         s += "\n- Apply this filter; aggregate/rank as the question asks."
-#     return s
-
-
-# def _grouping_hint(question, biz):
-#     """For non-drill questions, if the wording names a dimension to break by,
-#     tell the model exactly which column/table to GROUP BY."""
-#     named = _detect_group_columns(question, biz)
-#     if not named or not _RANK_OR_BREAKDOWN_RE.search(question):
-#         return ""
-#     fact = biz.get("fact") or "invoice"
-#     lines = ["\n\nGROUP-BY MAPPING (use these EXACT columns for the breakdown):"]
-#     for (t, c, ph) in named:
-#         if t == fact:
-#             lines.append(f"- '{ph}' -> GROUP BY `{t}`.`{c}`.")
-#         else:
-#             lines.append(f"- '{ph}' -> GROUP BY `{t}`.`{c}` (JOIN `{t}` per the "
-#                          f"AUTHORITATIVE SCHEMA MAP).")
-#     return "\n".join(lines)
-
-
-# # ══════════════════════════════════════════════════════
-# # MAIN CONTROLLER
-# # ══════════════════════════════════════════════════════
-
-# def session_rag_chat_controller(get_connection_func):
-#     data       = request.json or {}
-#     session_id = (data.get("session_id") or "").strip()
-#     question   = (data.get("question")   or "").strip()
-#     history    = data.get("chat_history", [])
-#     user_id    = data.get("user_id")
-#     visit_number = data.get("visit_number")
-
-#     if not session_id:
-#         return jsonify({"status":"failed","statusCode":400,
-#                         "message":"session_id is required"}), 400
-
-#     v_raw = visit_number
-#     calc_new_visit = False
-#     if not v_raw or str(v_raw).lower() in ["new", "session_visit_new"]:
-#         calc_new_visit = True
-#         visit_number = 1
-#     else:
-#         try:
-#             visit_number = int(str(v_raw).replace("session_visit_", ""))
-#         except:
-#             calc_new_visit = True
-#             visit_number = 1
-
-#     if calc_new_visit:
-#         conn = cur = None
-#         try:
-#             conn = get_connection_func()
-#             cur  = conn.cursor(dictionary=True)
-#             cur.execute("""
-#                 SELECT COALESCE(MAX(visit_number), 0) AS max_v
-#                 FROM session_chat_history
-#                 WHERE session_id = %s AND user_id = %s
-#             """, (session_id, int(user_id) if user_id else 0))
-#             row = cur.fetchone()
-#             visit_number = (row["max_v"] + 1) if row else 1
-#         except Exception as e:
-#             visit_number = 1
-#         finally:
-#             if cur: cur.close()
-#             if conn: conn.close()
-
-#     # Greeting
-#     if question and _is_greet(question):
-#         suggested = []
-#         if session_id in _CACHE:
-#             chunks, _, _, _ = _CACHE[session_id]
-#             sample = "\n".join(c["text"] for c in chunks if c["kind"] == "count")[:10000]
-#             res = _mistral(
-#                 "Respond ONLY in valid JSON.",
-#                 f"Data summary:\n{sample}\n\n"
-#                 "Generate exactly 5 questions. Q1 starts with 'What ', Q2 starts with 'Where ', Q3 starts with 'Why '. "
-#                 "Use natural, human-readable language. DO NOT mention internal system names, folder names, or long raw database table names (like 'd__project_backend...'). Use terms like 'the data' or 'the records' instead. "
-#                 'Return ONLY: {"suggested_questions":["What ...?","Where ...?","Why ...?"]}'
-#             )
-#             if res: suggested = res.get("suggested_questions", [])
-#         return jsonify({
-#             "status":"success","statusCode":200,
-#             "answer":"Hi! I'm your advanced business intelligence assistant. I have full access to your session databases. Ask me anything about your business data!",
-#             "follow_up_questions": suggested,
-#             "visit_number": visit_number
-#         }), 200
-
-#     # Build/get store
-#     try:
-#         all_chunks, bm25_idx, col = _build_store(session_id, get_connection_func)
-#     except Exception as e:
-#         return jsonify({"status":"error","statusCode":500,
-#                         "message":f"Store error: {e}"}), 500
-
-#     if not all_chunks:
-#         return jsonify({"status":"no_data","statusCode":200,
-#                         "session_id":session_id,
-#                         "message":"No data found for this session."}), 200
-
-#     # Suggest / Default Report mode
-#     if not question or question.startswith("default_"):
-#         count_chunks = [c["text"] for c in all_chunks if c["kind"]=="count"]
-#         sample = "\n".join(count_chunks)[:15000]
-#         res = _mistral(SYS, f"""
-# Business data summary ({len(all_chunks)} total chunks):
-# {sample}
-
-# This is a business intelligence assistant. 
-# 1. Write a brief "Executive Summary" (3-4 sentences) of the overall data trends.
-# 2. Generate exactly 5 "What" critical questions about the actual business data above.
-#    ALL 5 questions MUST start with "What ". Focus on concerns, sudden changes, or trends.
-#    Use natural language. DO NOT mention internal system names or raw tables.
-# 3. Generate a category-wise trend report as a "line_chart" visualization. Extract numeric/categorical trend values from the chunks.
-
-# Return ONLY valid JSON:
-# {{
-#   "answer": "Executive Summary: ...",
-#   "suggested_questions": ["What ...?", "What ...?", "What ...?", "What ...?", "What ...?"],
-#   "visualizations": [
-#     {{
-#       "type": "line_chart",
-#       "title": "Category-wise Trend Report",
-#       "xKey": "category",
-#       "yKey": "value",
-#       "data": [
-#         {{"category": "A", "value": 100}},
-#         {{"category": "B", "value": 200}}
-#       ]
-#     }}
-#   ]
-# }}
-
-# CRITICAL INSTRUCTIONS FOR VISUALIZATIONS:
-# 1. The object keys inside the "data" array MUST exactly match what you specify for "xKey" and "yKey".
-# 2. Only include categories/points that ACTUALLY EXIST in the data. Do NOT invent missing categories with 0 values.
-# """)
-#         if not res:
-#             return jsonify({"status":"error","statusCode":500,"message":"LLM failed"}), 500
-            
-#         viz = res.get("visualizations", [])
-#         visualizations = _safe_visualizations(_normalize_visualizations(viz))
-
-#         return jsonify({
-#             "status":              "success",
-#             "statusCode":          200,
-#             "answer":              res.get("answer", ""),
-#             "suggested_questions": res.get("suggested_questions",[]),
-#             "visualizations":      visualizations,
-#             "visit_number":        visit_number
-#         }), 200
-
-#     # Understand + Retrieve
-#     understanding = _understand(question, all_chunks)
-#     hist          = _history(history)
-#     print(f"[RAG] intent={understanding['intent']} tables={understanding['table_hints']} entities={understanding['entities']}")
-
-#     # NEW ARCHITECTURE: INTENT ROUTER 
-#     intent = classify_intent(question)
-#     print(f"[RAG] Router classified intent: {intent}")
-#     context = ""
-
-#     if intent == "HYBRID":
-#         print("[RAG] HYBRID query detected! AQL/SQL First Then RAG...")
-#         schema_chunks = [c["text"] for c in all_chunks if c["kind"] in ("schema", "count")]
-#         schema_context = "\n".join(schema_chunks)
-#         # 1. AQL First: run execute_hybrid to get specific entity filter
-#         hybrid_entities = execute_hybrid(question, get_connection_func, schema_context)
-#         if hybrid_entities:
-#             print(f"[RAG] Hybrid found targeted entities: {hybrid_entities[:10]}")
-#             # Inject these entities so Vector Search focuses heavily on them
-#             understanding["entities"].extend(hybrid_entities)
-            
-#         # 2. Then RAG
-#         context = _retrieve(all_chunks, bm25_idx, col, question, understanding)
-
-#     elif intent == "INSIGHT":
-#         print("[RAG] INSIGHT query detected! Standard RAG...")
-#         context = _retrieve(all_chunks, bm25_idx, col, question, understanding)
-
-#     # ─────────────────────────────────────────────
-#     # TEXT-TO-SQL (Bypass VectorDB for aggregations)
-#     # ─────────────────────────────────────────────
-#     if intent == "AGGREGATION":
-#         print(" Bypassing VectorDB. Routing to Structured Database (SQL/AQL)...")
-#         schema_chunks = [c["text"] for c in all_chunks if c["kind"] in ("schema", "count")]
-#         schema_context = "\n".join(schema_chunks)
-
-#         # ─────────────────────────────────────────────
-#         # 1. CANONICALIZATION STEP
-#         # ─────────────────────────────────────────────
-#         canon_sys = """You are a Query Canonicalizer for Business Intelligence.
-# Convert the user's natural language question into a structured JSON representation (Canonical Query).
-# Do not generate SQL yet. Extract the core analytical components.
-
-# Return ONLY a JSON object in this format:
-# {
-#   "analytical_intent": "e.g., dealer_ranking, sales_trend, total_revenue",
-#   "metric": "e.g., sales, volume, discount",
-#   "aggregation": "e.g., sum, count, avg",
-#   "sort": "e.g., desc, asc",
-#   "limit": 5
-# }
-# If a component is missing from the user's question, set it to null.
-# """
-#         canon_json = _mistral(canon_sys, f"Natural Language Question: {question}", temperature=0.0)
-#         canonical_query_str = json.dumps(canon_json, indent=2) if canon_json else f'{{"raw_question": "{question}"}}'
-#         print(f"[CANONICAL_QUERY] {canonical_query_str}")
-
-#         # ─────────────────────────────────────────────
-#         # 2. SQL GENERATION STEP
-#         # ─────────────────────────────────────────────
-#         sql_sys = """You are a Senior Data Analyst, SQL Expert, and Business Intelligence Assistant.
-
-# PRIMARY OBJECTIVE
-
-# Generate SQL that computes answers from the FULL DATASET.
-
-# BUSINESS DEFINITIONS
-# - Dealer = Customer
-# - Sales = SUM(invoice_value)
-# - Revenue = SUM(invoice_value)
-# - Volume = SUM(qty)
-# - Net Sales = SUM(invoice_value) - SUM(total_discount)
-# - Invoice Count = COUNT(DISTINCT invoice_number)
-# - Product = Material
-# - Product Category = the `CATEGORY` column (Tyre, Tube, Flap, ...) — a PRODUCT attribute; join product ON invoice.Material = product.Material
-# - Construction / "tyre type" / "tube type" = the `CONSTRUCTION` column (RADIAL, BIAS, ...) — a PRODUCT attribute on the product table (join on Material)
-# - Vehicle / "vehicle type" / "vehicle category" = the `vehicle type` column (TRUCK, CAR, LCV, ...) — a PRODUCT attribute on the product table (join on Material). This is DIFFERENT from CATEGORY; never substitute one for the other.
-# - These three (CATEGORY, CONSTRUCTION, `vehicle type`) are PRODUCT attributes keyed by Material. They are NEVER on the customer/dealer table; do not join them on Customer.
-# - "category-wise" / "by category" / "product category wise" / "per category" => GROUP BY `CATEGORY`, NOT Material
-# - "product-wise" / "by product" => GROUP BY Material
-# - Top Dealer = Dealer ranked by Sales descending
-# - Worst Dealer = Dealer ranked by Sales ascending
-# - Best Performing Dealer = Dealer ranked by Sales descending
-# - Lowest Performing Dealer = Dealer ranked by Sales ascending
-# - Top Product = Product ranked by Sales descending
-# - Worst Product = Product ranked by Sales ascending
-# - Region Performance = SUM(invoice_value) grouped by region
-# - Zone Performance = SUM(invoice_value) grouped by zone
-# - Average Realization = SUM(invoice_value) / NULLIF(SUM(qty),0)
-
-# AUTHORITATIVE SCHEMA MAP PRECEDENCE
-# - If the user message contains an "AUTHORITATIVE SCHEMA MAP", a "GROUP-BY MAPPING",
-#   or a "HIERARCHY DRILL-DOWN" block, those are RESOLVED FROM THE REAL SCHEMA and
-#   OVERRIDE these generic definitions for table names, column ownership, joins,
-#   filters and group-by. Follow them exactly.
-# - FAN-OUT: a dimension table must be joined on its key so each fact row matches
-#   at most one dimension row. Joining a product attribute on the wrong key (e.g.
-#   Customer) multiplies rows and inflates SUM — never do it.
-
-
-# METRIC PRIORITY
-# - Whenever user asks: "Top Dealer", "Best Dealer", "Leading Dealer" -> Use: SUM(invoice_value)
-# - Whenever user asks: "Worst Dealer", "Lowest Dealer", "Poor Performing Dealer" -> Use: SUM(invoice_value)
-# - Never use: qty, taxable_value, gst, discount unless explicitly requested.
-
-# DATA RELIABILITY RULES
-
-# 1. Use schema information only to identify:
-
-#    * tables
-#    * columns
-#    * relationships
-
-# 1b. COLUMN OWNERSHIP IS NON-NEGOTIABLE. A "COLUMN LOCATION INDEX" is provided
-#    in the user message listing exactly which table owns each column. Before you
-#    write any column reference (`table`.`column`), verify that column appears in
-#    that table's list. NEVER reference a column on a table that does not own it
-#    (this causes MySQL error 1054). If a column you need lives on a different
-#    table, JOIN that table using one of the provided LIKELY JOIN KEYS. Do not
-#    assume a "natural"-sounding column (e.g. a product/customer attribute) lives
-#    on the fact/invoice table — check the index.
-
-# 2. Never use example values, retrieved rows, vector chunks, sample records, or context snippets to calculate business results.
-
-# 3. Every ranking, trend, comparison, aggregation, KPI, sales metric, customer metric, dealer metric, category metric, region metric, and performance metric MUST be computed using SQL.
-
-# 4. For Top N or Bottom N questions:
-
-# Return ONLY the ranking result unless the user explicitly asks for:
-# - monthwise analysis
-# - trend analysis
-# - yearly analysis
-# - time series analysis
-
-# Do not add monthly, yearly, trend, or detailed breakdowns unless explicitly requested.
-
-# 5. For monthwise analysis:
-#    Use the actual date column and aggregate by month before ranking.
-
-# 6. Never generate SQL that ranks monthly rows directly using:
-#    LIMIT N after GROUP BY month.
-
-# 7. If the question asks for Top N entities (e.g., dealers, customers) month-wise or trend:
-#    NEVER use `IN (SELECT ... LIMIT N)` because MySQL does not support LIMIT inside IN subqueries.
-#    Instead, you MUST use a JOIN with a derived table:
-   
-#    SELECT t.entity, DATE_FORMAT(STR_TO_DATE(t.date_col, '%Y-%m-%d'), '%Y-%m') as month, SUM(t.metric) as total_sales
-#    FROM `table` t
-#    JOIN (
-#        SELECT entity FROM `table`
-#        GROUP BY entity
-#        ORDER BY SUM(metric) DESC
-#        LIMIT 2
-#    ) as top_entities ON t.entity = top_entities.entity
-#    GROUP BY t.entity, month
-#    ORDER BY top_entities.total_sales DESC, month;
-   
-#    Adjust the DATE_FORMAT and STR_TO_DATE depending on the actual date format in the table.
-
-# 8. Use:
-#    SUM()
-#    COUNT()
-#    AVG()
-#    MIN()
-#    MAX()
-#    GROUP BY
-#    ORDER BY
-#    HAVING
-
-# 9. If SQL execution is possible:
-#    SQL results are always more authoritative than retrieved context.
-
-# 10. Never estimate.
-
-# 11. Never infer missing values.
-
-# 12. Never hallucinate business results.
-
-# 13. PRESERVE EXACT DECIMALS: Never round monetary values in SQL unless explicitly asked. Return the exact sum with decimals intact.
-
-# COLUMN HYGIENE
-# - All numeric columns (sales, invoice_value, quantity, discount, tax) are strictly typed as DECIMAL or BIGINT in the database.
-# - DO NOT use CAST or REGEXP_REPLACE or REPLACE to clean numeric columns. Just use SUM(`col`).
-# - ONLY format strings if the column is explicitly a string format, but numeric columns are already typed.
-
-# PER-GROUP TOP-N — "CATEGORY-WISE", "PER", "EACH", "BY X", "X-WISE"
-
-# - "Top N customers per category", "category wise top N", "best N per region",
-#   "top N dealers for each zone" all mean: rank WITHIN each group and keep N rows
-#   from EVERY group. NEVER answer these with a single global ORDER BY ... LIMIT N
-#   (that returns only the N biggest pairs overall, not N per group).
-# - Use a window function partitioned by the group:
-#       WITH agg AS (
-#         SELECT `<group_col>` AS grp, `<entity_col>` AS entity,
-#                SUM(`<value_col>`) AS metric
-#         FROM `<fact>` JOIN `<dim>` ON ...
-#         GROUP BY `<group_col>`, `<entity_col>`
-#       ),
-#       ranked AS (
-#         SELECT grp, entity, metric,
-#                ROW_NUMBER() OVER (PARTITION BY grp ORDER BY metric DESC) AS rn
-#         FROM agg
-#       )
-#       SELECT grp, entity, metric FROM ranked WHERE rn <= N
-#       ORDER BY grp, metric DESC;
-# - Use a single global ORDER BY ... LIMIT N ONLY when the question has NO
-#   per-group qualifier (plain "top N customers").
-
-# PLAIN TOP-N vs WINDOWED TOP-N
-# - A plain "top N" / "worst N" with NO per-group qualifier needs only
-#   `... GROUP BY entity ORDER BY metric DESC LIMIT N`. Do NOT use a window
-#   function or CTE for it — that adds a needless alias that often breaks.
-# - Use the window-function pattern ONLY for per-group ("X-wise") questions.
-
-# HIERARCHY DRILL-DOWN
-# - The product data has a hierarchy (e.g. CATEGORY -> CONSTRUCTION -> VEHICLE_TYPE
-#   -> ... -> MATERIAL), from broad to specific.
-# - When the user NAMES A VALUE at one level (e.g. "tyre", "radial", "truck") and
-#   asks for "top/worst N <something> of/within it" or any breakdown, treat the
-#   named value as a FILTER (WHERE that_level = 'value') and GROUP BY the NEXT
-#   level DOWN, ranking by the metric (default Sales = SUM(invoice_value)).
-#   Example: "top 3 performing tyre categories" =>
-#       WHERE `category` = 'Tyre'
-#       GROUP BY `construction`            -- the next level below CATEGORY
-#       ORDER BY SUM(`Invoice_Value`) DESC, `construction` ASC
-#       LIMIT 3
-#   Never GROUP BY the same level you filtered on (that returns just one row).
-# - If the user explicitly names the child level ("...constructions",
-#   "...vehicle types"), GROUP BY exactly that level.
-# - If a HIERARCHY DRILL-DOWN block is provided in the user message, follow it
-#   exactly (it tells you the filter column/value and the group-by level, both
-#   resolved to real tables). JOIN across tables via the LIKELY JOIN KEYS when the
-#   filter level and group level live on different tables.
-
-# RESERVED WORDS — NEVER USE AS ALIASES
-# - `RANK`, `ROW_NUMBER`, `ORDER`, `GROUP`, `DESC`, `ASC`, `ROWS`, `RANGE`,
-#   `COUNT`, `SUM`, `OVER`, `PARTITION`, `DENSE_RANK`, `LAG`, `LEAD` are reserved
-#   in MySQL 8.0 and will cause error 1064 if used as a column alias.
-# - Name the row-number column `rn` (never `rank`). Backtick EVERY alias and
-#   identifier without exception.
-# DETERMINISTIC ORDERING — MANDATORY TIE-BREAKER
-# - Many entities can tie on the same total (e.g. several customers at 0 sales).
-#   ORDER BY the metric alone returns boundary rows in arbitrary order.
-# - EVERY ranking ORDER BY must append the entity key as a tie-breaker:
-#       ORDER BY total_sales DESC, `customer` ASC   -- top N
-#       ORDER BY total_sales ASC,  `customer` ASC   -- worst N
-# - Same inside windows: ROW_NUMBER() OVER (PARTITION BY grp ORDER BY metric DESC, `entity` ASC)
-
-# DIALECT RULES
-
-# 1. You MUST use valid MySQL syntax.
-# 2. Do NOT use PostgreSQL functions like DATE_TRUNC.
-# 3. For monthly grouping in MySQL, if the date is a string (e.g. 'DD-MM-YYYY'), parse it using STR_TO_DATE(date_col, '%d-%m-%Y') before grouping with DATE_FORMAT(..., '%Y-%m').
-# 4. ALWAYS use backticks ` for table and column names.
-
-# OUTPUT RULES
-
-# Return ONLY valid JSON:
-
-# {
-# "db": "",
-# "sql": "",
-# "reasoning": ""
-# }
-# """
-#         sql_user = f"Schemas available:\n{schema_context}\n\nOriginal Question: {question}\n\nCanonical Query (Structured Intent):\n{canonical_query_str}"
-#         schema_grounding, col_to_tables = _build_schema_grounding(schema_chunks)
-#         table_cols_map = _parse_schema_chunks(schema_chunks)
-#         if schema_grounding:
-#             sql_user += f"\n\n{schema_grounding}"
-
-#         # Business schema map: pin product attributes to the correct dimension
-#         # table/join key, map words→columns, and drill down hierarchies. This is
-#         # what makes "tyre categories" (=> construction within Tyre) and "vehicle"
-#         # (=> `vehicle type`, not CATEGORY) resolve correctly and without fan-out.
-#         try:
-#             biz = _build_business_map(table_cols_map)
-#             biz_prompt = _business_prompt(biz)
-#             if biz_prompt:
-#                 sql_user += f"\n\n{biz_prompt}"
-#                 print(f"[BIZMAP] fact={biz['fact']} measure={biz['measure']} "
-#                       f"dims={[(d['label'], d['table']) for d in biz['dims']]} "
-#                       f"levels={biz['levels']}")
-
-#             values_by_col = _parse_value_index(schema_chunks)
-#             drill = _detect_drilldown(question, values_by_col, biz)
-#             if drill:
-#                 want_breakdown = bool(_RANK_OR_BREAKDOWN_RE.search(question))
-#                 sql_user += _drilldown_hint(drill, want_breakdown, biz)
-#                 _f = drill["filter"]; _g = drill.get("group")
-#                 print(f"[DRILLDOWN] filter {_f[0]}.{_f[1]}='{_f[2]}'"
-#                       + (f" -> group by {_g[0]}.{_g[1]}" if (_g and want_breakdown) else " (filter only)"))
-#             else:
-#                 gh = _grouping_hint(question, biz)
-#                 if gh:
-#                     sql_user += gh
-#                     print(f"[GROUPBY] {[ (c,p) for (_t,c,p) in _detect_group_columns(question, biz)]}")
-#         except Exception as _e:
-#             print(f"[BIZMAP] skipped: {_e}")
-
-#         sql_json = _mistral(sql_sys, sql_user, temperature=0.0)
-
-#         # ── Deterministic pre-execution guard ──────────────────────────────
-#         # The model sometimes attributes a column to the wrong base table
-#         # (e.g. `invoice`.`construction`), which fails at execution with 1054.
-#         # Catch it statically against the real schema and force a correction
-#         # BEFORE touching the database, so the first DB attempt is already right.
-#         for _v in range(2):
-#             cand_sql = (sql_json or {}).get("sql", "") if isinstance(sql_json, dict) else ""
-#             if not cand_sql:
-#                 break
-#             violations = _validate_column_refs(cand_sql, table_cols_map)
-#             if not violations:
-#                 break
-#             print(f"[SQL_VALIDATE] wrong-table column refs {violations} — regenerating before execution")
-#             fix_user = (
-#                 sql_user
-#                 + "\n\nPREVIOUS SQL:\n" + cand_sql
-#                 + "\n\n" + _column_ref_correction(violations, col_to_tables)
-#             )
-#             sql_json = _mistral(sql_sys, fix_user, temperature=0.0)
-
-#         # Track failures so we never fall through to an empty-context LLM answer.
-#         agg_sql_error = None
-#         sql_results = []
-
-#         if sql_json and sql_json.get("sql"):
-#             target_db = sql_json.get("db", "").strip()
-#             sql_query = sql_json.get("sql", "").strip()
-#             print(f"[SQL_GEN] db: {target_db} | sql: {sql_query}")
-
-#             conn_sql = cur_sql = None
-#             sql_results = []
-#             try:
-#                 # Determine connection
-#                 if not target_db:
-#                     conn_sql = get_connection_func()
-#                     cur_sql = conn_sql.cursor(dictionary=True)
-#                 else:
-#                     try:
-#                         conn_sql = mysql.connector.connect(
-#                             host=MYSQL_CONFIG["host"], port=MYSQL_CONFIG["port"],
-#                             user=MYSQL_CONFIG["user"], password=MYSQL_CONFIG["password"],
-#                             database=target_db, connection_timeout=10)
-#                         cur_sql = conn_sql.cursor(dictionary=True)
-#                     except Exception as e:
-#                         print(f"[SQL_GEN] MySQL failed, trying Postgres: {e}")
-#                         if PSYCOPG2_AVAILABLE:
-#                             temp_conn = get_connection_func()
-#                             temp_cur = temp_conn.cursor(dictionary=True)
-#                             temp_cur.execute("SELECT credential FROM database_credential WHERE session_id=%s AND db_type IN ('postgresql', 'postgres')", (session_id,))
-#                             pg_rows = temp_cur.fetchall()
-#                             temp_cur.close()
-#                             temp_conn.close()
-                            
-#                             for r in pg_rows:
-#                                 cred = json.loads(r["credential"]) if isinstance(r["credential"], str) else r["credential"]
-#                                 if cred.get("database") == target_db:
-#                                     conn_sql = psycopg2.connect(
-#                                         host=cred.get("host"), port=cred.get("port", 5432),
-#                                         user=cred.get("username"), password=cred.get("password"),
-#                                         dbname=target_db, connect_timeout=10)
-#                                     cur_sql = conn_sql.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-#                                     break
-                
-#                 if cur_sql:
-#                     for _attempt in range(2):
-#                         try:
-#                             cur_sql.execute(sql_query)
-#                             rows = cur_sql.fetchall()
-#                             sql_results = [dict(r) for r in rows]
-
-#                             # Convert non-serializable objects to string
-#                             for row in sql_results:
-#                                 for k, v in row.items():
-#                                     if v is not None and not isinstance(v, (str, int, float, bool)):
-#                                         row[k] = str(v)
-
-#                             agg_sql_error = None
-#                             print(f"[SQL_EXEC] Success! Returned {len(sql_results)} rows.")
-#                             break
-#                         except Exception as ex:
-#                             agg_sql_error = str(ex)
-#                             print(f"[SQL_EXEC] Attempt {_attempt + 1} failed: {ex}")
-#                             if _attempt == 1:
-#                                 break
-#                             # Self-heal: send the error back to the model once.
-#                             repair_user = (
-#                                 f"The following MySQL query FAILED. Fix it and return the same JSON shape.\n\n"
-#                                 f"SQL:\n{sql_query}\n\nMySQL error:\n{ex}\n\n"
-#                                 f"Common fixes: a reserved word is used as an alias (rank, order, group, "
-#                                 f"desc, asc, count, sum, rows, range) — rename the row-number alias to `rn` "
-#                                 f"and backtick every identifier; verify MySQL 8.0 window syntax; keep the "
-#                                 f"follow the COLUMN HYGIENE rule in the system prompt for numeric columns.\n\n"
-#                                 f"Schemas:\n{schema_context}"
-#                             )
-#                             if schema_grounding:
-#                                 repair_user += f"\n\n{schema_grounding}"
-#                             # Targeted correction for 'Unknown column X.Y' (error 1054).
-#                             repair_user += _unknown_column_hint(ex, col_to_tables)
-#                             repair_user += f"\n\nOriginal Question: {question}"
-#                             fix_json = _mistral(sql_sys, repair_user, temperature=0.0)
-#                             if fix_json and fix_json.get("sql"):
-#                                 sql_query = fix_json.get("sql", "").strip()
-#                                 print(f"[SQL_REPAIR] Retrying with corrected SQL:\n{sql_query}")
-#                             else:
-#                                 break
-#             except Exception as e:
-#                 agg_sql_error = str(e)
-#                 print(f"[SQL_EXEC] Execution failed: {e}")
-#             finally:
-#                 if cur_sql: 
-#                     try: cur_sql.close() 
-#                     except: pass
-#                 if conn_sql: 
-#                     try: conn_sql.close() 
-#                     except: pass
-
-#             if sql_results:
-#                 # Override context with SQL results for final LLM generation
-#                 context = f"SQL Query executed: {sql_query}\n\nSQL Results:\n" + json.dumps(sql_results, indent=2)
-
-#         # AGGREGATION fail-safe: if no SQL rows were produced, do NOT let the
-#         # model answer from an empty/stale context (that caused fabricated,
-#         # inconsistent numbers). Constrain it to an honest "could not compute".
-#         if intent == "AGGREGATION" and not sql_results:
-#             _detail = f" (error: {agg_sql_error})" if agg_sql_error else ""
-#             print(f"[AGGREGATION] No SQL rows — refusing to fabricate{_detail}")
-#             context = (
-#                 "SQL_COMPUTATION_FAILED. The structured query returned no rows"
-#                 f"{_detail}. You MUST NOT fabricate, estimate, infer, or guess "
-#                 "any numbers, names, totals, or rankings. Reply that the result "
-#                 "could not be computed from the database for this question and "
-#                 "suggest the user rephrase or retry."
-#             )
-
-#     # Graph
-#     if _is_graph(question):
-#         ftype        = _next_followup_type(session_id)
-#         followup_ins = _followup_instruction(ftype)
-#         res = _mistral(SYS, f"""
-# Retrieved business data:
-# {context}
-
-# {hist}Chart request: "{question}"
-
-# Extract actual numeric/categorical values ONLY from the data above.
-# --- TREND DETECTION & LINE CHART RULES (MANDATORY CONTRACT) ---
-# If the question is trend-related (contains: trend, growth, decline, increase, decrease, over time, monthly, quarterly, yearly, seasonality, pattern, historical analysis, performance over time, month-on-month, MoM, YoY):
-# 1. Visualization Type MUST be Line Chart ("type": "line_chart").
-# 2. X-Axis (xKey) MUST be a Date/Month/Year field. IMPORTANT: Date values MUST be aggregated and formatted by month (e.g., 'Jan 2024' or 'January') on the X-Axis.
-# 3. Y-Axis (yKey) MUST be a Numeric Measure.
-# 4. MUST include "seriesKey": "series" at the visualization root level.
-# 5. NEVER return multiple category fields like "category": "Tube", "construction": "RADIAL" separately for a line chart. Instead, combine them into a single "series" key.
-#    - Example (CATEGORY + CONSTRUCTION): "series": "Tube - RADIAL"
-#    - Example (CATEGORY + CONSTRUCTION + VEHICLE TYPE): "series": "Tyre - RADIAL - Truck"
-#    - Example (VEHICLE TYPE ONLY): "series": "Truck"
-# 6. NEVER use Pie Chart or Table as primary visualization for trend queries.
-# 7. NEVER auto-detect legend. Always use seriesKey.
-# 8. Every row in "data" MUST contain the exact key "series" (matching seriesKey) and the xKey and yKey.
-# 9. CRITICAL: For any time-series data or trend charts, the items inside the "data" array MUST be sorted strictly in chronological order (e.g., Jan, Feb, Mar or April, May, June) so the graph renders correctly from left to right.
-# 9. For every line chart row:
-
-# REQUIRED FORMAT:
-
-# {{
-#   "month": "...",
-#   "invoice_value": 123,
-#   "series": "..."
-# }}
-
-# 10. NEVER use keys like:
-
-# category
-# category_construction
-# category_type
-# group
-# legend
-
-# Use ONLY:
-
-# series
-
-# 11. If CATEGORY + CONSTRUCTION + VEHICLE TYPE exists:
-
-# series =
-# CATEGORY + " - " + CONSTRUCTION + " - " + VEHICLE_TYPE
-
-# Example:
-
-# "Tyre - RADIAL - Truck"
-
-# 12. seriesKey MUST ALWAYS be:
-
-# "series"
-# ------------------------------------------
-# {followup_ins}
-# Return ONLY valid JSON in this format:
-# {{
-#   "answer": "A short analytical summary of the chart and trends shown.",
-#   "follow_up_questions": ["Question 1", "Question 2"],
-#   "visualizations": [
-#     {{
-#       "type": "line_chart",
-#       "title": "...",
-#       "xKey": "...",
-#       "yKey": "...",
-#       "seriesKey": "...",
-#       "data": [
-#         {{ "x_key_name": "...", "y_key_name": 123, "series": "..." }}
-#       ]
-#     }}
-#   ]
-# }}
-# """)
-#         if not res:
-#             return jsonify({"status":"error","statusCode":500,"message":"LLM failed"}), 500
-
-#         _advance_turn(session_id)
-
-#         fuq_raw = res.get("follow_up_questions",[])
-#         fuq = []
-#         if isinstance(fuq_raw, list):
-#             for q in fuq_raw:
-#                 if isinstance(q, dict) and "question" in q:
-#                     fuq.append(q["question"])
-#                 elif isinstance(q, str):
-#                     fuq.append(q)
-                    
-#         visualizations = _safe_visualizations(_normalize_visualizations(res.get("visualizations", [])))
-
-#         _save_history(
-#             get_connection_func,
-#             session_id,
-#             user_id,
-#             question,
-#             json.dumps(res.get("datasets",[])),
-#             fuq,
-#             understanding["intent"],
-#             "graph",
-#             visualizations=visualizations,
-#             visit_number=visit_number
-#         )
-
-#         return jsonify({
-#             "status": "success",
-#             "statusCode": 200,
-#             "answer": res.get("answer", "Here is the visualization for your request."),
-#             "follow_up_questions": fuq,
-#             "visualizations": visualizations,
-#             "visit_number": visit_number
-#         }), 200
-
-
-
-#     # Report
-#     if _is_report(question):
-#         ftype        = _next_followup_type(session_id)
-#         followup_ins = _followup_instruction(ftype)
-#         res = _mistral(SYS, f"""
-# You are a senior business analyst. Write a comprehensive report from the business data below.
-# Retrieved data:
-# {context}
-
-# {hist}Report request: "{question}"
-
-# Write an analytical business report using ONLY the data above.
-# Be specific — use actual numbers, names, values from the data.
-# {followup_ins}
-# Return ONLY:
-# {{
-#   "report_title":"...",
-#   "sections":[{{"heading":"...","content":"..."}}],
-#   "key_findings":["Finding 1","Finding 2","Finding 3"],
-#   "follow_up_questions":[]
-# }}
-# """)
-#         if not res:
-#             return jsonify({"status":"error","statusCode":500,"message":"LLM failed"}), 500
-#         _advance_turn(session_id)
-#         fuq = res.get("follow_up_questions",[])
-#         _save_history(get_connection_func, session_id, user_id,
-#                       question, res.get("report_title",""), fuq, understanding["intent"], "report", visit_number=visit_number)
-#         return jsonify({
-#             "status":     "success",
-#             "statusCode": 200,
-#             "report": {
-#                 "title":        res.get("report_title",""),
-#                 "sections":     res.get("sections",[]),
-#                 "key_findings": res.get("key_findings",[])
-#             },
-#             "follow_up_questions": fuq,
-#             "visit_number": visit_number
-#         }), 200
-
-#     # Answer
-#     ftype        = _next_followup_type(session_id)
-#     followup_ins = _followup_instruction(ftype)
-
-#     # Detect multi-part questions and add explicit instruction
-#     q_parts = [p.strip() for p in re.split(r'[?]\s+(?=[A-WY-Z])', question) if len(p.strip()) > 8]
-#     multi_hint = (
-#         f"\nNOTE: This question has {len(q_parts)} parts. Address EACH part with a clear numbered heading."
-#         if len(q_parts) > 1 else ""
-#     )
-
-#     res = _mistral(SYS, f"""
-# You are an advanced business intelligence AI — like Claude or GPT — specialized in analyzing actual business database records.
-# This is NOT a general chatbot. Every answer must be grounded in the business data provided below.
-
-# Retrieved data (read ALL carefully):
-# {context}
-
-# {hist}Business Question: "{question}"
-
-# Detected intent: {understanding['intent']}
-# Relevant tables: {understanding['table_hints']}
-
-# {multi_hint}
-# DEEP ANALYSIS PROTOCOL:
-
-# 1. Exhaustively scan every piece of data.
-
-# 2. If SQL execution results are present, SQL Results are the ONLY source of truth.
-
-# 3. If SQL Results are present:
-
-#    * Use only the rows and columns returned by SQL.
-#    * Do not invent additional fields.
-#    * Do not invent customer names.
-#    * Do not invent dealer names.
-#    * Do not invent dates.
-#    * Do not invent transaction counts.
-#    * Do not invent averages.
-#    * Do not invent percentages.
-#    * Do not invent churn risk.
-#    * Do not invent engagement metrics.
-#    * Do not invent business explanations.
-
-# 4. Never infer reasons, causes, operational issues, market conditions, pricing issues, supply chain issues, customer behavior, customer intent, customer satisfaction, loyalty, churn risk, promotional response, business strategy, or recommendations unless those values explicitly exist in the SQL result.
-
-# 5. If SQL returns:
-
-#    * customer
-#    * invoice_value
-#    * qty
-
-# Then answer only from those fields.
-
-# 6. If a field is not present in SQL Results, state that the information is not available.
-
-# 7. Never convert customer IDs into names unless SQL explicitly returns a name column.
-
-# 8. Never create fictional examples such as:
-
-#    * John Smith
-#    * Emily Davis
-#    * Customer 1003
-#    * Customer 1005
-#      or any other names not present in SQL results.
-
-# 9. Never create:
-
-#    * last purchase date
-#    * average transaction value
-#    * engagement score
-#    * churn probability
-#    * campaign response
-#    * inactivity period
-#      unless explicitly returned by SQL.
-
-# 10. Answer strictly from SQL Results and retrieved context.
-
-# 11. Accuracy is more important than completeness.
-
-# 12. If SQL Results exist, ignore any conflicting RAG content.
-
-# SQL RESULT PRIORITY RULE
-
-# When SQL Results are present:
-
-# SQL Results > Retrieved Context > General Reasoning
-
-# Always trust SQL Results.
-# Never override SQL Results with assumptions.
-
-# 8. Do NOT include "(source:...)" tags in the answer text.
-# 9. {followup_ins}
-
-# VISUALIZATION RULES:
-
-# If the question involves comparison, distribution, ranking, trends, or category breakdown,
-# generate up to 3 visualizations.
-
-# --- AGGREGATION VISUALIZATION RULES (MANDATORY CONTRACT) ---
-# If the question involves aggregate data:
-
-# 1. Always include a Table visualization.
-
-# 2. If the data contains a time dimension
-#    (month, date, quarter, year),
-#    also include a Line Chart.
-
-# 3. For ranking or Top/Bottom questions without time,
-#    return only a Table
-#    (optional Bar Chart if useful).
-
-# 4. Never generate a Line Chart when no time dimension exists.
-# --- TREND DETECTION & LINE CHART RULES (MANDATORY CONTRACT) ---
-# If the question is trend-related (contains: trend, growth, decline, increase, decrease, over time, monthly, quarterly, yearly, seasonality, pattern, historical analysis, performance over time, month-on-month, MoM, YoY):
-# 1. Visualization Type MUST be Line Chart ("type": "line_chart").
-# 2. X-Axis (xKey) MUST be a Date/Month/Year field. IMPORTANT: Date values MUST be aggregated and formatted by month (e.g., 'Jan 2024' or 'January') on the X-Axis.
-# 3. Y-Axis (yKey) MUST be a Numeric Measure.
-# 4. MUST include "seriesKey": "series" at the visualization root level.
-# 5. NEVER return multiple category fields like "category": "Tube", "construction": "RADIAL" separately for a line chart. Instead, combine them into a single "series" key.
-#    - Example (CATEGORY + CONSTRUCTION): "series": "Tube - RADIAL"
-#    - Example (CATEGORY + CONSTRUCTION + VEHICLE TYPE): "series": "Tyre - RADIAL - Truck"
-#    - Example (VEHICLE TYPE ONLY): "series": "Truck"
-# 6. NEVER use Pie Chart or Table as primary visualization for trend queries.
-# 7. NEVER auto-detect legend. Always use seriesKey.
-# 8. Every row in "data" MUST contain the exact key "series" (matching seriesKey) and the xKey and yKey.
-# 9. CRITICAL: For any time-series data or trend charts, the items inside the "data" array MUST be sorted strictly in chronological order (e.g., Jan, Feb, Mar or April, May, June) so the graph renders correctly from left to right.
-# ------------------------------------------
-
-# CRITICAL INSTRUCTIONS FOR ALL VISUALIZATIONS:
-# 1. The object keys inside the "data" array MUST exactly match what you specify for "xKey" and "yKey".
-# 2. Only include categories/points that ACTUALLY EXIST in the data. Do NOT invent missing categories with 0 values.
-
-# Supported visualization types:
-
-# 1️⃣ Bar Chart
-
-# {{
-# "type":"bar_chart",
-# "title":"...",
-# "xKey":"...",
-# "yKey":"...",
-# "data":[
-#  {{"category":"A","value":100}},
-#  {{"category":"B","value":200}}
-# ]
-# }}
-
-# 2️⃣ Pie Chart
-
-# {{
-# "type":"pie_chart",
-# "title":"...",
-# "data":[
-#  {{"name":"Category A","value":120}},
-#  {{"name":"Category B","value":80}}
-# ]
-# }}
-
-# 3️⃣ Table
-
-# {{
-# "type":"table",
-# "title":"...",
-# "columns":[
-#  {{"key":"columnKey","label":"Column Label"}}
-# ],
-# "data":[
-#  {{"columnKey":"value"}}
-# ]
-# }}
-
-# Return ALL visualizations inside the "visualizations" array.
-# You may return multiple charts or tables if useful.
-
-
-
-
-# Return ONLY valid JSON (answer must be a plain text string):
-# {{"answer":"...","follow_up_questions":[], "visualizations":[]}}
-# """)
-
-#     if not res:
-#         return jsonify({"status":"error","statusCode":500,"message":"LLM failed"}), 500
-
-#     clean_answer = _to_str(res.get("answer",""))
-#     clean_answer = re.sub(r'\s*\(source:[^)]*\)', '', clean_answer).strip()
-#     clean_answer = re.sub(r'\s*\[source:[^\]]*\]', '', clean_answer).strip()
-
-#     fuq = res.get("follow_up_questions", [])
-
-#     visualizations = _safe_visualizations(
-#         _normalize_visualizations(res.get("visualizations", []))
-#     )
-
-#     # If user explicitly asked for table → keep only table
-#     if "table" in question.lower():
-#         visualizations = [v for v in visualizations if v.get("type") == "table"]
-
-
-
-#     _advance_turn(session_id)
-#     _save_history(get_connection_func, session_id, user_id,
-#                   question, clean_answer, fuq, understanding["intent"], "answer", visualizations=visualizations, visit_number=visit_number)
-
-#     return jsonify({
-#         "status": "success",
-#         "statusCode": 200,
-#         "answer": clean_answer,
-#         "follow_up_questions": fuq,
-#         "visualizations": visualizations,
-#         "visit_number": visit_number,
-#         "sql_query": sql_query,
-#         "chat_id": active_chat_id
-#     }), 200
 
