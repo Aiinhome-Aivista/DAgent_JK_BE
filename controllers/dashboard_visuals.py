@@ -782,7 +782,14 @@ def tyre_sales_data_controller(get_db_connection):
         if not conn:
             return jsonify({"error": "Failed to connect to database."}), 500
 
-        from helper.dashboard_cache_service import get_cached_component_data, set_cached_component_data, make_filter_context
+        from helper.dashboard_cache_service import (
+            get_cached_component_data,
+            set_cached_component_data,
+            make_filter_context,
+            ensure_key_metrics_table,
+            get_dashboard_key_metrics,
+            save_dashboard_key_metrics
+        )
 
         if not session_id:
             try:
@@ -794,6 +801,28 @@ def tyre_sales_data_controller(get_db_connection):
                 cur_ws.close()
             except Exception:
                 pass
+
+        from helper.dashboard_cache_service import get_tyre_sales_table_data, save_tyre_sales_table_data
+        if not force_refresh:
+            tbl_tyre = get_tyre_sales_table_data(conn, session_id)
+            if tbl_tyre and tbl_tyre.get("data"):
+                return jsonify({
+                    "status": "success",
+                    "source": "dashboard_tyre_sales_top_10",
+                    "visualizations": [{
+                        "data": tbl_tyre["data"],
+                        "seriesKey": "",
+                        "title": "Top 10 Tyre Types by Sales",
+                        "type": "horizontal_bar_chart",
+                        "xKey": "sales_value",
+                        "yKey": "vehicle_type"
+                    }],
+                    "data": tbl_tyre["data"],
+                    "message": "Data retrieved successfully.",
+                    "sql_error": "",
+                    "_cached": True,
+                    "_last_synced_at": tbl_tyre.get("_last_synced_at")
+                }), 200
 
         filter_context = make_filter_context(data)
         if not force_refresh:
@@ -980,6 +1009,7 @@ def tyre_sales_data_controller(get_db_connection):
             })
 
         if chart_data and not error_msg:
+            save_tyre_sales_table_data(conn, session_id, chart_data)
             set_cached_component_data(conn, session_id, "tyre_sales", {
                 "visualizations": visualizations,
                 "data": chart_data
@@ -1058,7 +1088,14 @@ def sales_by_zone_data_controller(get_db_connection):
         if not conn:
             return jsonify({"error": "Failed to connect to database."}), 500
 
-        from helper.dashboard_cache_service import get_cached_component_data, set_cached_component_data, make_filter_context
+        from helper.dashboard_cache_service import (
+            get_cached_component_data,
+            set_cached_component_data,
+            make_filter_context,
+            ensure_key_metrics_table,
+            get_dashboard_key_metrics,
+            save_dashboard_key_metrics
+        )
 
         if not session_id:
             try:
@@ -1070,6 +1107,29 @@ def sales_by_zone_data_controller(get_db_connection):
                 cur_ws.close()
             except Exception:
                 pass
+
+        from helper.dashboard_cache_service import get_sales_by_zone_table_data, save_sales_by_zone_table_data
+        zone_arg = selected_zones[0] if selected_zones else "ALL"
+        if not force_refresh and is_default_filter:
+            tbl_zone = get_sales_by_zone_table_data(conn, session_id, zone_arg)
+            if tbl_zone and tbl_zone.get("data"):
+                return jsonify({
+                    "status": "success",
+                    "source": "dashboard_sales_by_zone",
+                    "visualizations": [{
+                        "data": tbl_zone["data"],
+                        "seriesKey": "",
+                        "title": "Sales by Zone",
+                        "type": "pie_chart",
+                        "xKey": "name",
+                        "yKey": "value"
+                    }],
+                    "data": tbl_zone["data"],
+                    "message": "Data retrieved successfully.",
+                    "sql_error": "",
+                    "_cached": True,
+                    "_last_synced_at": tbl_zone.get("_last_synced_at")
+                }), 200
 
         filter_context = make_filter_context(data)
         if not force_refresh:
@@ -1438,6 +1498,7 @@ ORDER BY IFNULL(SA."TOTAL_SALES", 0) DESC
             })
 
         if chart_data and not error_msg:
+            save_sales_by_zone_table_data(conn, session_id, zone_arg, chart_data)
             set_cached_component_data(conn, session_id, "sales_by_zone", {
                 "visualizations": visualizations,
                 "data": chart_data
@@ -1523,7 +1584,14 @@ def year_wise_sales_comparison_controller(get_db_connection):
         if not conn:
             return jsonify({"error": "Failed to connect to database."}), 500
 
-        from helper.dashboard_cache_service import get_cached_component_data, set_cached_component_data, make_filter_context
+        from helper.dashboard_cache_service import (
+            get_cached_component_data,
+            set_cached_component_data,
+            make_filter_context,
+            ensure_key_metrics_table,
+            get_dashboard_key_metrics,
+            save_dashboard_key_metrics
+        )
 
         if not session_id:
             try:
@@ -1759,7 +1827,14 @@ def available_years_controller(get_db_connection):
         if not conn:
             return jsonify({"error": "Failed to connect to database."}), 500
 
-        from helper.dashboard_cache_service import get_cached_component_data, set_cached_component_data, make_filter_context
+        from helper.dashboard_cache_service import (
+            get_cached_component_data,
+            set_cached_component_data,
+            make_filter_context,
+            ensure_key_metrics_table,
+            get_dashboard_key_metrics,
+            save_dashboard_key_metrics
+        )
         cached_res = get_cached_component_data(conn, session_id, "available_years", "all")
         if cached_res and cached_res.get("data"):
             return jsonify(cached_res["data"]), 200
@@ -1981,7 +2056,14 @@ def dashboard_filters_controller(get_db_connection):
         if not conn:
             return jsonify({"status": "success", **filters_data}), 200
 
-        from helper.dashboard_cache_service import get_cached_component_data, set_cached_component_data, make_filter_context
+        from helper.dashboard_cache_service import (
+            get_cached_component_data,
+            set_cached_component_data,
+            make_filter_context,
+            ensure_key_metrics_table,
+            get_dashboard_key_metrics,
+            save_dashboard_key_metrics
+        )
         cached_res = get_cached_component_data(conn, session_id, "dashboard_filters", "all")
         if cached_res and cached_res.get("data"):
             return jsonify(cached_res["data"]), 200
@@ -2229,7 +2311,14 @@ def default_dashboard_metrics_controller(get_db_connection):
         if not conn:
             return jsonify({"error": "Failed to connect to database."}), 500
 
-        from helper.dashboard_cache_service import get_cached_component_data, set_cached_component_data, make_filter_context
+        from helper.dashboard_cache_service import (
+            get_cached_component_data,
+            set_cached_component_data,
+            make_filter_context,
+            ensure_key_metrics_table,
+            get_dashboard_key_metrics,
+            save_dashboard_key_metrics
+        )
 
         if not session_id:
             try:
@@ -2242,11 +2331,24 @@ def default_dashboard_metrics_controller(get_db_connection):
             except Exception:
                 pass
 
+        # Check dedicated dashboard_key_metrics table first
+        ensure_key_metrics_table(conn)
         if not force_refresh:
+            km_res = get_dashboard_key_metrics(conn, session_id)
+            if km_res and km_res.get("data"):
+                return jsonify({
+                    "status": "success",
+                    "source": "dashboard_key_metrics",
+                    "data": km_res["data"],
+                    "_cached": True,
+                    "_last_synced_at": km_res.get("_last_synced_at")
+                }), 200
+
             cached_res = get_cached_component_data(conn, session_id, "key_metrics", "all")
             if cached_res and cached_res.get("data"):
                 return jsonify({
                     "status": "success",
+                    "source": "dashboard_cached_metrics",
                     "data": cached_res["data"],
                     "_cached": True,
                     "_last_synced_at": cached_res.get("_last_synced_at")
@@ -3646,6 +3748,7 @@ ORDER BY yr DESC"""
         }
         try:
             calc_sec = round(time.time() - start_calc_t, 2) if 'start_calc_t' in locals() else 0.0
+            save_dashboard_key_metrics(conn, session_id, metrics_data)
             set_cached_component_data(conn, session_id, "key_metrics", metrics_data, "all", duration_sec=calc_sec)
         except Exception:
             pass

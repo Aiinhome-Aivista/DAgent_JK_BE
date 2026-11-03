@@ -305,6 +305,14 @@ from controllers.export_report_controller import export_domestic_sales_report_co
 
 from controllers.dashboard_visuals import graph_metrics_controller,extract_graph_data_controller, default_dashboard_metrics_controller,available_years_controller,dashboard_filters_controller,year_wise_sales_comparison_controller,sales_by_zone_data_controller,tyre_sales_data_controller
 
+from controllers.year_wise_dashboard_controller import (
+    get_dashboard_filters_controller,
+    get_dependent_regions_controller,
+    get_dependent_customer_types_controller,
+    get_available_periods_controller,
+    get_year_wise_sales_controller
+)
+
 from controllers.sales_dashboard import get_sales_revenue_data_controller, get_sales_by_account_category_controller, get_non_billed_accounts_controller, get_overdue_pct_controller, get_exposure_pct_controller
 
 from controllers.workspace_types_controller import get_workspace_types_controller, create_workspace_type_controller
@@ -1966,11 +1974,51 @@ def sales_by_zone():
 
 
 
-@app.route("/year-wise-sales-comparison", methods=["POST"])
+@app.route("/year-wise-sales-comparison", methods=["GET", "POST"])
 
 def year_wise_sales_comparison():
 
-    return year_wise_sales_comparison_controller(get_db_connection)
+    return get_year_wise_sales_controller(get_db_connection)
+
+
+
+@app.route("/api/dashboard/filters", methods=["GET"])
+
+def api_dashboard_filters():
+
+    return get_dashboard_filters_controller(get_db_connection)
+
+
+
+@app.route("/api/dashboard/filters/regions", methods=["GET"])
+
+def api_dashboard_regions():
+
+    return get_dependent_regions_controller(get_db_connection)
+
+
+
+@app.route("/api/dashboard/filters/customer-types", methods=["GET"])
+
+def api_dashboard_customer_types():
+
+    return get_dependent_customer_types_controller(get_db_connection)
+
+
+
+@app.route("/api/dashboard/filters/available-periods", methods=["GET", "POST"])
+
+def api_dashboard_available_periods():
+
+    return get_available_periods_controller(get_db_connection)
+
+
+
+@app.route("/api/dashboard/year-wise-sales", methods=["GET", "POST"])
+
+def api_dashboard_year_wise_sales():
+
+    return get_year_wise_sales_controller(get_db_connection)
 
 
 

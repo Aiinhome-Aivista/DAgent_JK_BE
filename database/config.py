@@ -8,7 +8,11 @@ from sqlalchemy import create_engine
 
 
 
-load_dotenv()
+_env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env")
+if os.path.exists(_env_path):
+    load_dotenv(_env_path)
+else:
+    load_dotenv()
 
 # Local Ollama API (for mistral_local)
 MISTRAL_API_URL = os.getenv("MISTRAL_API_URL")
