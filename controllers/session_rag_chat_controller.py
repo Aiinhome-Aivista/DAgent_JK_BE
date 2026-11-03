@@ -461,10 +461,14 @@ SAP S/4HANA Sales & Distribution (SD) Architecture and Table Context:
    - Region Master: ZIVF_RegionMaster_MD_01 (columns LOWERCASE). Join on tm.REGIO = rm."region_code" or cm.REGIO = rm."region_code". Region Name is rm."region_name", Zone code is rm."zone_code".
    - Zone Master: ZIVF_ZoneMaster_01_TR (columns UPPERCASE). Join on rm."zone_code" = zm.P_ZONE or tm.P_ZONE = zm.P_ZONE. Zone Name is zm.NAME (NORTH, WEST, EAST, SOUTH, etc.).
    - Date Master: ZITR_DayAttribute_01_TR. Join on fact."invoice_date" = da."Date_". Year-Month is da.YMONTH, Year is da.CAL_YEAR, Qtr is da.QTR.
-   - Sales Plan & Target Joins (ZIVF_SD_Sales_Plan_Target_01_TR):
-     * Territory: tgt.TERR_CODE = tm.BZIRK
-     * Region: tgt.REG_CODE = rm."region_code"
-     * Date/Period: tgt.YMONTH = da.YMONTH
+    - Sales Plan & Target Rules (ZIVF_SD_Sales_Plan_Target_01_TR):
+      * Territory: tgt.TERR_CODE = tm.BZIRK
+      * Territory filtering MUST use tgt.TERR_CODE directly.
+      * Do NOT filter target records using tgt.REG_CODE when a territory is requested.
+      * Include records regardless of tgt.REG_CODE being NULL, blank, or populated.
+      * Region mapping, when explicitly requested, must use tm.REGIO = rm."region_code".
+      * Month filtering: tgt.YMONTH directly.
+      * Never join DayAttribute to the target view for month filtering.
      * Product/SKU: tgt.MATNR = sk.MATNR
      * Category: tgt.CAT_CODE = cat.CAT_CODE
      * Target vs Actual Architecture: DO NOT directly join Sales Fact and Target Fact. Pre-aggregate Actual Sales and Target Plans in separate CTEs/subqueries by territory (tm.BZIRK) or region (rm."region_code") or month (da.YMONTH), then join the aggregated CTEs on the dimension key.
@@ -1345,7 +1349,14 @@ SCHEMA & BUSINESS DEFINITIONS:
      * Date Attribute: "SAP_S4"."ZITR_DayAttribute_01_TR" (JOIN: fact."invoice_date" = da."Date_")
        Month: da.YMONTH, Year: da.CAL_YEAR, Qtr: da.QTR, Fin Year: da.FIN_YEAR
      * Sales Plan & Target: "SAP_S4"."ZIVF_SD_Sales_Plan_Target_01_TR"
-       JOIN Keys: tgt.TERR_CODE = tm.BZIRK (Territory), tgt.REG_CODE = rm."region_code" (Region), tgt.YMONTH = da.YMONTH (Month/Period), tgt.MATNR = sk.MATNR (SKU), tgt.CAT_CODE = cat.CAT_CODE (Category)
+        Target View Geography Rules:
+        - Territory mapping: tgt.TERR_CODE = tm.BZIRK.
+        - Do NOT depend on tgt.REG_CODE for territory-level filtering.
+        - When a territory code is requested, filter directly using tgt.TERR_CODE.
+        - Include all matching target records even if tgt.REG_CODE is NULL, blank, or populated.
+        - Never exclude target records because tgt.REG_CODE is missing.
+        - If a Region filter is explicitly requested, derive the region through Territory Master: tm.REGIO = rm."region_code".
+        Other Keys: tgt.YMONTH = da.YMONTH (Month/Period), tgt.MATNR = sk.MATNR (SKU), tgt.CAT_CODE = cat.CAT_CODE (Category)
        Target Revenue: tgt.PLAN_VALUE (or tgt.REV_PLAN_VAL), Target Qty: tgt.ORG_PLAN (or tgt.REV_PLAN)
 
 2. CRITICAL SAP HANA CASE-SENSITIVITY & QUOTING RULES:
@@ -2246,8 +2257,13 @@ def _build_geography_prompt(table_cols):
         zone_on = "rm.\"zone_code\" = zm.P_ZONE" if s4_reg else "tm.P_ZONE = zm.P_ZONE"
         zone_join = f"- Zone Master: LEFT JOIN \"SAP_S4\".\"{s4_zone}\" zm ON {zone_on} (Zone Name: zm.NAME)\n" if s4_zone else ""
         tgt_hint = (
-            f"- Sales Plan & Target: \"SAP_S4\".\"{s4_tgt}\" tgt (Join keys: tgt.TERR_CODE = tm.BZIRK, tgt.REG_CODE = rm.\"region_code\")\n"
-            f"  CRITICAL FOR TARGET VS ACTUAL: Use separate CTEs for actual sales and target plan, never direct JOIN.\n"
+            f"- Sales Plan & Target: \"SAP_S4\".\"{s4_tgt}\" tgt.\n"
+            f"  Territory mapping: tgt.TERR_CODE = tm.BZIRK.\n"
+            f"  ALWAYS filter territory requests directly using tgt.TERR_CODE.\n"
+            f"  Do NOT use tgt.REG_CODE as a mandatory filter or join condition for territory queries.\n"
+            f"  Include matching rows when tgt.REG_CODE is NULL, blank, or populated.\n"
+            f"  If Region is explicitly requested, derive it through tm.REGIO = rm.\"region_code\".\n"
+            f"  Use separate CTEs for actual sales and target plans; never directly JOIN raw fact tables.\n"
         ) if s4_tgt else ""
         return (
             f"\n\nSAP S/4HANA GEOGRAPHY CHAIN (MANDATORY):\n"
@@ -2687,7 +2703,15 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                 "2. When comparing Actual Sales vs Target Plans using CTEs:\n"
                 "   - In CTE 1 (actual_sales): Select and group by BOTH the display name and code (e.g. tm.NAME AS territory_name, tm.BZIRK AS territory_code, rm.\"region_name\", rm.\"region_code\", cat.CAT_DESC AS category_name, cat.CAT_CODE AS category_code, da.YMONTH AS month).\n"
                 "   - In CTE 2 (target_plans): Query directly from \"SAP_S4\".\"ZIVF_SD_Sales_Plan_Target_01_TR\" tgt (DO NOT join DayAttribute). Select tgt.TERR_CODE AS territory_code, tgt.REG_CODE AS region_code, tgt.CAT_CODE AS category_code, tgt.YMONTH AS month, SUM(tgt.PLAN_VALUE) AS target_sales_value, SUM(tgt.ORG_PLAN) AS target_qty. Group by tgt.TERR_CODE, tgt.REG_CODE, tgt.CAT_CODE, tgt.YMONTH.\n"
-                "   - In Outer Query: JOIN CTEs on CODES (e.g. a.territory_code = t.territory_code AND a.month = t.month AND a.category_code = t.category_code). NEVER join a Name column to a Code column (e.g. NEVER do a.territory_name = t.terr_code)!"
+                "   - In Outer Query: JOIN CTEs on CODES (e.g. a.territory_code = t.territory_code AND a.month = t.month AND a.category_code = t.category_code). NEVER join a Name column to a Code column (e.g. NEVER do a.territory_name = t.terr_code)!\n\n"
+                "CRITICAL TERRITORY TARGET FILTER RULES:\n"
+                "When the user requests target values for a specific territory:\n"
+                "- Filter directly using tgt.TERR_CODE = requested_territory_code.\n"
+                "- NEVER add tgt.REG_CODE = rm.\"region_code\" as a mandatory condition.\n"
+                "- NEVER exclude rows where tgt.REG_CODE IS NULL or TRIM(tgt.REG_CODE) = ''.\n"
+                "- Include all target rows matching the requested territory and month, regardless of REG_CODE.\n"
+                "- Do NOT use OR between territory code and region code filters.\n"
+                "- If only aggregated target values are requested, aggregate directly from the target view without unnecessary master joins.\n"
             )
         else:
             sql_user += "\n\nCRITICAL FINAL RULE: NEVER SELECT or GROUP BY `customer_master.KUNNR` or any other dimension's Primary Key! You MUST SELECT and GROUP BY the Fact Table's Foreign Key (e.g. `sales_data.customer`) instead. Selecting dimension keys causes unmatched rows to lump together as NULLs."

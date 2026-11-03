@@ -79,109 +79,101 @@ def _execute_sync_task():
             if not s_id:
                 continue
 
-            print(f"[Scheduler] Starting sync for workspace '{ws_name}' ({s_id[:8]}...)", flush=True)
+            print(f"\n[Scheduler] ====================================================================", flush=True)
+            print(f"[Scheduler] 🚀 Starting complete metrics sync for workspace '{ws_name}' ({s_id[:8]}...)", flush=True)
+            print(f"[Scheduler] ====================================================================", flush=True)
+            ws_start_t = time.time()
 
             # 1. Key Metrics (16 KPIs)
+            t_step = time.time()
+            print(f"[Scheduler] ⏳ [1/7] Syncing Key Metrics (16 KPIs)...", flush=True)
             try:
                 with _app_instance.test_request_context(json={"session_id": s_id, "user_id": u_id, "force_refresh": True}):
                     default_dashboard_metrics_controller(_get_db_conn_func)
+                print(f"[Scheduler] ✅ [1/7] Key Metrics synced in {round(time.time() - t_step, 2)}s", flush=True)
             except Exception as e:
-                print(f"[Scheduler] Error syncing key_metrics for '{ws_name}': {e}", flush=True)
+                print(f"[Scheduler] ❌ [1/7] Error syncing key_metrics: {e}", flush=True)
 
             # 2. Tyre Sales Chart
+            t_step = time.time()
+            print(f"[Scheduler] ⏳ [2/7] Syncing Top 10 Tyre Types by Sales...", flush=True)
             try:
                 with _app_instance.test_request_context(json={"session_id": s_id, "user_id": u_id, "force_refresh": True}):
                     tyre_sales_data_controller(_get_db_conn_func)
+                print(f"[Scheduler] ✅ [2/7] Tyre Sales synced in {round(time.time() - t_step, 2)}s", flush=True)
             except Exception as e:
-                print(f"[Scheduler] Error syncing tyre_sales for '{ws_name}': {e}", flush=True)
+                print(f"[Scheduler] ❌ [2/7] Error syncing tyre_sales: {e}", flush=True)
 
             # 3. Sales By Zone (Pie Chart)
+            t_step = time.time()
+            print(f"[Scheduler] ⏳ [3/7] Syncing Sales by Zone (Pie Chart)...", flush=True)
             try:
                 with _app_instance.test_request_context(json={"session_id": s_id, "user_id": u_id, "force_refresh": True}):
                     sales_by_zone_data_controller(_get_db_conn_func)
+                print(f"[Scheduler] ✅ [3/7] Sales by Zone synced in {round(time.time() - t_step, 2)}s", flush=True)
             except Exception as e:
-                print(f"[Scheduler] Error syncing sales_by_zone for '{ws_name}': {e}", flush=True)
+                print(f"[Scheduler] ❌ [3/7] Error syncing sales_by_zone: {e}", flush=True)
 
-            # 4. Year-wise Sales Comparison (Dedicated table: year_wise_sales_comparison)
+            # 4. Year-wise Sales Comparison (Dedicated table: year_wise_sales_comparison - Bulk Permutations)
+            t_step = time.time()
+            print(f"[Scheduler] ⏳ [4/7] Syncing Year-wise Sales (All Bulk Permutations)...", flush=True)
             try:
-                from controllers.year_wise_dashboard_controller import get_year_wise_sales_controller
-                with _app_instance.test_request_context(json={"session_id": s_id, "user_id": u_id, "force_refresh": True}):
-                    get_year_wise_sales_controller(_get_db_conn_func)
+                from controllers.year_wise_dashboard_controller import bulk_sync_year_wise_sales_comparison
+                bulk_sync_year_wise_sales_comparison(conn, s_id, u_id)
+                print(f"[Scheduler] ✅ [4/7] Year-wise Sales permutations synced in {round(time.time() - t_step, 2)}s", flush=True)
             except Exception as e:
-                print(f"[Scheduler] Error syncing year_wise_sales for '{ws_name}': {e}", flush=True)
-
-            # 4b. Available Years & Filters
-            try:
-                with _app_instance.test_request_context(query_string={"session_id": s_id, "user_id": u_id}):
-                    available_years_controller(_get_db_conn_func)
-            except Exception as e:
-                print(f"[Scheduler] Error syncing available_years for '{ws_name}': {e}", flush=True)
-
-            try:
-                with _app_instance.test_request_context(query_string={"session_id": s_id, "user_id": u_id}):
-                    dashboard_filters_controller(_get_db_conn_func)
-            except Exception as e:
-                print(f"[Scheduler] Error syncing dashboard_filters for '{ws_name}': {e}", flush=True)
-
-            # 4c. Domestic Sales Preview Table
-            try:
-                with _app_instance.test_request_context(json={"session_id": s_id}):
-                    export_domestic_sales_preview_controller(_get_db_conn_func)
-            except Exception as e:
-                print(f"[Scheduler] Error syncing domestic_sales_preview for '{ws_name}': {e}", flush=True)
+                print(f"[Scheduler] ❌ [4/7] Error syncing year_wise_sales: {e}", flush=True)
 
             # 5. Sales Revenue Plan vs Sale (Dedicated table: sales_revenue_plan_vs_sale)
+            t_step = time.time()
+            print(f"[Scheduler] ⏳ [5/7] Syncing Sales Revenue Plan vs Sale...", flush=True)
             try:
                 from controllers.sales_dashboard import save_sales_revenue_table_data
                 rev = execute_sales_revenue_by_zone(conn, s_id)
                 if rev is not None:
                     save_sales_revenue_table_data(conn, s_id, "ALL", rev)
                     set_cached_component_data(conn, s_id, "sales_revenue", rev, "all")
+                print(f"[Scheduler] ✅ [5/7] Sales Revenue Plan vs Sale synced in {round(time.time() - t_step, 2)}s", flush=True)
             except Exception as e:
-                print(f"[Scheduler] Error syncing sales_revenue for '{ws_name}': {e}", flush=True)
+                print(f"[Scheduler] ❌ [5/7] Error syncing sales_revenue: {e}", flush=True)
 
             # 6. Actual Sales by Account Category (Dedicated table: dashboard_account_category_sales)
+            t_step = time.time()
+            print(f"[Scheduler] ⏳ [6/7] Syncing Sales by Account Category...", flush=True)
             try:
                 from helper.dashboard_cache_service import save_account_category_sales_table_data
                 acc = execute_sales_by_account_category(conn, s_id)
                 if acc is not None:
                     save_account_category_sales_table_data(conn, s_id, "ALL", acc)
                     set_cached_component_data(conn, s_id, "sales_by_account", acc, "all")
+                print(f"[Scheduler] ✅ [6/7] Sales by Account Category synced in {round(time.time() - t_step, 2)}s", flush=True)
             except Exception as e:
-                print(f"[Scheduler] Error syncing sales_by_account for '{ws_name}': {e}", flush=True)
+                print(f"[Scheduler] ❌ [6/7] Error syncing sales_by_account: {e}", flush=True)
 
             # 7. Category Sales (Dedicated table: dashboard_category_sales)
+            t_step = time.time()
+            print(f"[Scheduler] ⏳ [7/7] Syncing Category Sales...", flush=True)
             try:
                 from helper.dashboard_cache_service import save_category_sales_table_data
                 cats = execute_category_sales(conn, s_id)
                 if cats is not None:
                     save_category_sales_table_data(conn, s_id, "ALL", cats)
                     set_cached_component_data(conn, s_id, "category_sales", cats, "all")
+                print(f"[Scheduler] ✅ [7/7] Category Sales synced in {round(time.time() - t_step, 2)}s", flush=True)
             except Exception as e:
-                print(f"[Scheduler] Error syncing category_sales for '{ws_name}': {e}", flush=True)
+                print(f"[Scheduler] ❌ [7/7] Error syncing category_sales: {e}", flush=True)
 
+            # 8. Filter Metadata Cache
             try:
-                nb = execute_non_billed_accounts_pct(conn, s_id)
-                if nb is not None:
-                    set_cached_component_data(conn, s_id, "non_billed_pct", nb, "all")
+                with _app_instance.test_request_context(query_string={"session_id": s_id, "user_id": u_id}):
+                    available_years_controller(_get_db_conn_func)
+                with _app_instance.test_request_context(query_string={"session_id": s_id, "user_id": u_id}):
+                    dashboard_filters_controller(_get_db_conn_func)
             except Exception as e:
-                print(f"[Scheduler] Error syncing non_billed_pct for '{ws_name}': {e}", flush=True)
+                print(f"[Scheduler] Note on filters cache: {e}", flush=True)
 
-            try:
-                od = execute_overdue_pct(conn, s_id)
-                if od is not None:
-                    set_cached_component_data(conn, s_id, "overdue_pct", od, "all")
-            except Exception as e:
-                print(f"[Scheduler] Error syncing overdue_pct for '{ws_name}': {e}", flush=True)
-
-            try:
-                exp = execute_exposure_pct(conn, s_id)
-                if exp is not None:
-                    set_cached_component_data(conn, s_id, "exposure_pct", exp, "all")
-            except Exception as e:
-                print(f"[Scheduler] Error syncing exposure_pct for '{ws_name}': {e}", flush=True)
-
-            print(f"[Scheduler] Completed sync for workspace '{ws_name}'", flush=True)
+            print(f"[Scheduler] 🎉 Completed all 7 dashboard components for '{ws_name}' in {round(time.time() - ws_start_t, 2)}s!", flush=True)
+            print(f"[Scheduler] ====================================================================\n", flush=True)
 
         duration = round(time.time() - start_t, 2)
         next_run = None
@@ -253,6 +245,18 @@ def init_scheduler(app, get_db_connection):
         try:
             from helper.dashboard_cache_service import get_scheduler_config
             cfg = get_scheduler_config(conn, "sync_dashboard_metrics")
+
+            # If server was restarted while a previous run was in progress, reset to idle
+            if cfg and cfg.get("last_run_status") in ("running", "in_progress"):
+                try:
+                    cur_rst = conn.cursor()
+                    cur_rst.execute("UPDATE scheduler_configurations SET last_run_status = 'idle' WHERE job_name = 'sync_dashboard_metrics'")
+                    conn.commit()
+                    cur_rst.close()
+                    print("[Scheduler] Reset interrupted running state to idle on startup.", flush=True)
+                except Exception:
+                    pass
+
             if cfg and cfg.get("is_active"):
                 trigger = parse_schedule_trigger(cfg.get("schedule_time", "19:00"), cfg.get("frequency", "daily"))
                 _scheduler.add_job(

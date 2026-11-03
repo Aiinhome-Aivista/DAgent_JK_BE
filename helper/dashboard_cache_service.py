@@ -7,6 +7,8 @@ IST_TZ = timezone(timedelta(hours=5, minutes=30))
 def get_now_ist():
     return datetime.now(IST_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
+get_ist_now_str = get_now_ist
+
 CACHE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS `dashboard_cached_metrics` (
     `id` BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -365,7 +367,7 @@ def get_dashboard_key_metrics(conn, session_id: str):
                 if sync: last_sync = sync
 
         if len(result) >= 5:
-            return {"data": result, "_last_synced_at": last_sync}
+            return {"data": result, "_last_synced_at": str(last_sync) if last_sync else None}
         return None
     except Exception as e:
         print(f"[Key Metrics Table] Read error: {e}", flush=True)
@@ -380,15 +382,13 @@ def save_dashboard_key_metrics(conn, session_id: str, metrics_data: dict):
         from datetime import datetime, timezone, timedelta
         ist_now = datetime.now(timezone(timedelta(hours=5, minutes=30))).strftime('%Y-%m-%d %H:%M:%S')
 
+        # Clean delete existing rows for this session so fresh rows have updated created_at and last_synced_at
+        cur.execute("DELETE FROM `dashboard_key_metrics` WHERE session_id = %s", (str(session_id).strip(),))
+
         sql = """
             INSERT INTO `dashboard_key_metrics`
                 (`session_id`, `metric_key`, `metric_label`, `metric_value`, `metric_subtext`, `last_synced_at`, `created_at`)
             VALUES (%s, %s, %s, %s, %s, %s, %s)
-            ON DUPLICATE KEY UPDATE
-                `metric_label` = VALUES(`metric_label`),
-                `metric_value` = VALUES(`metric_value`),
-                `metric_subtext` = VALUES(`metric_subtext`),
-                `last_synced_at` = VALUES(`last_synced_at`)
         """
         batch = []
         for k, v in metrics_data.items():
@@ -473,7 +473,7 @@ def get_sales_by_zone_table_data(conn, session_id: str, zone_filter: str = "ALL"
                 "percentage": pct,
                 "quantity": qty
             })
-        return {"data": res_list, "_last_synced_at": last_sync}
+        return {"data": res_list, "_last_synced_at": str(last_sync) if last_sync else None}
     except Exception as e:
         print(f"[Sales by Zone Table] Read error: {e}", flush=True)
         return None
@@ -568,9 +568,12 @@ def get_tyre_sales_table_data(conn, session_id: str):
                 tt, sv = str(r[0] or ""), float(r[1] or 0)
             res_list.append({
                 "vehicle_type": tt,
+                "category": tt,
+                "tyre_type": tt,
+                "name": tt,
                 "sales_value": sv
             })
-        return {"data": res_list, "_last_synced_at": last_sync}
+        return {"data": res_list, "_last_synced_at": str(last_sync) if last_sync else None}
     except Exception as e:
         print(f"[Tyre Sales Table] Read error: {e}", flush=True)
         return None
@@ -664,7 +667,7 @@ def get_category_sales_table_data(conn, session_id: str, zone: str = None):
                 "category": cn,
                 "total_sales_cr": cr
             })
-        return {"data": res_list, "_last_synced_at": last_sync}
+        return {"data": res_list, "_last_synced_at": str(last_sync) if last_sync else None}
     except Exception as e:
         print(f"[Category Sales Table] Read error: {e}", flush=True)
         return None
@@ -760,7 +763,7 @@ def get_account_category_sales_table_data(conn, session_id: str, zone: str = Non
                 "valCr": cr,
                 "value": f"₹{cr} Cr"
             })
-        return {"data": res_list, "_last_synced_at": last_sync}
+        return {"data": res_list, "_last_synced_at": str(last_sync) if last_sync else None}
     except Exception as e:
         print(f"[Account Category Sales Table] Read error: {e}", flush=True)
         return None
