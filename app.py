@@ -1043,7 +1043,6 @@ def hana_discover_metadata_route():
 
 
 
-
 @app.route("/hana/metadata", methods=["GET"])
 
 def hana_get_metadata_route():
