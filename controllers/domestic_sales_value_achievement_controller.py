@@ -521,15 +521,15 @@ def get_cached_data(mysql_conn, session_id: str, year_month: str):
     try:
         cur = mysql_conn.cursor(dictionary=True) if hasattr(mysql_conn, "cursor") else mysql_conn.cursor()
         cur.execute(f"""
-            SELECT market_segment, prev_year_actual_month, prev_year_actual_mtd,
-                   target, actual, achievement_pct, sale_for_the_day, growth_over_lysmt,
-                   selected_date, last_synced_at
+            SELECT `market_segment`, `prev_year_actual_month`, `prev_year_actual_mtd`,
+                   `target`, `actual`, `achievement_pct`, `sale_for_the_day`, `growth_over_lysmt`,
+                   `selected_date`, `last_synced_at`
             FROM `{TABLE_NAME}`
-            WHERE session_id = %s AND year_month = %s
+            WHERE `session_id` = %s AND `year_month` = %s
             ORDER BY 
                 CASE 
-                    WHEN market_segment = '4 Wheelers' THEN 1
-                    WHEN market_segment = '2/3 Wheelers' THEN 2
+                    WHEN `market_segment` = '4 Wheelers' THEN 1
+                    WHEN `market_segment` = '2/3 Wheelers' THEN 2
                     ELSE 3
                 END
         """, (str(session_id).strip(), str(year_month).strip()))
@@ -567,7 +567,7 @@ def save_data_to_table(mysql_conn, session_id: str, year_month: str, selected_da
     try:
         ist_now = datetime.now(timezone(timedelta(hours=5, minutes=30))).strftime('%Y-%m-%d %H:%M:%S')
         cur = mysql_conn.cursor()
-        cur.execute(f"DELETE FROM `{TABLE_NAME}` WHERE session_id = %s AND year_month = %s", (str(session_id).strip(), str(year_month).strip()))
+        cur.execute(f"DELETE FROM `{TABLE_NAME}` WHERE `session_id` = %s AND `year_month` = %s", (str(session_id).strip(), str(year_month).strip()))
         
         sql = f"""
             INSERT INTO `{TABLE_NAME}`
