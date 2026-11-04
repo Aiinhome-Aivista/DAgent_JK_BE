@@ -237,7 +237,7 @@ def get_scheduler_config(conn, job_name: str = "sync_dashboard_metrics"):
             except Exception: pass
 
 
-def save_or_update_scheduler_config(conn, job_name: str, schedule_time: str, frequency: str = "daily", is_active: bool = True, title: str = None):
+def save_or_update_scheduler_config(conn, job_name: str, schedule_time: str, frequency: str = "daily", is_active: bool = True, title: str = None, next_run_at=None):
     """Saves or updates scheduler configuration directly from UI form."""
     if not conn or not job_name or not schedule_time:
         return False
@@ -248,15 +248,16 @@ def save_or_update_scheduler_config(conn, job_name: str, schedule_time: str, fre
         title_val = title or "Dashboard Key Metrics & Analytics Sync"
         cur.execute("""
             INSERT INTO scheduler_configurations
-                (job_name, title, schedule_time, frequency, is_active, updated_at)
-            VALUES (%s, %s, %s, %s, %s, NOW())
+                (job_name, title, schedule_time, frequency, is_active, next_run_at, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, NOW())
             ON DUPLICATE KEY UPDATE
                 title = VALUES(title),
                 schedule_time = VALUES(schedule_time),
                 frequency = VALUES(frequency),
                 is_active = VALUES(is_active),
+                next_run_at = VALUES(next_run_at),
                 updated_at = NOW();
-        """, (str(job_name).strip(), title_val, str(schedule_time).strip(), str(frequency).strip(), bool(is_active)))
+        """, (str(job_name).strip(), title_val, str(schedule_time).strip(), str(frequency).strip(), bool(is_active), next_run_at))
         conn.commit()
         return True
     except Exception as e:

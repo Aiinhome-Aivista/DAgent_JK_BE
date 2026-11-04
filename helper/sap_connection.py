@@ -1,3 +1,5 @@
+import calendar
+from datetime import datetime
 """
 SAP HANA Connection and SQL Sanitization Helper.
 Provides live SAP HANA connection management and schema view mapping
@@ -219,3 +221,54 @@ def get_sap_connection_for_session(mysql_conn, session_id, user_id=None):
     except Exception as e:
         print(f"[SAP-Connection] Live HANA connection lookup failed: {e}")
         return None, None, None
+
+
+def detect_sales_dates(cursor, schema, year=None, month=None, day=None):
+    """
+    Auto-detects the latest valid sales date from SAP HANA views if year/month/day are not specified.
+    """
+    if not year or year == 0:
+        row = None
+        try:
+            sanitize_and_execute_hana(cursor, schema, f"""
+                SELECT MAX(s.INVOICE_DATE)
+                FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR" s
+                WHERE s.INVOICE_DATE IS NOT NULL 
+                  AND (s.INDICATOR_CANCEL IS NULL OR s.INDICATOR_CANCEL NOT IN ('X', 'Y', '1'))
+                  AND (s.DISTRIBUTION_CHANNEL = 10 OR s.DISTRIBUTION_CHANNEL = '10')
+            """)
+            row = cursor.fetchone()
+        except Exception:
+            pass
+
+        if not row or not row[0]:
+            try:
+                sanitize_and_execute_hana(cursor, schema, f"""
+                    SELECT MAX(s.INVOICE_DATE)
+                    FROM "{schema}"."ZPVF_SD_SalesHistory_01_TR" s
+                    WHERE s.INVOICE_DATE IS NOT NULL 
+                      AND (s.INDICATOR_CANCEL IS NULL OR s.INDICATOR_CANCEL NOT IN ('X', 'Y', '1'))
+                      AND (s.DISTRIBUTION_CHANNEL = 10 OR s.DISTRIBUTION_CHANNEL = '10')
+                """)
+                row = cursor.fetchone()
+            except Exception:
+                pass
+
+        if row and row[0]:
+            dt = row[0]
+            year = dt.year
+            if not month or month == 0: month = dt.month
+            if not day or day == 0: day = dt.day
+        else:
+            now = datetime.now()
+            year = now.year
+            if not month or month == 0: month = now.month
+            if not day or day == 0: day = now.day
+
+    if not month or month == 0:
+        month = datetime.now().month
+    if not day or day == 0:
+        last_d = calendar.monthrange(year, month)[1]
+        day = last_d
+
+    return int(year), int(month), int(day)

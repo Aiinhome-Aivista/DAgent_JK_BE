@@ -290,13 +290,13 @@ def reschedule_job(schedule_time: str, frequency: str = "daily", is_active: bool
     """Dynamically reschedules the sync job when updated from UI without server restart."""
     global _scheduler
     if not _scheduler:
-        return False
+        return None
 
     if not is_active:
         if _scheduler.get_job(JOB_ID):
             _scheduler.remove_job(JOB_ID)
             print(f"[Scheduler] Job '{JOB_ID}' paused by user from UI.", flush=True)
-        return True
+        return None
 
     trigger = parse_schedule_trigger(schedule_time, frequency)
     _scheduler.add_job(
@@ -306,9 +306,34 @@ def reschedule_job(schedule_time: str, frequency: str = "daily", is_active: bool
         name="Sync Dashboard Key Metrics",
         replace_existing=True
     )
-    next_run = _scheduler.get_job(JOB_ID).next_run_time
-    print(f"[Scheduler] Rescheduled job '{JOB_ID}' to {schedule_time} ({frequency}). Next run: {next_run}", flush=True)
-    return str(next_run) if next_run else None
+    job = _scheduler.get_job(JOB_ID)
+    next_run = job.next_run_time if job else None
+    next_run_str = next_run.strftime("%Y-%m-%d %H:%M:%S") if next_run else None
+    print(f"[Scheduler] Rescheduled job '{JOB_ID}' to {schedule_time} ({frequency}). Next run: {next_run_str}", flush=True)
+    return next_run_str
+
+
+def get_next_run_time(schedule_time: str = None):
+    """Returns next run time string '%Y-%m-%d %H:%M:%S' from active APScheduler or computes it."""
+    global _scheduler
+    if _scheduler:
+        job = _scheduler.get_job(JOB_ID)
+        if job and job.next_run_time:
+            return job.next_run_time.strftime("%Y-%m-%d %H:%M:%S")
+    if schedule_time:
+        try:
+            from datetime import datetime, timezone, timedelta
+            ist = timezone(timedelta(hours=5, minutes=30))
+            now = datetime.now(ist)
+            parts = str(schedule_time).strip().split(":")
+            h, m = int(parts[0]), int(parts[1]) if len(parts) > 1 else 0
+            candidate = now.replace(hour=h, minute=m, second=0, microsecond=0)
+            if candidate <= now:
+                candidate += timedelta(days=1)
+            return candidate.strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            pass
+    return None
 
 
 def trigger_now_in_background():
