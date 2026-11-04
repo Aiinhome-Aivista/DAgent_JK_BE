@@ -91,7 +91,7 @@ def _get_connection_context(get_db_connection, session_id_arg=None, user_id_arg=
         return None, None, None, False, None, None, None
 
     effective_session = _resolve_session(mysql_conn, session_id_arg)
-    from helper.sap_analytics_service import get_sap_connection_for_session
+    from helper.sap_connection import get_sap_connection_for_session
 
     hana_conn = None
     tunnel = None
@@ -321,7 +321,7 @@ def bulk_sync_tyre_sales_permutations(mysql_conn, session_id: str, user_id=None)
     ensure_tyre_sales_table(mysql_conn)
 
     effective_session = session_id
-    from helper.sap_analytics_service import get_sap_connection_for_session
+    from helper.sap_connection import get_sap_connection_for_session
     hana_conn = None
     tunnel = None
     is_hana = False
@@ -373,7 +373,7 @@ def bulk_sync_tyre_sales_permutations(mysql_conn, session_id: str, user_id=None)
                     COALESCE(NULLIF(TRIM(rm."region_name"), ''), '') AS REGION_NAME,
                     COALESCE(NULLIF(TRIM(cm."CH_TYPE"), ''), 'UNKNOWN') AS CUSTOMER_CATEGORY,
                     COALESCE(NULLIF(TRIM(sku."CONSTUCTION"), ''), 'UNKNOWN') AS CONSTRUCTION_TYPE,
-                    COALESCE(NULLIF(TRIM(sku."TYRE_TYPE"), ''), 'UNKNOWN') AS TYRE_TYPE,
+                    COALESCE(NULLIF(TRIM(cat."CAT_DESC"), ''), NULLIF(TRIM(sku."TYRE_TYPE"), ''), 'UNKNOWN') AS TYRE_TYPE,
                     YEAR(s."invoice_date") AS SALES_YEAR,
                     ROUND(SUM(COALESCE(s."invoice_value", s."ndp_value", s."taxable_value", 0)), 2) AS TOTAL_SALES
                 FROM "{schema}"."{table_name}" s
@@ -387,9 +387,12 @@ def bulk_sync_tyre_sales_permutations(mysql_conn, session_id: str, user_id=None)
                     ON (COALESCE(tm."P_ZONE", rm."zone_code") = zm."P_ZONE")
                 LEFT JOIN "{schema}"."ZIVR_SKUMaster_01_TR" sku 
                     ON (TRIM(s."SKU") = TRIM(sku."MATNR"))
+                LEFT JOIN "{schema}"."ZIVF_CategoryMaster_01_TR" cat 
+                    ON (TRIM(sku."CAT_CODE") = TRIM(cat."CAT_CODE"))
                 WHERE ("distribution_channel" = '10' OR "distribution_channel" = 10)
                   AND ("indicator_cancel" IS NULL OR "indicator_cancel" NOT IN ('X', 'Y', '1'))
                   AND IFNULL(cm."KLABC", '') <> 'X'
+                  AND (cat."CAT_CODE" IS NULL OR cat."CAT_CODE" NOT IN ('TR', 'NT', 'AL'))
                   AND s."invoice_date" IS NOT NULL
                   {extra_filter}
                 GROUP BY 
@@ -398,7 +401,7 @@ def bulk_sync_tyre_sales_permutations(mysql_conn, session_id: str, user_id=None)
                     COALESCE(NULLIF(TRIM(rm."region_name"), ''), ''),
                     COALESCE(NULLIF(TRIM(cm."CH_TYPE"), ''), 'UNKNOWN'),
                     COALESCE(NULLIF(TRIM(sku."CONSTUCTION"), ''), 'UNKNOWN'),
-                    COALESCE(NULLIF(TRIM(sku."TYRE_TYPE"), ''), 'UNKNOWN'),
+                    COALESCE(NULLIF(TRIM(cat."CAT_DESC"), ''), NULLIF(TRIM(sku."TYRE_TYPE"), ''), 'UNKNOWN'),
                     YEAR(s."invoice_date")
             """
 

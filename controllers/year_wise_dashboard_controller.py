@@ -103,7 +103,7 @@ def _get_connection_context(get_db_connection, session_id_arg=None, user_id_arg=
     session_id = _resolve_session(mysql_conn, session_id_arg)
     user_id = user_id_arg
 
-    from helper.sap_analytics_service import get_sap_connection_for_session
+    from helper.sap_connection import get_sap_connection_for_session
     hana_conn = None
     tunnel = None
     sap_schema = "SAP_S4"
@@ -922,7 +922,7 @@ def bulk_sync_year_wise_sales_comparison(mysql_conn, session_id: str, user_id=No
     ensure_year_wise_sales_table(mysql_conn)
 
     effective_session = session_id
-    from helper.sap_analytics_service import get_sap_connection_for_session
+    from helper.sap_connection import get_sap_connection_for_session
     hana_conn = None
     tunnel = None
     is_hana = False

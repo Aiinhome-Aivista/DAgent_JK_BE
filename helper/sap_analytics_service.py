@@ -1,3 +1,4 @@
+from helper.sap_connection import get_hana_schema_views, sanitize_and_execute_hana, _prepare_mysql_workspace, get_sap_connection_for_session
 """
 
 Service module for executing analytical sales queries directly against SAP HANA
@@ -1314,7 +1315,9 @@ def query_sales_numbers_hana(cursor, schema, year, month, day):
 
         LEFT JOIN "{schema}"."ZIVF_CustomerMaster_01_MD" cm ON (cm.KUNNR = sh.DEALER_CODE)
 
-        WHERE (cm.KLABC IS NULL OR UPPER(TRIM(cm.KLABC)) <> 'X')
+        WHERE cm.CH_TYPE IS NOT NULL 
+          AND TRIM(cm.CH_TYPE) <> ''
+          AND (cm.KLABC IS NULL OR UPPER(TRIM(cm.KLABC)) <> 'X')
 
           AND (
 
@@ -2847,23 +2850,7 @@ def query_sales_by_account_category_hana(cursor, schema, zone=None):
 
         SELECT 
 
-            CASE 
-
-                WHEN UPPER(TRIM(COALESCE(cm.BRAND_SHOP, ''))) = 'Y' THEN 'Brand Shops'
-
-                WHEN UPPER(TRIM(COALESCE(cm.CH_TYPE, ''))) = 'DL' OR UPPER(TRIM(COALESCE(cm.KTOKD, ''))) IN ('0001', 'DL') THEN 'Dealers'
-
-                WHEN UPPER(TRIM(COALESCE(cm.CH_TYPE, ''))) = 'DB' OR UPPER(TRIM(COALESCE(cm.KTOKD, ''))) IN ('0002', 'DB') THEN 'Distributors'
-
-                WHEN UPPER(TRIM(COALESCE(cm.CH_TYPE, ''))) = 'FL' OR UPPER(TRIM(COALESCE(cm.KTOKD, ''))) IN ('0003', 'FL') THEN 'Fleets'
-
-                WHEN cm.CH_TYPE IS NOT NULL AND cm.CH_TYPE != '' THEN cm.CH_TYPE
-
-                WHEN cm.KTOKD IS NOT NULL AND cm.KTOKD != '' THEN cm.KTOKD
-
-                ELSE 'Dealers'
-
-            END AS title,
+            UPPER(TRIM(cm.CH_TYPE)) AS title,
 
             COALESCE(cs.NDP_VALUE, cs.TAXABLE_VALUE, cs.INVOICE_VALUE, 0) AS invoice_value
 

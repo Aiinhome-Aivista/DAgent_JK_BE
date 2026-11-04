@@ -2039,9 +2039,11 @@ from controllers.category_sales import get_category_sales_controller
 
 
 
-@app.route("/category-sales", methods=["GET"])
+@app.route("/category-sales", methods=["GET", "POST"])
 
 def category_sales():
+
+    from controllers.category_sales_dashboard_controller import get_category_sales_controller
 
     return get_category_sales_controller(get_db_connection)
 
@@ -2051,6 +2053,8 @@ def category_sales():
 
 def sales_revenue():
 
+    from controllers.sales_revenue_dashboard_controller import get_sales_revenue_data_controller
+
     return get_sales_revenue_data_controller(get_db_connection)
 
 
@@ -2059,7 +2063,8 @@ def sales_revenue():
 
 def sales_by_account_category():
 
-    return get_sales_by_account_category_controller(get_db_connection)
+    from controllers.account_category_sales_dashboard_controller import get_account_category_sales_controller
+    return get_account_category_sales_controller(get_db_connection)
 
 
 

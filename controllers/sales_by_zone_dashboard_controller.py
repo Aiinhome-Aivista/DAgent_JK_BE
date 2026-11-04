@@ -123,7 +123,7 @@ def _get_connection_context(get_db_connection, session_id_arg=None, user_id_arg=
         return None, None, None, False, None, None, None
 
     effective_session = _resolve_session(mysql_conn, session_id_arg)
-    from helper.sap_analytics_service import get_sap_connection_for_session
+    from helper.sap_connection import get_sap_connection_for_session
 
     hana_conn = None
     tunnel = None
@@ -302,35 +302,26 @@ def fetch_master_years(cursor, is_hana, schema, user_db):
 
 
 def fetch_master_tyre_types(cursor, is_hana, schema, user_db):
-    """User's exact query for Distinct TYRE_TYPE from ZIVR_SKUMaster_01_TR."""
+    """Category master descriptions with code as value."""
     tyre_types = []
     if is_hana:
         sql = f"""
             SELECT DISTINCT
-                TRIM(M."TYRE_TYPE") AS TYRE_TYPE
-            FROM (
-                SELECT "SKU"
-                FROM "{schema}"."ZPVF_SD_SalesHistory_01_TR"
-                WHERE "distribution_channel" = '10'
-
-                UNION
-
-                SELECT "SKU"
-                FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR"
-                WHERE "distribution_channel" = '10'
-            ) S
-            INNER JOIN "{schema}"."ZIVR_SKUMaster_01_TR" M
-                ON TRIM(S."SKU") = TRIM(M."MATNR")
-            WHERE M."TYRE_TYPE" IS NOT NULL
-              AND TRIM(M."TYRE_TYPE") <> ''
-            ORDER BY TYRE_TYPE
+                TRIM(cat."CAT_CODE") AS CAT_CODE,
+                TRIM(cat."CAT_DESC") AS CAT_DESC,
+                cat."SEQ_NO"
+            FROM "{schema}"."ZIVF_CategoryMaster_01_TR" cat
+            WHERE cat."CAT_DESC" IS NOT NULL
+              AND TRIM(cat."CAT_DESC") <> ''
+              AND cat."CAT_CODE" NOT IN ('TR', 'NT', 'AL')
+            ORDER BY cat."SEQ_NO" ASC, CAT_DESC ASC
         """
         cursor.execute(sql)
         for r in fetchall_dict(cursor):
-            tt = _val(r, "tyre_type")
-            if tt and str(tt).strip():
-                val_str = str(tt).strip()
-                tyre_types.append({"label": val_str, "value": val_str})
+            cd = _val(r, "cat_desc")
+            cc = _val(r, "cat_code")
+            if cd and cc:
+                tyre_types.append({"label": str(cd).strip(), "value": str(cc).strip()})
     else:
         try:
             sql = f"""
@@ -515,6 +506,11 @@ def ensure_sales_by_zone_table(conn):
 
         conn.commit()
         cur.close()
+        try:
+            cur.execute("DELETE FROM `dashboard_sales_by_zone` WHERE zone_code = 'UNKNOWN' OR zone_name = 'UNKNOWN'")
+            conn.commit()
+        except Exception:
+            pass
         _table_initialized = True
     except Exception as e:
         print(f"[Sales by Zone Table] init: {e}", flush=True)
@@ -538,7 +534,7 @@ def bulk_sync_sales_by_zone_permutations(mysql_conn, session_id: str, user_id=No
     ensure_sales_by_zone_table(mysql_conn)
 
     effective_session = session_id
-    from helper.sap_analytics_service import get_sap_connection_for_session
+    from helper.sap_connection import get_sap_connection_for_session
     hana_conn = None
     tunnel = None
     is_hana = False
@@ -585,35 +581,58 @@ def bulk_sync_sales_by_zone_permutations(mysql_conn, session_id: str, user_id=No
             # This completely avoids HANA UNION memory limits!
             base_query_template = """
                 SELECT
-                    COALESCE(NULLIF(TRIM(zm."P_ZONE"), ''), NULLIF(TRIM(tm."P_ZONE"), ''), 'UNKNOWN') AS ZONE_CODE,
-                    COALESCE(NULLIF(TRIM(zm."NAME"), ''), NULLIF(TRIM(tm."P_ZONE"), ''), 'UNKNOWN') AS ZONE_NAME,
+                    zm."P_ZONE" AS ZONE_CODE,
+                    COALESCE(NULLIF(TRIM(zm."NAME"), ''), zm."P_ZONE") AS ZONE_NAME,
                     YEAR(s."invoice_date") AS SALES_YEAR,
                     MONTH(s."invoice_date") AS MONTH_NO,
                     COALESCE(NULLIF(TRIM(sku."CONSTUCTION"), ''), 'UNKNOWN') AS CONSTRUCTION_TYPE,
-                    COALESCE(NULLIF(TRIM(sku."TYRE_TYPE"), ''), 'UNKNOWN') AS TYRE_TYPE,
+                    COALESCE(NULLIF(TRIM(cat."CAT_CODE"), ''), NULLIF(TRIM(sku."TYRE_TYPE"), ''), 'UNKNOWN') AS TYRE_TYPE,
+                    COALESCE(NULLIF(TRIM(cat."CAT_DESC"), ''), 'UNKNOWN') AS TYRE_DESC,
                     ROUND(SUM(COALESCE(s."invoice_value", s."ndp_value", s."taxable_value", 0)), 2) AS TOTAL_SALES,
                     ROUND(SUM(COALESCE(s."Tyre_Quantity", 0)), 2) AS TOTAL_QUANTITY
                 FROM "{schema}"."{table_name}" s
                 INNER JOIN "{schema}"."ZIVF_CustomerMaster_01_MD" cm 
                     ON (s."dealer_code" = cm."KUNNR" OR LPAD(TRIM(s."dealer_code"), 10, '0') = cm."KUNNR" OR LTRIM(s."dealer_code", '0') = LTRIM(cm."KUNNR", '0'))
-                LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm 
-                    ON (cm."BZIRK" = tm."BZIRK" OR TRIM(cm."BZIRK") = TRIM(tm."BZIRK"))
-                LEFT JOIN "{schema}"."ZIVF_ZoneMaster_01_TR" zm 
-                    ON (tm."P_ZONE" = zm."P_ZONE")
+                LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm_plant 
+                    ON (s."plant" = tm_plant."WERKS" OR cm."VWERK" = tm_plant."WERKS")
+                LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm_bzirk 
+                    ON (cm."BZIRK" = tm_bzirk."BZIRK")
+                LEFT JOIN "{schema}"."ZIVF_RegionMaster_MD_01" rm 
+                    ON (rm."region_code" = COALESCE(NULLIF(TRIM(tm_plant."REGIO"), ''), NULLIF(TRIM(tm_bzirk."REGIO"), ''), NULLIF(TRIM(TO_VARCHAR(cm."REGIO")), '')))
+                INNER JOIN "{schema}"."ZIVF_ZoneMaster_01_TR" zm 
+                    ON (zm."P_ZONE" = COALESCE(
+                        NULLIF(TRIM(tm_plant."P_ZONE"), ''),
+                        NULLIF(TRIM(tm_bzirk."P_ZONE"), ''),
+                        NULLIF(TRIM(rm."zone_code"), ''),
+                        CASE 
+                            WHEN SUBSTRING(TO_VARCHAR(s."plant"), 1, 2) IN ('36', '71', '72') THEN 'CZ'
+                            WHEN SUBSTRING(TO_VARCHAR(s."plant"), 1, 1) = '3' THEN 'NZ'
+                            WHEN SUBSTRING(TO_VARCHAR(s."plant"), 1, 1) = '1' THEN 'EZ'
+                            WHEN SUBSTRING(TO_VARCHAR(s."plant"), 1, 1) = '8' THEN 'NP'
+                            WHEN SUBSTRING(TO_VARCHAR(s."plant"), 1, 2) IN ('51', '52') THEN 'TZ'
+                            WHEN SUBSTRING(TO_VARCHAR(s."plant"), 1, 1) = '5' THEN 'SZ'
+                            WHEN SUBSTRING(TO_VARCHAR(s."plant"), 1, 1) = '7' THEN 'WZ'
+                            ELSE NULL
+                        END
+                    ))
                 LEFT JOIN "{schema}"."ZIVR_SKUMaster_01_TR" sku 
                     ON (TRIM(s."SKU") = TRIM(sku."MATNR"))
+                LEFT JOIN "{schema}"."ZIVF_CategoryMaster_01_TR" cat 
+                    ON (TRIM(sku."CAT_CODE") = TRIM(cat."CAT_CODE"))
                 WHERE ("distribution_channel" = '10' OR "distribution_channel" = 10)
                   AND ("indicator_cancel" IS NULL OR "indicator_cancel" NOT IN ('X', 'Y', '1'))
                   AND IFNULL(cm."KLABC", '') <> 'X'
                   AND s."invoice_date" IS NOT NULL
+                  AND zm."P_ZONE" IS NOT NULL AND TRIM(zm."P_ZONE") <> ''
                   {extra_filter}
                 GROUP BY 
-                    COALESCE(NULLIF(TRIM(zm."P_ZONE"), ''), NULLIF(TRIM(tm."P_ZONE"), ''), 'UNKNOWN'),
-                    COALESCE(NULLIF(TRIM(zm."NAME"), ''), NULLIF(TRIM(tm."P_ZONE"), ''), 'UNKNOWN'),
+                    zm."P_ZONE",
+                    COALESCE(NULLIF(TRIM(zm."NAME"), ''), zm."P_ZONE"),
                     YEAR(s."invoice_date"),
                     MONTH(s."invoice_date"),
                     COALESCE(NULLIF(TRIM(sku."CONSTUCTION"), ''), 'UNKNOWN'),
-                    COALESCE(NULLIF(TRIM(sku."TYRE_TYPE"), ''), 'UNKNOWN')
+                    COALESCE(NULLIF(TRIM(cat."CAT_CODE"), ''), NULLIF(TRIM(sku."TYRE_TYPE"), ''), 'UNKNOWN'),
+                    COALESCE(NULLIF(TRIM(cat."CAT_DESC"), ''), 'UNKNOWN')
             """
 
             # 1. CurrentSales (2026 active)
@@ -698,7 +717,9 @@ def bulk_sync_sales_by_zone_permutations(mysql_conn, session_id: str, user_id=No
     slice_totals = collections.defaultdict(float)
 
     for r in raw_rows:
-        zc = _val(r, "zone_code", default="UNKNOWN")
+        zc = _val(r, "zone_code")
+        if not zc or str(zc).strip().upper() == "UNKNOWN":
+            continue
         zn = _val(r, "zone_name", default=zc)
         zc = str(zc).strip().upper() if zc else "UNKNOWN"
         zn = str(zn).strip() if zn else zc
@@ -708,6 +729,8 @@ def bulk_sync_sales_by_zone_permutations(mysql_conn, session_id: str, user_id=No
         m_no = _val(r, "month_no")
         c_tp = _val(r, "construction_type", default="UNKNOWN")
         t_tp = _val(r, "tyre_type", default="UNKNOWN")
+        t_desc = _val(r, "tyre_desc", default=t_tp)
+        t_desc_str = str(t_desc).strip().upper() if t_desc else "UNKNOWN"
 
         sales = float(_val(r, "total_sales", default=0.0) or 0.0)
         qty = float(_val(r, "total_quantity", default=0.0) or 0.0)
@@ -725,7 +748,7 @@ def bulk_sync_sales_by_zone_permutations(mysql_conn, session_id: str, user_id=No
         for y_dim in (y_str, "ALL"):
             for m_dim in (m_str, "ALL"):
                 for c_dim in (c_str, "ALL"):
-                    for t_dim in (t_str, "ALL"):
+                    for t_dim in set((t_str, t_desc_str, "ALL")):
                         k = (y_dim, m_dim, c_dim, t_dim)
                         slice_zones[k][(zc, zn)]['sales'] += sales
                         slice_zones[k][(zc, zn)]['qty'] += qty
@@ -871,6 +894,7 @@ def get_sales_by_zone_data_controller(get_db_connection):
               AND month_val = %s
               AND construction_type = %s
               AND tyre_type = %s
+              AND zone_code != 'UNKNOWN'
             ORDER BY sales_value DESC
         """
         cur.execute(query_sql, (effective_session, selected_year, selected_month, selected_const, selected_tyre))
@@ -904,7 +928,9 @@ def get_sales_by_zone_data_controller(get_db_connection):
             chart_data = []
 
             for r in rows:
-                zc = _val(r, "zone_code", default="UNKNOWN")
+                zc = _val(r, "zone_code")
+                if not zc or str(zc).strip().upper() == "UNKNOWN":
+                    continue
                 zn = _val(r, "zone_name", default=zc)
                 sv = float(_val(r, "sales_value", default=0.0) or 0.0)
                 pct = float(_val(r, "percentage", default=0.0) or 0.0)
