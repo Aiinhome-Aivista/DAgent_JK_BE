@@ -1383,7 +1383,9 @@ def query_sales_numbers_hana(cursor, schema, year, month, day):
 
         LEFT JOIN "{schema}"."ZIVF_CustomerMaster_01_MD" cm ON (cm.KUNNR = cs.DEALER_CODE)
 
-        WHERE (cm.KLABC IS NULL OR UPPER(TRIM(cm.KLABC)) <> 'X')
+        WHERE cm.CH_TYPE IS NOT NULL
+          AND TRIM(cm.CH_TYPE) <> ''
+          AND (cm.KLABC IS NULL OR UPPER(TRIM(cm.KLABC)) <> 'X')
 
           AND cs.INVOICE_DATE BETWEEN TO_DATE(?, 'YYYY-MM-DD') AND TO_DATE(?, 'YYYY-MM-DD')
 

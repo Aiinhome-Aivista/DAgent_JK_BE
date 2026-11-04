@@ -42,6 +42,12 @@ def ensure_account_category_sales_table(conn):
     try:
         cur = conn.cursor()
         cur.execute(ACCOUNT_CATEGORY_SALES_TABLE_SQL)
+        # Purge any empty or placeholder records
+        cur.execute("""
+            DELETE FROM `dashboard_account_category_sales` 
+            WHERE category_title = '' OR category_title IS NULL 
+               OR LOWER(TRIM(category_title)) IN ('account category', 'unknown', '0', 'null', 'none')
+        """)
         conn.commit()
         cur.close()
         _table_initialized = True
@@ -126,6 +132,9 @@ def get_cached_account_category_sales(mysql_conn, session_id, zone=None):
             SELECT category_title, sales_value_cr, last_synced_at
             FROM `dashboard_account_category_sales`
             WHERE session_id = %s AND zone_code = %s
+              AND category_title IS NOT NULL
+              AND TRIM(category_title) <> ''
+              AND LOWER(TRIM(category_title)) NOT IN ('account category', 'unknown', '0', 'null', 'none')
             ORDER BY sales_value_cr DESC
         """, (str(session_id).strip(), z_code))
         rows = cur.fetchall()
@@ -172,6 +181,8 @@ def save_account_category_sales_to_table(mysql_conn, session_id, zone, data_list
         for item in data_list:
             if isinstance(item, dict):
                 ct = str(item.get("title") or item.get("TITLE") or item.get("label") or "").strip()[:100]
+                if not ct or ct.lower() in ("account category", "unknown", "0", "null", "none"):
+                    continue
                 cr = float(item.get("valCr") or item.get("sales_value_cr") or 0.0)
                 if not cr and item.get("value"):
                     val_str = str(item.get("value")).replace("₹", "").replace("Cr", "").strip()
@@ -193,22 +204,19 @@ def save_account_category_sales_to_table(mysql_conn, session_id, zone, data_list
 def calculate_account_category_sales_hana(cursor, schema, zone=None):
     from helper.sap_connection import sanitize_and_execute_hana
     hana_sql = f"""
-    WITH filtered_data AS (
+    WITH master_cats AS (
+        SELECT DISTINCT UPPER(TRIM("CH_TYPE")) AS title
+        FROM "{schema}"."ZIVF_CustomerMaster_01_MD"
+        WHERE "CH_TYPE" IS NOT NULL 
+          AND TRIM("CH_TYPE") <> ''
+          AND ("KLABC" IS NULL OR UPPER(TRIM("KLABC")) <> 'X')
+    ),
+    filtered_data AS (
         SELECT 
             UPPER(TRIM(cm.CH_TYPE)) AS title,
             COALESCE(cs.NDP_VALUE, cs.TAXABLE_VALUE, cs.INVOICE_VALUE, 0) AS invoice_value
-        FROM (
-            SELECT s.DEALER_CODE, s.PLANT, s.INVOICE_VALUE, s.TAXABLE_VALUE, s.NDP_VALUE, s.INDICATOR_CANCEL, s.DISTRIBUTION_CHANNEL 
-            FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR" s
-            WHERE (s.INDICATOR_CANCEL IS NULL OR s.INDICATOR_CANCEL NOT IN ('X', 'Y', '1'))
-              AND (s.DISTRIBUTION_CHANNEL = 10 OR s.DISTRIBUTION_CHANNEL = '10')
-            UNION ALL
-            SELECT s.DEALER_CODE, s.PLANT, s.INVOICE_VALUE, s.TAXABLE_VALUE, s.NDP_VALUE, s.INDICATOR_CANCEL, s.DISTRIBUTION_CHANNEL 
-            FROM "{schema}"."ZPVF_SD_SalesHistory_01_TR" s
-            WHERE (s.INDICATOR_CANCEL IS NULL OR s.INDICATOR_CANCEL NOT IN ('X', 'Y', '1'))
-              AND (s.DISTRIBUTION_CHANNEL = 10 OR s.DISTRIBUTION_CHANNEL = '10')
-        ) cs
-        LEFT JOIN "{schema}"."ZIVF_CustomerMaster_01_MD" cm ON (
+        FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR" cs
+        INNER JOIN "{schema}"."ZIVF_CustomerMaster_01_MD" cm ON (
             LPAD(TRIM(TO_VARCHAR(cs.DEALER_CODE)), 10, '0') = LPAD(TRIM(TO_VARCHAR(cm.KUNNR)), 10, '0') 
             OR LTRIM(TO_VARCHAR(cs.DEALER_CODE), '0') = LTRIM(TO_VARCHAR(cm.KUNNR), '0')
         )
@@ -232,20 +240,29 @@ def calculate_account_category_sales_hana(cursor, schema, zone=None):
                 ELSE 'CZ'
             END
         ))
-        WHERE cm.CH_TYPE IS NOT NULL 
+        WHERE (cs.INDICATOR_CANCEL IS NULL OR cs.INDICATOR_CANCEL NOT IN ('X', 'Y', '1'))
+          AND (cs.DISTRIBUTION_CHANNEL = 10 OR cs.DISTRIBUTION_CHANNEL = '10')
+          AND cm.CH_TYPE IS NOT NULL 
           AND TRIM(cm.CH_TYPE) <> ''
           AND (cm.KLABC IS NULL OR UPPER(TRIM(cm.KLABC)) <> 'X')
           AND (? IS NULL OR ? = '' OR ? = 'null' OR ? = 'All' 
                OR zm.NAME = ? OR zm.P_ZONE = ?
                OR UPPER(TRIM(zm.NAME)) = UPPER(TRIM(?)) OR UPPER(TRIM(zm.P_ZONE)) = UPPER(TRIM(?)))
+    ),
+    cat_sales AS (
+        SELECT 
+            title,
+            ROUND(SUM(invoice_value) / 10000000, 2) AS "valCr"
+        FROM filtered_data
+        GROUP BY title
     )
     SELECT 
-        title,
-        ROUND(SUM(invoice_value) / 10000000, 2) AS "valCr",
-        '₹' || TO_VARCHAR(ROUND(SUM(invoice_value) / 10000000, 2)) || ' Cr' AS "value"
-    FROM filtered_data
-    GROUP BY title
-    ORDER BY "valCr" DESC
+        m.title AS "title",
+        COALESCE(s."valCr", 0.0) AS "valCr",
+        '₹' || TO_VARCHAR(COALESCE(s."valCr", 0.0)) || ' Cr' AS "value"
+    FROM master_cats m
+    LEFT JOIN cat_sales s ON (m.title = s.title)
+    ORDER BY "valCr" DESC, m.title ASC
     """
     sanitize_and_execute_hana(cursor, schema, hana_sql, (zone, zone, zone, zone, zone, zone, zone, zone))
     cols = [d[0] for d in cursor.description]

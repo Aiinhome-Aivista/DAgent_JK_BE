@@ -124,41 +124,35 @@ def _execute_sync_task():
             except Exception as e:
                 print(f"[Scheduler] ❌ [4/7] Error syncing year_wise_sales: {e}", flush=True)
 
-            # 5. Sales Revenue Plan vs Sale (Dedicated table: sales_revenue_plan_vs_sale)
+            # 5. Sales Revenue Plan vs Sale (Dedicated controller & table)
             t_step = time.time()
             print(f"[Scheduler] ⏳ [5/7] Syncing Sales Revenue Plan vs Sale...", flush=True)
             try:
-                from controllers.sales_dashboard import save_sales_revenue_table_data
-                rev = execute_sales_revenue_by_zone(conn, s_id)
-                if rev is not None:
-                    save_sales_revenue_table_data(conn, s_id, "ALL", rev)
-                    set_cached_component_data(conn, s_id, "sales_revenue", rev, "all")
+                from controllers.sales_revenue_dashboard_controller import get_sales_revenue_data_controller
+                with _app_instance.test_request_context(query_string={"session_id": s_id, "user_id": u_id, "force_refresh": "true"}):
+                    get_sales_revenue_data_controller(_get_db_conn_func)
                 print(f"[Scheduler] ✅ [5/7] Sales Revenue Plan vs Sale synced in {round(time.time() - t_step, 2)}s", flush=True)
             except Exception as e:
                 print(f"[Scheduler] ❌ [5/7] Error syncing sales_revenue: {e}", flush=True)
 
-            # 6. Actual Sales by Account Category (Dedicated table: dashboard_account_category_sales)
+            # 6. Actual Sales by Account Category (Dedicated controller & table)
             t_step = time.time()
             print(f"[Scheduler] ⏳ [6/7] Syncing Sales by Account Category...", flush=True)
             try:
-                from helper.dashboard_cache_service import save_account_category_sales_table_data
-                acc = execute_sales_by_account_category(conn, s_id)
-                if acc is not None:
-                    save_account_category_sales_table_data(conn, s_id, "ALL", acc)
-                    set_cached_component_data(conn, s_id, "sales_by_account", acc, "all")
+                from controllers.account_category_sales_dashboard_controller import get_account_category_sales_controller
+                with _app_instance.test_request_context(query_string={"session_id": s_id, "user_id": u_id, "force_refresh": "true"}):
+                    get_account_category_sales_controller(_get_db_conn_func)
                 print(f"[Scheduler] ✅ [6/7] Sales by Account Category synced in {round(time.time() - t_step, 2)}s", flush=True)
             except Exception as e:
                 print(f"[Scheduler] ❌ [6/7] Error syncing sales_by_account: {e}", flush=True)
 
-            # 7. Category Sales (Dedicated table: dashboard_category_sales)
+            # 7. Category Sales (Dedicated controller & table)
             t_step = time.time()
             print(f"[Scheduler] ⏳ [7/7] Syncing Category Sales...", flush=True)
             try:
-                from helper.dashboard_cache_service import save_category_sales_table_data
-                cats = execute_category_sales(conn, s_id)
-                if cats is not None:
-                    save_category_sales_table_data(conn, s_id, "ALL", cats)
-                    set_cached_component_data(conn, s_id, "category_sales", cats, "all")
+                from controllers.category_sales_dashboard_controller import get_category_sales_controller
+                with _app_instance.test_request_context(query_string={"session_id": s_id, "user_id": u_id, "force_refresh": "true"}):
+                    get_category_sales_controller(_get_db_conn_func)
                 print(f"[Scheduler] ✅ [7/7] Category Sales synced in {round(time.time() - t_step, 2)}s", flush=True)
             except Exception as e:
                 print(f"[Scheduler] ❌ [7/7] Error syncing category_sales: {e}", flush=True)

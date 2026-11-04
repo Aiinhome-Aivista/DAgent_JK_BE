@@ -745,6 +745,9 @@ def get_account_category_sales_table_data(conn, session_id: str, zone: str = Non
             SELECT category_title, sales_value_cr, last_synced_at
             FROM `dashboard_account_category_sales`
             WHERE session_id = %s AND zone_code = %s
+              AND category_title IS NOT NULL
+              AND TRIM(category_title) <> ''
+              AND LOWER(TRIM(category_title)) NOT IN ('account category', 'unknown', '0', 'null', 'none')
             ORDER BY sales_value_cr DESC
         """, (str(session_id).strip(), z_code))
         rows = cur.fetchall()
@@ -786,7 +789,9 @@ def save_account_category_sales_table_data(conn, session_id: str, zone: str, dat
         batch = []
         for item in data_list:
             if isinstance(item, dict):
-                ct = str(item.get("title") or item.get("TITLE") or item.get("label") or "")[:100]
+                ct = str(item.get("title") or item.get("TITLE") or item.get("label") or "").strip()[:100]
+                if not ct or ct.lower() in ("account category", "unknown", "0", "null", "none"):
+                    continue
                 cr = float(item.get("valCr") or item.get("value") or 0.0)
                 batch.append((str(session_id).strip(), z_code, ct, cr, ist_now, ist_now))
         if batch:
