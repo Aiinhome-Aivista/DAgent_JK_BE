@@ -41,6 +41,8 @@ def _execute_sync_task():
         ensure_tyre_sales_table(conn)
         ensure_category_sales_table(conn)
         ensure_account_category_sales_table(conn)
+        from controllers.domestic_sales_value_achievement_controller import ensure_table as ensure_domestic_sales_table
+        ensure_domestic_sales_table(conn)
         cur = conn.cursor(dictionary=True) if hasattr(conn, "cursor") else conn.cursor()
         cur.execute("""
             SELECT session_id, MAX(user_id) AS user_id, MAX(workspace_name) AS workspace_name 
@@ -153,9 +155,19 @@ def _execute_sync_task():
                 from controllers.category_sales_dashboard_controller import get_category_sales_controller
                 with _app_instance.test_request_context(query_string={"session_id": s_id, "user_id": u_id, "force_refresh": "true"}):
                     get_category_sales_controller(_get_db_conn_func)
-                print(f"[Scheduler] ✅ [7/7] Category Sales synced in {round(time.time() - t_step, 2)}s", flush=True)
+                print(f"[Scheduler] ✅ [7/8] Category Sales synced in {round(time.time() - t_step, 2)}s", flush=True)
             except Exception as e:
-                print(f"[Scheduler] ❌ [7/7] Error syncing category_sales: {e}", flush=True)
+                print(f"[Scheduler] ❌ [7/8] Error syncing category_sales: {e}", flush=True)
+
+            # 8. Domestic Sales Value Achievement (Dedicated table: sales_summary_domestic_sales_value_achievement - All Month Permutations)
+            t_step = time.time()
+            print(f"[Scheduler] ⏳ [8/8] Syncing Domestic Sales Value Achievement (All Month Permutations)...", flush=True)
+            try:
+                from controllers.domestic_sales_value_achievement_controller import bulk_sync_domestic_sales_value_achievement
+                bulk_sync_domestic_sales_value_achievement(conn, s_id, u_id)
+                print(f"[Scheduler] ✅ [8/8] Domestic Sales Value Achievement synced in {round(time.time() - t_step, 2)}s", flush=True)
+            except Exception as e:
+                print(f"[Scheduler] ❌ [8/8] Error syncing domestic_sales_value_achievement: {e}", flush=True)
 
             # 8. Filter Metadata Cache
             try:
@@ -166,7 +178,7 @@ def _execute_sync_task():
             except Exception as e:
                 print(f"[Scheduler] Note on filters cache: {e}", flush=True)
 
-            print(f"[Scheduler] 🎉 Completed all 7 dashboard components for '{ws_name}' in {round(time.time() - ws_start_t, 2)}s!", flush=True)
+            print(f"[Scheduler] 🎉 Completed all 8 dashboard components for '{ws_name}' in {round(time.time() - ws_start_t, 2)}s!", flush=True)
             print(f"[Scheduler] ====================================================================\n", flush=True)
 
         duration = round(time.time() - start_t, 2)

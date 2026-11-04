@@ -2066,6 +2066,11 @@ def sales_by_account_category():
     from controllers.account_category_sales_dashboard_controller import get_account_category_sales_controller
     return get_account_category_sales_controller(get_db_connection)
 
+@app.route("/domestic-sales-value-achievement", methods=["GET", "POST"])
+def domestic_sales_value_achievement():
+    from controllers.domestic_sales_value_achievement_controller import get_domestic_sales_value_achievement_controller
+    return get_domestic_sales_value_achievement_controller(get_db_connection)
+
 
 
 @app.route("/non-billed-accounts-pct", methods=["GET", "POST"])
