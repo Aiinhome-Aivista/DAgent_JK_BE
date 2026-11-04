@@ -1,5 +1,3 @@
-
-
 import os
 
 os.environ["PYTHONWARNINGS"] = "ignore"
@@ -1952,7 +1950,9 @@ def default_dashboard_metrics():
 
 def tyre_sales_data():
 
-    return tyre_sales_data_controller(get_db_connection)
+    from controllers.tyre_sales_dashboard_controller import get_tyre_sales_data_controller
+
+    return get_tyre_sales_data_controller(get_db_connection)
 
 
 
@@ -1960,7 +1960,8 @@ def tyre_sales_data():
 
 def dashboard_filters():
 
-    return dashboard_filters_controller(get_db_connection)
+    from controllers.sales_by_zone_dashboard_controller import get_sales_by_zone_filters_controller
+    return get_sales_by_zone_filters_controller(get_db_connection)
 
 
 
@@ -1968,7 +1969,8 @@ def dashboard_filters():
 
 def sales_by_zone():
 
-    return sales_by_zone_data_controller(get_db_connection)    
+    from controllers.sales_by_zone_dashboard_controller import get_sales_by_zone_data_controller
+    return get_sales_by_zone_data_controller(get_db_connection)
 
 
 
@@ -2023,10 +2025,13 @@ def api_dashboard_year_wise_sales():
 
 
 @app.route("/available-years", methods=["GET"])
+@app.route("/api/dashboard/tyre-sales/filters", methods=["GET"])
 
 def available_years():
 
-    return available_years_controller(get_db_connection)    
+    from controllers.tyre_sales_dashboard_controller import get_available_years_filters_controller
+
+    return get_available_years_filters_controller(get_db_connection)    
 
 
 

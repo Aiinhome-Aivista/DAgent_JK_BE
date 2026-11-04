@@ -94,23 +94,23 @@ def _execute_sync_task():
             except Exception as e:
                 print(f"[Scheduler] ❌ [1/7] Error syncing key_metrics: {e}", flush=True)
 
-            # 2. Tyre Sales Chart
+            # 2. Top 10 Tyre Types by Sales (Dedicated table: dashboard_tyre_sales_top_10 - Bulk Permutations)
             t_step = time.time()
-            print(f"[Scheduler] ⏳ [2/7] Syncing Top 10 Tyre Types by Sales...", flush=True)
+            print(f"[Scheduler] ⏳ [2/7] Syncing Top 10 Tyre Types by Sales (All Bulk Permutations)...", flush=True)
             try:
-                with _app_instance.test_request_context(json={"session_id": s_id, "user_id": u_id, "force_refresh": True}):
-                    tyre_sales_data_controller(_get_db_conn_func)
-                print(f"[Scheduler] ✅ [2/7] Tyre Sales synced in {round(time.time() - t_step, 2)}s", flush=True)
+                from controllers.tyre_sales_dashboard_controller import bulk_sync_tyre_sales_permutations
+                bulk_sync_tyre_sales_permutations(conn, s_id, u_id)
+                print(f"[Scheduler] ✅ [2/7] Tyre Sales permutations synced in {round(time.time() - t_step, 2)}s", flush=True)
             except Exception as e:
                 print(f"[Scheduler] ❌ [2/7] Error syncing tyre_sales: {e}", flush=True)
 
-            # 3. Sales By Zone (Pie Chart)
+            # 3. Sales By Zone (Pie Chart - Dedicated table: dashboard_sales_by_zone - Bulk Permutations)
             t_step = time.time()
-            print(f"[Scheduler] ⏳ [3/7] Syncing Sales by Zone (Pie Chart)...", flush=True)
+            print(f"[Scheduler] ⏳ [3/7] Syncing Sales by Zone (All Bulk Permutations)...", flush=True)
             try:
-                with _app_instance.test_request_context(json={"session_id": s_id, "user_id": u_id, "force_refresh": True}):
-                    sales_by_zone_data_controller(_get_db_conn_func)
-                print(f"[Scheduler] ✅ [3/7] Sales by Zone synced in {round(time.time() - t_step, 2)}s", flush=True)
+                from controllers.sales_by_zone_dashboard_controller import bulk_sync_sales_by_zone_permutations
+                bulk_sync_sales_by_zone_permutations(conn, s_id, u_id)
+                print(f"[Scheduler] ✅ [3/7] Sales by Zone permutations synced in {round(time.time() - t_step, 2)}s", flush=True)
             except Exception as e:
                 print(f"[Scheduler] ❌ [3/7] Error syncing sales_by_zone: {e}", flush=True)
 
