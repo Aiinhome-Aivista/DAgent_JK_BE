@@ -44,7 +44,7 @@ def login():
     conn = get_db_connection()
     cursor = conn.cursor()
     query = """
-    SELECT u.id, u.email, u.name, u.password as stored_password, u.role_id, u.new_user_db, r.role_name
+    SELECT u.id, u.email, u.name, u.password as stored_password, u.role_id, u.visibility, u.new_user_db, r.role_name
     FROM users u
     LEFT JOIN roles r ON u.role_id = r.id
     WHERE u.email=%s
@@ -106,11 +106,16 @@ def login():
     cursor.close()
     conn.close()
     
+    vis_val = user.get("visibility") if isinstance(user, dict) else None
+    if vis_val is None:
+        vis_val = 2 if (role_id == 4 or role_name == 'Admin') else 1
+
     response_data = {
         "user_id": user_id,
         "name": user_name,
         "role_id": role_id,
         "role_name": role_name,
+        "visibility": vis_val,
         "user_database": user_db,
         "active_workspace": active_workspace
     }
@@ -141,7 +146,7 @@ def admin_login_auth():
     conn = get_db_connection()
     cursor = conn.cursor()
     query = """
-    SELECT u.id, u.email, u.name, u.password as stored_password, u.role_id, u.new_user_db, r.role_name
+    SELECT u.id, u.email, u.name, u.password as stored_password, u.role_id, u.visibility, u.new_user_db, r.role_name
     FROM users u
     LEFT JOIN roles r ON u.role_id = r.id
     WHERE u.email=%s
