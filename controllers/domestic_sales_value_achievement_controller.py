@@ -99,40 +99,52 @@ def _close_connections(mysql_conn, hana_conn, tunnel):
         except Exception: pass
 
 
-def fetch_available_months(cursor, schema, mysql_conn=None):
-    """Returns available YMONTH options for dropdown (current year and previous year, e.g. 2026 and 2025 = 24 months)."""
+def fetch_master_months(cursor, schema):
+    """
+    Fetches the 12 calendar months dynamically from HANA day attributes view.
+    Exact query from ZITR_DayAttribute_01_TR (MONTH_NO 1..12 and MONTH_NAME JAN..DEC).
+    """
     months = []
-    now = datetime.now()
-    current_year = now.year
-    prev_year = current_year - 1
-    valid_prefixes = (str(current_year), str(prev_year))
-
     try:
         sql = f"""
-            SELECT DISTINCT "YMONTH"
-            FROM "{schema}"."ZIVF_SD_Sales_Plan_Target_01_TR"
-            WHERE "YMONTH" IS NOT NULL AND LENGTH("YMONTH") = 6
-              AND ("YMONTH" LIKE '{current_year}%' OR "YMONTH" LIKE '{prev_year}%')
-            ORDER BY "YMONTH" DESC
+            SELECT DISTINCT
+                MONTH("Date_") AS MONTH_NO,
+                CASE MONTH("Date_")
+                    WHEN 1  THEN 'JAN'
+                    WHEN 2  THEN 'FEB'
+                    WHEN 3  THEN 'MAR'
+                    WHEN 4  THEN 'APR'
+                    WHEN 5  THEN 'MAY'
+                    WHEN 6  THEN 'JUN'
+                    WHEN 7  THEN 'JUL'
+                    WHEN 8  THEN 'AUG'
+                    WHEN 9  THEN 'SEP'
+                    WHEN 10 THEN 'OCT'
+                    WHEN 11 THEN 'NOV'
+                    WHEN 12 THEN 'DEC'
+                END AS MONTH_NAME
+            FROM "{schema}"."ZITR_DayAttribute_01_TR"
+            WHERE "Date_" IS NOT NULL
+            ORDER BY MONTH_NO ASC
         """
         cursor.execute(sql)
         for r in cursor.fetchall():
             if r and r[0]:
-                val = str(r[0]).strip()
-                if val.startswith(valid_prefixes):
-                    months.append(val)
+                months.append({
+                    "month_no": int(r[0]),
+                    "month_name": str(r[1]).strip() if len(r) > 1 and r[1] else calendar.month_abbr[int(r[0])].upper()
+                })
     except Exception as e:
-        print(f"[{TABLE_NAME}] Error fetching months from HANA: {e}", flush=True)
+        print(f"[{TABLE_NAME}] Error fetching master months from HANA: {e}", flush=True)
 
     if not months:
-        # Fallback: 24 months for current year and previous year
-        for y in [current_year, prev_year]:
-            for m in range(12, 0, -1):
-                months.append(f"{y}{str(m).zfill(2)}")
+        for m in range(1, 13):
+            months.append({
+                "month_no": m,
+                "month_name": calendar.month_abbr[m].upper()
+            })
 
-    # Strictly sorted descending and maximum 24 months (current + prev year)
-    months = sorted(list(set(months)), reverse=True)
-    return [m for m in months if str(m).startswith(valid_prefixes)][:24]
+    return months
 
 
 def query_domestic_sales_value_achievement_hana(cursor, schema, year_month: str, selected_date: str):
@@ -622,11 +634,6 @@ def get_domestic_sales_value_achievement_controller(get_db_connection):
       force_refresh: 'true' (optional)
     """
     session_id = request.args.get("session_id") or (request.json.get("session_id") if request.is_json else None)
-    year_month = request.args.get("year_month") or (request.json.get("year_month") if request.is_json else None)
-    selected_date = request.args.get("selected_date") or (request.json.get("selected_date") if request.is_json else None)
-    force_refresh = (request.args.get("force_refresh", "").lower() in ("true", "1")) or \
-                    (request.is_json and str(request.json.get("force_refresh", "")).lower() in ("true", "1"))
-
     mysql_conn, hana_conn, tunnel, is_hana, schema, effective_session = \
         _get_connection_context(get_db_connection, session_id)
 
@@ -634,74 +641,123 @@ def get_domestic_sales_value_achievement_controller(get_db_connection):
         return jsonify({"status": "error", "message": "Database connection failed"}), 500
 
     try:
-        # Determine available months and default active month
-        available_months = []
+        # 1. Dynamically detect latest sales dates from HANA (NO hardcoding!)
+        detected_year, detected_month, detected_day = None, None, None
         if is_hana:
-            h_cur = hana_conn.cursor()
-            available_months = fetch_available_months(h_cur, schema, mysql_conn)
-            h_cur.close()
+            try:
+                h_cur = hana_conn.cursor()
+                detected_year, detected_month, detected_day = detect_sales_dates(h_cur, schema)
+                h_cur.close()
+            except Exception:
+                pass
 
-        if not available_months:
-            available_months = ["202611", "202610", "202609", "202608", "202607", "202606", "202605", "202604", "202603", "202602", "202601"]
-
-        if not year_month or str(year_month).strip() in ("", "null", "None"):
-            year_month = available_months[0]
-        else:
-            year_month = str(year_month).strip()
-
-        # Determine selected_date for that year_month
-        if not selected_date or str(selected_date).strip() in ("", "null", "None"):
-            # Default to latest sales date or end of month/today
-            yr = int(year_month[:4])
-            mo = int(year_month[4:6])
+        if not detected_year:
             now = datetime.now()
-            if yr == now.year and mo == now.month:
-                selected_date = now.strftime("%Y-%m-%d")
+            detected_year, detected_month, detected_day = now.year, now.month, now.day
+
+        current_year = int(detected_year)
+        previous_year = current_year - 1
+
+        # 2. Fetch the 12 master months dynamically from ZITR_DayAttribute_01_TR
+        master_months = []
+        if is_hana:
+            try:
+                h_cur = hana_conn.cursor()
+                master_months = fetch_master_months(h_cur, schema)
+                h_cur.close()
+            except Exception:
+                pass
+        if not master_months:
+            master_months = [{"month_no": m, "month_name": calendar.month_abbr[m].upper()} for m in range(1, 13)]
+
+        # 3. Determine user selected month number (1 to 12)
+        param_m = request.args.get("month") or (request.json.get("month") if request.is_json else None)
+        param_ym = request.args.get("year_month") or (request.json.get("year_month") if request.is_json else None)
+        selected_date = request.args.get("selected_date") or (request.json.get("selected_date") if request.is_json else None)
+        force_refresh = (request.args.get("force_refresh", "").lower() in ("true", "1")) or \
+                        (request.is_json and str(request.json.get("force_refresh", "")).lower() in ("true", "1"))
+
+        selected_mo_num = None
+        if param_m:
+            try:
+                clean_m = str(param_m).strip().upper()
+                if clean_m.isdigit():
+                    selected_mo_num = int(clean_m)
+                else:
+                    found = next((m for m in master_months if m["month_name"] == clean_m), None)
+                    if found:
+                        selected_mo_num = found["month_no"]
+            except Exception:
+                pass
+
+        if not selected_mo_num and param_ym:
+            try:
+                clean_ym = str(param_ym).strip()
+                if len(clean_ym) == 6:
+                    selected_mo_num = int(clean_ym[4:6])
+                elif clean_ym.isdigit():
+                    selected_mo_num = int(clean_ym)
+            except Exception:
+                pass
+
+        if not selected_mo_num or selected_mo_num < 1 or selected_mo_num > 12:
+            selected_mo_num = int(detected_month)
+
+        # Dynamic year_month based on current_year (NO hardcoding!)
+        year_month = f"{current_year}{str(selected_mo_num).zfill(2)}"
+
+        # Determine selected_date for that month
+        if not selected_date or str(selected_date).strip() in ("", "null", "None"):
+            if selected_mo_num == detected_month:
+                selected_date = f"{current_year}-{str(selected_mo_num).zfill(2)}-{str(detected_day).zfill(2)}"
             else:
-                last_d = calendar.monthrange(yr, mo)[1]
-                selected_date = f"{yr}-{str(mo).zfill(2)}-{str(last_d).zfill(2)}"
+                last_d = calendar.monthrange(current_year, selected_mo_num)[1]
+                selected_date = f"{current_year}-{str(selected_mo_num).zfill(2)}-{str(last_d).zfill(2)}"
         else:
             selected_date = str(selected_date).strip()
 
-        # 1. Check cache table if not force_refresh
+        # Dynamic header labels
+        mo_item = next((m for m in master_months if m["month_no"] == selected_mo_num), None)
+        mo_name = mo_item["month_name"].capitalize() if mo_item else calendar.month_abbr[selected_mo_num]
+        prev_yr_short = str(previous_year)[-2:]
+        curr_yr_short = str(current_year)[-2:]
+        try:
+            s_day = int(selected_date.split("-")[2])
+        except Exception:
+            s_day = 1
+
+        meta_info = {
+            "month_abbr": mo_name,
+            "prev_year_label": f"{mo_name}-{prev_yr_short} Actual",
+            "curr_year_label": f"Actual Sale for {mo_name}-{curr_yr_short}",
+            "day_label": f"Sale for day {s_day}"
+        }
+
+        # 4. Check cache table if not force_refresh
         if not force_refresh:
             cached = get_cached_data(mysql_conn, effective_session, year_month)
             if cached and cached.get("data"):
-                # Compute header labels
-                yr = int(year_month[:4])
-                mo = int(year_month[4:6])
-                month_abbr = calendar.month_abbr[mo]
-                prev_yr_short = str(yr - 1)[-2:]
-                curr_yr_short = str(yr)[-2:]
-                try:
-                    s_day = int(selected_date.split("-")[2])
-                except Exception:
-                    s_day = 1
-
                 return jsonify({
                     "status": "success",
                     "source": TABLE_NAME,
                     "data": cached["data"],
-                    "available_months": available_months,
-                    "active_month": year_month,
+                    "months": master_months,
+                    "selected_month": selected_mo_num,
+                    "current_year": current_year,
+                    "previous_year": previous_year,
+                    "year_month": year_month,
                     "selected_date": cached.get("selected_date") or selected_date,
-                    "meta": {
-                        "month_abbr": month_abbr,
-                        "prev_year_label": f"{month_abbr}-{prev_yr_short} Actual",
-                        "curr_year_label": f"Actual Sale for {month_abbr}-{curr_yr_short}",
-                        "day_label": f"Sale for day {s_day}"
-                    },
+                    "meta": meta_info,
                     "_cached": True,
                     "_last_synced_at": cached.get("_last_synced_at")
                 }), 200
 
-        # 2. Query from SAP HANA
+        # 5. Query from SAP HANA
         if is_hana:
             h_cur = hana_conn.cursor()
             rows = query_domestic_sales_value_achievement_hana(h_cur, schema, year_month, selected_date)
             h_cur.close()
         else:
-            # Fallback mock/empty if HANA unavailable
             rows = [
                 {
                     "market_segment": "4 Wheelers", "prev_year_actual_month": 0, "prev_year_actual_mtd": 0,
@@ -717,33 +773,21 @@ def get_domestic_sales_value_achievement_controller(get_db_connection):
                 }
             ]
 
-        # 3. Save into cache table
+        # 6. Save into cache table
         if rows:
             save_data_to_table(mysql_conn, effective_session, year_month, selected_date, rows)
-
-        yr = int(year_month[:4])
-        mo = int(year_month[4:6])
-        month_abbr = calendar.month_abbr[mo]
-        prev_yr_short = str(yr - 1)[-2:]
-        curr_yr_short = str(yr)[-2:]
-        try:
-            s_day = int(selected_date.split("-")[2])
-        except Exception:
-            s_day = 1
 
         return jsonify({
             "status": "success",
             "source": TABLE_NAME,
             "data": rows,
-            "available_months": available_months,
-            "active_month": year_month,
+            "months": master_months,
+            "selected_month": selected_mo_num,
+            "current_year": current_year,
+            "previous_year": previous_year,
+            "year_month": year_month,
             "selected_date": selected_date,
-            "meta": {
-                "month_abbr": month_abbr,
-                "prev_year_label": f"{month_abbr}-{prev_yr_short} Actual",
-                "curr_year_label": f"Actual Sale for {month_abbr}-{curr_yr_short}",
-                "day_label": f"Sale for day {s_day}"
-            },
+            "meta": meta_info,
             "_cached": False,
             "_last_synced_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }), 200
@@ -777,25 +821,26 @@ def bulk_sync_domestic_sales_value_achievement(mysql_conn, session_id: str, user
             return False
 
         h_cur = hana_conn.cursor()
-        months = fetch_available_months(h_cur, schema, mysql_conn)
-        print(f"[{TABLE_NAME}] Bulk syncing {len(months)} months for session {session_id[:8]}...", flush=True)
+        from helper.sap_connection import detect_sales_dates
+        det_year, det_month, det_day = detect_sales_dates(h_cur, schema)
+        master_months = fetch_master_months(h_cur, schema)
+        print(f"[{TABLE_NAME}] Bulk syncing {len(master_months)} months for detected year {det_year}...", flush=True)
 
-        now = datetime.now()
-        for ym in months:
+        for m_item in master_months:
+            mo_num = m_item["month_no"]
+            ym = f"{det_year}{str(mo_num).zfill(2)}"
             try:
-                yr = int(ym[:4])
-                mo = int(ym[4:6])
-                if yr == now.year and mo == now.month:
-                    sel_date = now.strftime("%Y-%m-%d")
+                if mo_num == det_month:
+                    sel_date = f"{det_year}-{str(mo_num).zfill(2)}-{str(det_day).zfill(2)}"
                 else:
-                    last_d = calendar.monthrange(yr, mo)[1]
-                    sel_date = f"{yr}-{str(mo).zfill(2)}-{str(last_d).zfill(2)}"
+                    last_d = calendar.monthrange(det_year, mo_num)[1]
+                    sel_date = f"{det_year}-{str(mo_num).zfill(2)}-{str(last_d).zfill(2)}"
 
                 rows = query_domestic_sales_value_achievement_hana(h_cur, schema, ym, sel_date)
                 if rows:
                     save_data_to_table(mysql_conn, session_id, ym, sel_date, rows)
-            except Exception as e_ym:
-                print(f"[{TABLE_NAME}] Error syncing month {ym}: {e_ym}", flush=True)
+            except Exception as e_m:
+                print(f"[{TABLE_NAME}] Error syncing month {ym}: {e_m}", flush=True)
 
         h_cur.close()
         return True
