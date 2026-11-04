@@ -100,31 +100,39 @@ def _close_connections(mysql_conn, hana_conn, tunnel):
 
 
 def fetch_available_months(cursor, schema, mysql_conn=None):
-    """Returns available YMONTH options for dropdown (e.g. ['202611', '202610', ...])."""
+    """Returns available YMONTH options for dropdown (current year and previous year, e.g. 2026 and 2025 = 24 months)."""
     months = []
+    now = datetime.now()
+    current_year = now.year
+    prev_year = current_year - 1
+    valid_prefixes = (str(current_year), str(prev_year))
+
     try:
         sql = f"""
             SELECT DISTINCT "YMONTH"
             FROM "{schema}"."ZIVF_SD_Sales_Plan_Target_01_TR"
             WHERE "YMONTH" IS NOT NULL AND LENGTH("YMONTH") = 6
+              AND ("YMONTH" LIKE '{current_year}%' OR "YMONTH" LIKE '{prev_year}%')
             ORDER BY "YMONTH" DESC
         """
         cursor.execute(sql)
         for r in cursor.fetchall():
             if r and r[0]:
-                months.append(str(r[0]).strip())
+                val = str(r[0]).strip()
+                if val.startswith(valid_prefixes):
+                    months.append(val)
     except Exception as e:
         print(f"[{TABLE_NAME}] Error fetching months from HANA: {e}", flush=True)
 
     if not months:
-        # Fallback default months
-        now = datetime.now()
-        for i in range(12):
-            dt = now - timedelta(days=i * 30)
-            months.append(dt.strftime("%Y%m"))
-        months = sorted(list(set(months)), reverse=True)
+        # Fallback: 24 months for current year and previous year
+        for y in [current_year, prev_year]:
+            for m in range(12, 0, -1):
+                months.append(f"{y}{str(m).zfill(2)}")
 
-    return months
+    # Strictly sorted descending and maximum 24 months (current + prev year)
+    months = sorted(list(set(months)), reverse=True)
+    return [m for m in months if str(m).startswith(valid_prefixes)][:24]
 
 
 def query_domestic_sales_value_achievement_hana(cursor, schema, year_month: str, selected_date: str):
