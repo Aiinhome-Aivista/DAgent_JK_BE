@@ -777,6 +777,23 @@ def get_all_kgraphs_controller(get_db_connection):
                 active_session_id = w.get("session_id")
                 break
 
+        # Read actual creation/update timestamp of active graph instead of datetime.now()
+        real_graph_time = None
+        if active_db and active_db.has_collection("session_metadata"):
+            try:
+                col_meta = active_db.collection("session_metadata")
+                if col_meta.has("kgraph_metadata_state"):
+                    doc_meta = col_meta.get("kgraph_metadata_state")
+                    if doc_meta and doc_meta.get("updated_at"):
+                        # Format ISO timestamp to standard string
+                        raw_dt = str(doc_meta.get("updated_at")).replace("T", " ")
+                        real_graph_time = raw_dt.split(".")[0]
+            except Exception:
+                pass
+
+        if not real_graph_time and active_workspace and active_workspace.get("created_at"):
+            real_graph_time = str(active_workspace.get("created_at"))
+
         primary_graph = {
             "id": active_workspace.get("id") if active_workspace else 1,
             "session_name": f"{active_ws_name} (Active)",
@@ -788,7 +805,7 @@ def get_all_kgraphs_controller(get_db_connection):
             "is_active": True,
             "in_use": True,
             "badge": "CURRENTLY IN USE",
-            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            "created_at": real_graph_time or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
         graphs.append(primary_graph)
         seen_keys.add(active_db_name)
