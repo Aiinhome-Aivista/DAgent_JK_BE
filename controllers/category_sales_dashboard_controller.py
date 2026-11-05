@@ -208,7 +208,7 @@ def calculate_category_sales_hana(cursor, schema, zone=None, year=None):
         UNION ALL
         SELECT s."DEALER_CODE", s."PLANT", s."SKU", s."INVOICE_VALUE", s."TAXABLE_VALUE", s."NDP_VALUE", s."INDICATOR_CANCEL", s."DISTRIBUTION_CHANNEL", s."invoice_date"
         FROM "{schema}"."ZPVF_SD_SalesHistory_01_TR" s
-        WHERE (s."INDICATOR_CANCEL" IS NULL OR s."INDICATOR_CANCEL NOT IN ('X', 'Y', '1'))
+        WHERE (s."INDICATOR_CANCEL" IS NULL OR s."INDICATOR_CANCEL" NOT IN ('X', 'Y', '1'))
           AND (s."DISTRIBUTION_CHANNEL" = 10 OR s."DISTRIBUTION_CHANNEL" = '10')
           {year_condition}
     ) cs
