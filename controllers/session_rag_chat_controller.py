@@ -3128,6 +3128,25 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                 run_query = re.sub(r'\bGROUP\s+BY\s*\(\s*\)', ' ', run_query, flags=re.IGNORECASE)
                                 run_query = re.sub(r'\bGROUP\s+BY\s*;\s*$', ';', run_query, flags=re.IGNORECASE)
                                 run_query = re.sub(r'\bGROUP\s+BY\s*$', '', run_query, flags=re.IGNORECASE)
+
+                                # Mandate Customer Master join and KLABC <> 'X' filter for all Sales Fact queries
+                                if is_hana and ("ZPVF_SD_CurrentSales_01_TR" in run_query or "ZPVF_SD_SalesHistory_01_TR" in run_query):
+                                    if "ZIVF_CustomerMaster_01_MD" not in run_query:
+                                        m_f = re.search(r'\"?ZPVF_SD_(?:CurrentSales|SalesHistory)_01_TR\"?\s+(?:AS\s+)?([a-zA-Z0-9_]+)', run_query, re.I)
+                                        f_alias = m_f.group(1) if m_f else "fact"
+                                        cm_join = f'\nJOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm ON ({f_alias}."dealer_code" = cm.KUNNR OR LTRIM({f_alias}."dealer_code", \'0\') = LTRIM(cm.KUNNR, \'0\'))\n'
+                                        if re.search(r'\bWHERE\b', run_query, re.I):
+                                            run_query = re.sub(r'(\bWHERE\b)', f'{cm_join}WHERE', run_query, count=1, flags=re.I)
+                                        else:
+                                            run_query += cm_join
+
+                                    if "KLABC" not in run_query:
+                                        k_filter = "(cm.KLABC IS NULL OR cm.KLABC <> 'X')"
+                                        if re.search(r'\bWHERE\s+', run_query, re.I):
+                                            run_query = re.sub(r'(\bWHERE\s+)', f'\\1{k_filter} AND ', run_query, count=1, flags=re.I)
+                                        else:
+                                            run_query += f'\nWHERE {k_filter}'
+
                                 sql_query = run_query
 
                                 print(f"[SQL_EXEC] Executing on SAP HANA:\n{run_query}")
