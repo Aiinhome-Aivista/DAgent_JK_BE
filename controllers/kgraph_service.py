@@ -261,6 +261,9 @@ def detect_drilldown(question, kg):
         for v in kg["dim_values"].get((t, c), []):
             if len(v) < 2:
                 continue
+            # 'tyre quantity' / 'tyre qty' refers to fact.Tyre_Quantity, NOT category drilldown
+            if v.lower() == "tyre" and re.search(r'\btyres?\s+(?:quantit|qty|volum|count|metric|invoice|ndp)', ql):
+                continue
             if re.search(r'\b' + re.escape(v.lower()) + r'\b', ql):
                 if matched is None or len(v) > len(matched[3]):
                     matched = (idx, t, c, v)

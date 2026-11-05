@@ -2389,6 +2389,9 @@ def _detect_drilldown(question, values_by_col, biz):
         for v in values_by_col.get((t, c), []):
             if len(v) < 2:
                 continue
+            # 'tyre quantity' / 'tyre qty' refers to fact.Tyre_Quantity, NOT category drilldown
+            if v.lower() == "tyre" and re.search(r'\btyres?\s+(?:quantit|qty|volum|count|metric|invoice|ndp)', ql):
+                continue
             if re.search(r'\b' + re.escape(v.lower()) + r'\b', ql):
                 if matched is None or len(v) > len(matched[3]):
                     matched = (idx, t, c, v)
@@ -3196,6 +3199,26 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                                 print(f"[SQL_EXEC] CurrentSales fallback SUCCESS! Returned {len(sql_results)} valid rows.")
                                     except Exception as h_ex:
                                         print(f"[SQL_EXEC] CurrentSales fallback error: {h_ex}")
+
+                                # Fallback 1c: If CategoryMaster/SKUMaster was erroneously joined on an overall aggregate query and returned 0 rows / all-null
+                                if not sql_results and "CategoryMaster" in run_query and not re.search(r'\b(category|sku|product)\b', question, re.I):
+                                    print("[SQL_EXEC] Fallback 1c: Stripping erroneous CategoryMaster/SKUMaster joins from overall aggregation...")
+                                    no_cat_q = re.sub(r'JOIN\s+"?SAP_S4"?\.?"?ZIV[RF]_CategoryMaster_01_TR"?\s+[a-zA-Z0-9_]+\s+ON[^\n]+', ' ', run_query, flags=re.I)
+                                    no_cat_q = re.sub(r'JOIN\s+"?SAP_S4"?\.?"?ZIVR_SKUMaster_01_TR"?\s+[a-zA-Z0-9_]+\s+ON[^\n]+', ' ', no_cat_q, flags=re.I)
+                                    no_cat_q = re.sub(r'AND\s+UPPER\(TRIM\([a-zA-Z0-9_]+\.CAT_DESC\)\)\s*=\s*\'[^\']+\'', ' ', no_cat_q, flags=re.I)
+                                    try:
+                                        cur_sql.execute(no_cat_q)
+                                        h_rows = cur_sql.fetchall()
+                                        if h_rows:
+                                            cols = [desc[0] for desc in cur_sql.description] if cur_sql.description else []
+                                            candidate_results = [dict(zip(cols, r)) for r in h_rows]
+                                            if not (len(candidate_results) == 1 and all(v is None for v in candidate_results[0].values())):
+                                                sql_results = candidate_results
+                                                run_query = no_cat_q
+                                                sql_query = no_cat_q
+                                                print(f"[SQL_EXEC] Stripped Category fallback SUCCESS! Returned {len(sql_results)} valid rows.")
+                                    except Exception as c_ex:
+                                        print(f"[SQL_EXEC] Stripped Category fallback error: {c_ex}")
 
                                 # Fallback 2: If still 0 rows, check if distribution_channel = '10' is filtering out all records
                                 if not sql_results and "distribution_channel" in run_query:
