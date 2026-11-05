@@ -294,22 +294,30 @@ def query_domestic_sales_value_achievement_hana(cursor, schema, year_month: str,
             S."invoice_value",
 
             CASE
-                WHEN UPPER(TRIM(C."CAT_DESC")) IN
-                     ('MOTOR', '3WH', 'SCOOTER')
-                    THEN '2/3 Wheelers'
-                ELSE '4 Wheelers'
+                WHEN S."distribution_channel" = '10' THEN
+                    CASE
+                        WHEN UPPER(TRIM(C."CAT_DESC")) IN ('MOTOR', '3WH', 'SCOOTER')
+                          OR UPPER(TRIM(C."CAT_DESC")) LIKE '%SCOOTER%'
+                          OR UPPER(TRIM(C."CAT_DESC")) LIKE '%MOTOR%'
+                          OR UPPER(TRIM(C."CAT_DESC")) LIKE '%3%WH%'
+                            THEN '2/3 Wheelers'
+                        ELSE '4 Wheelers'
+                    END
+                WHEN S."distribution_channel" IN ('20', '40') THEN 'OEM + DEF'
+                WHEN S."distribution_channel" = '30' THEN 'STU'
+                ELSE 'Other'
             END AS MARKET_SEGMENT
 
         FROM VALID_SALES S
 
-        INNER JOIN "{schema}"."ZIVR_SKUMaster_01_TR" M
+        LEFT JOIN "{schema}"."ZIVR_SKUMaster_01_TR" M
             ON TRIM(S."SKU") = TRIM(M."MATNR")
 
-        INNER JOIN "{schema}"."ZIVF_CategoryMaster_01_TR" C
+        LEFT JOIN "{schema}"."ZIVF_CategoryMaster_01_TR" C
             ON M."CAT_CODE" = C."CAT_CODE"
 
         WHERE
-            C."CAT_CODE" NOT IN ('TR', 'NT', 'AL', 'IE')
+            C."CAT_CODE" IS NULL OR C."CAT_CODE" NOT IN ('TR', 'NT', 'AL', 'IE')
     ),
 
     SALES_SUMMARY AS
@@ -398,12 +406,22 @@ def query_domestic_sales_value_achievement_hana(cursor, schema, year_month: str,
 
     MARKET_SEGMENTS AS
     (
+        SELECT '4 Wheelers' AS MARKET_SEGMENT
+        FROM DUMMY
+
+        UNION ALL
+
         SELECT '2/3 Wheelers' AS MARKET_SEGMENT
         FROM DUMMY
 
         UNION ALL
 
-        SELECT '4 Wheelers' AS MARKET_SEGMENT
+        SELECT 'OEM + DEF' AS MARKET_SEGMENT
+        FROM DUMMY
+
+        UNION ALL
+
+        SELECT 'STU' AS MARKET_SEGMENT
         FROM DUMMY
     )
 
@@ -456,82 +474,90 @@ def query_domestic_sales_value_achievement_hana(cursor, schema, year_month: str,
     ORDER BY
         CASE
             WHEN MS.MARKET_SEGMENT = '4 Wheelers' THEN 1
-            ELSE 2
+            WHEN MS.MARKET_SEGMENT = '2/3 Wheelers' THEN 2
+            WHEN MS.MARKET_SEGMENT = 'OEM + DEF' THEN 3
+            WHEN MS.MARKET_SEGMENT = 'STU' THEN 4
+            ELSE 5
         END
     """
     sanitize_and_execute_hana(cursor, schema, hana_sql)
     cols = [d[0].upper() for d in cursor.description]
     raw_rows = [dict(zip(cols, r)) for r in cursor.fetchall()]
 
-    # Format rows and compute 'Repl (4 & 2/3 Whlrs)' total row
-    # Invoice values in Lakhs (divide by 100,000 for display matching user's Excel/UI)
-    # Check magnitude: if raw values are in Rupees (>1,000,000), divide by 100,000 to show in Lakhs
+    # Format rows and compute all 7 market segments matching user's Excel/UI:
+    # 1. 4 Wheelers (Distribution Channel 10, non-2/3W)
+    # 2. 2/3 Wheelers (Distribution Channel 10, Scooter / Motor Cycle / 3WH)
+    # 3. Repl (4 & 2/3 Whlrs) - Subtotal (Row 1 + Row 2)
+    # 4. OEM + DEF (Distribution Channels 20 & 40)
+    # 5. STU (Distribution Channel 30)
+    # 6. OEM + STU + DEF - Subtotal (Row 4 + Row 5)
+    # 7. Domestic - Grand Total (Row 3 + Row 6)
     scale = 100000.0
     four_w = next((r for r in raw_rows if r.get("MARKET_SEGMENT") == "4 Wheelers"), {})
     two_three_w = next((r for r in raw_rows if r.get("MARKET_SEGMENT") == "2/3 Wheelers"), {})
+    oem_def = next((r for r in raw_rows if r.get("MARKET_SEGMENT") == "OEM + DEF"), {})
+    stu = next((r for r in raw_rows if r.get("MARKET_SEGMENT") == "STU"), {})
 
     def _val(row, k):
         v = float(row.get(k) or 0)
         return round(v / scale, 2) if v > 100000 else round(v, 2)
 
-    f_month = _val(four_w, "PREVIOUS_YEAR_ACTUAL_MONTH")
-    f_mtd = _val(four_w, "PREVIOUS_YEAR_ACTUAL_MTD")
-    f_tgt = _val(four_w, "TARGET")
-    f_act = _val(four_w, "ACTUAL")
-    f_day = _val(four_w, "SALE_FOR_THE_DAY")
-    f_achv = round((f_act * 100.0 / f_tgt), 2) if f_tgt > 0 else 0.0
-    f_grth = round(((f_act - f_mtd) * 100.0 / f_mtd), 2) if f_mtd > 0 else 0.0
+    def _calc_row(name, row_dict, is_tot=False):
+        m = _val(row_dict, "PREVIOUS_YEAR_ACTUAL_MONTH")
+        mtd = _val(row_dict, "PREVIOUS_YEAR_ACTUAL_MTD")
+        tgt = _val(row_dict, "TARGET")
+        act = _val(row_dict, "ACTUAL")
+        day = _val(row_dict, "SALE_FOR_THE_DAY")
+        achv = round((act * 100.0 / tgt), 2) if tgt > 0 else 0.0
+        grth = round(((act - mtd) * 100.0 / mtd), 2) if mtd > 0 else 0.0
+        return {
+            "market_segment": name,
+            "prev_year_actual_month": m,
+            "prev_year_actual_mtd": mtd,
+            "target": tgt,
+            "actual": act,
+            "achievement_pct": achv,
+            "sale_for_the_day": day,
+            "growth_over_lysmt": grth,
+            "is_total": is_tot
+        }
 
-    t_month = _val(two_three_w, "PREVIOUS_YEAR_ACTUAL_MONTH")
-    t_mtd = _val(two_three_w, "PREVIOUS_YEAR_ACTUAL_MTD")
-    t_tgt = _val(two_three_w, "TARGET")
-    t_act = _val(two_three_w, "ACTUAL")
-    t_day = _val(two_three_w, "SALE_FOR_THE_DAY")
-    t_achv = round((t_act * 100.0 / t_tgt), 2) if t_tgt > 0 else 0.0
-    t_grth = round(((t_act - t_mtd) * 100.0 / t_mtd), 2) if t_mtd > 0 else 0.0
+    def _sum_rows(name, row_a, row_b, is_tot=True):
+        m = round(row_a["prev_year_actual_month"] + row_b["prev_year_actual_month"], 2)
+        mtd = round(row_a["prev_year_actual_mtd"] + row_b["prev_year_actual_mtd"], 2)
+        tgt = round(row_a["target"] + row_b["target"], 2)
+        act = round(row_a["actual"] + row_b["actual"], 2)
+        day = round(row_a["sale_for_the_day"] + row_b["sale_for_the_day"], 2)
+        achv = round((act * 100.0 / tgt), 2) if tgt > 0 else 0.0
+        grth = round(((act - mtd) * 100.0 / mtd), 2) if mtd > 0 else 0.0
+        return {
+            "market_segment": name,
+            "prev_year_actual_month": m,
+            "prev_year_actual_mtd": mtd,
+            "target": tgt,
+            "actual": act,
+            "achievement_pct": achv,
+            "sale_for_the_day": day,
+            "growth_over_lysmt": grth,
+            "is_total": is_tot
+        }
 
-    tot_month = round(f_month + t_month, 2)
-    tot_mtd = round(f_mtd + t_mtd, 2)
-    tot_tgt = round(f_tgt + t_tgt, 2)
-    tot_act = round(f_act + t_act, 2)
-    tot_day = round(f_day + t_day, 2)
-    tot_achv = round((tot_act * 100.0 / tot_tgt), 2) if tot_tgt > 0 else 0.0
-    tot_grth = round(((tot_act - tot_mtd) * 100.0 / tot_mtd), 2) if tot_mtd > 0 else 0.0
+    r_4w = _calc_row("4 Wheelers", four_w, is_tot=False)
+    r_23w = _calc_row("2/3 Wheelers", two_three_w, is_tot=False)
+    r_repl = _sum_rows("Repl (4 & 2/3 Whlrs)", r_4w, r_23w, is_tot=True)
+    r_oem_def = _calc_row("OEM + DEF", oem_def, is_tot=False)
+    r_stu = _calc_row("STU", stu, is_tot=False)
+    r_oem_stu_def = _sum_rows("OEM + STU + DEF", r_oem_def, r_stu, is_tot=True)
+    r_domestic = _sum_rows("Domestic", r_repl, r_oem_stu_def, is_tot=True)
 
     result_rows = [
-        {
-            "market_segment": "4 Wheelers",
-            "prev_year_actual_month": f_month,
-            "prev_year_actual_mtd": f_mtd,
-            "target": f_tgt,
-            "actual": f_act,
-            "achievement_pct": f_achv,
-            "sale_for_the_day": f_day,
-            "growth_over_lysmt": f_grth,
-            "is_total": False
-        },
-        {
-            "market_segment": "2/3 Wheelers",
-            "prev_year_actual_month": t_month,
-            "prev_year_actual_mtd": t_mtd,
-            "target": t_tgt,
-            "actual": t_act,
-            "achievement_pct": t_achv,
-            "sale_for_the_day": t_day,
-            "growth_over_lysmt": t_grth,
-            "is_total": False
-        },
-        {
-            "market_segment": "Repl (4 & 2/3 Whlrs)",
-            "prev_year_actual_month": tot_month,
-            "prev_year_actual_mtd": tot_mtd,
-            "target": tot_tgt,
-            "actual": tot_act,
-            "achievement_pct": tot_achv,
-            "sale_for_the_day": tot_day,
-            "growth_over_lysmt": tot_grth,
-            "is_total": True
-        }
+        r_4w,
+        r_23w,
+        r_repl,
+        r_oem_def,
+        r_stu,
+        r_oem_stu_def,
+        r_domestic
     ]
     return result_rows
 
@@ -550,7 +576,12 @@ def get_cached_data(mysql_conn, session_id: str, year_month: str):
                 CASE 
                     WHEN `market_segment` = '4 Wheelers' THEN 1
                     WHEN `market_segment` = '2/3 Wheelers' THEN 2
-                    ELSE 3
+                    WHEN `market_segment` = 'Repl (4 & 2/3 Whlrs)' THEN 3
+                    WHEN `market_segment` = 'OEM + DEF' THEN 4
+                    WHEN `market_segment` = 'STU' THEN 5
+                    WHEN `market_segment` = 'OEM + STU + DEF' THEN 6
+                    WHEN `market_segment` = 'Domestic' THEN 7
+                    ELSE 8
                 END
         """, (str(session_id).strip(), str(year_month).strip()))
         rows = cur.fetchall()
@@ -572,7 +603,7 @@ def get_cached_data(mysql_conn, session_id: str, year_month: str):
                 "achievement_pct": float(r.get("achievement_pct") or 0),
                 "sale_for_the_day": float(r.get("sale_for_the_day") or 0),
                 "growth_over_lysmt": float(r.get("growth_over_lysmt") or 0),
-                "is_total": "Repl" in seg
+                "is_total": "Repl" in seg or "OEM + STU + DEF" in seg or seg == "Domestic"
             })
         return {"data": result, "selected_date": sel_date, "_last_synced_at": str(last_sync) if last_sync else None}
     except Exception as e:
@@ -759,18 +790,13 @@ def get_domestic_sales_value_achievement_controller(get_db_connection):
             h_cur.close()
         else:
             rows = [
-                {
-                    "market_segment": "4 Wheelers", "prev_year_actual_month": 0, "prev_year_actual_mtd": 0,
-                    "target": 0, "actual": 0, "achievement_pct": 0, "sale_for_the_day": 0, "growth_over_lysmt": 0, "is_total": False
-                },
-                {
-                    "market_segment": "2/3 Wheelers", "prev_year_actual_month": 0, "prev_year_actual_mtd": 0,
-                    "target": 0, "actual": 0, "achievement_pct": 0, "sale_for_the_day": 0, "growth_over_lysmt": 0, "is_total": False
-                },
-                {
-                    "market_segment": "Repl (4 & 2/3 Whlrs)", "prev_year_actual_month": 0, "prev_year_actual_mtd": 0,
-                    "target": 0, "actual": 0, "achievement_pct": 0, "sale_for_the_day": 0, "growth_over_lysmt": 0, "is_total": True
-                }
+                {"market_segment": "4 Wheelers", "prev_year_actual_month": 0, "prev_year_actual_mtd": 0, "target": 0, "actual": 0, "achievement_pct": 0, "sale_for_the_day": 0, "growth_over_lysmt": 0, "is_total": False},
+                {"market_segment": "2/3 Wheelers", "prev_year_actual_month": 0, "prev_year_actual_mtd": 0, "target": 0, "actual": 0, "achievement_pct": 0, "sale_for_the_day": 0, "growth_over_lysmt": 0, "is_total": False},
+                {"market_segment": "Repl (4 & 2/3 Whlrs)", "prev_year_actual_month": 0, "prev_year_actual_mtd": 0, "target": 0, "actual": 0, "achievement_pct": 0, "sale_for_the_day": 0, "growth_over_lysmt": 0, "is_total": True},
+                {"market_segment": "OEM + DEF", "prev_year_actual_month": 0, "prev_year_actual_mtd": 0, "target": 0, "actual": 0, "achievement_pct": 0, "sale_for_the_day": 0, "growth_over_lysmt": 0, "is_total": False},
+                {"market_segment": "STU", "prev_year_actual_month": 0, "prev_year_actual_mtd": 0, "target": 0, "actual": 0, "achievement_pct": 0, "sale_for_the_day": 0, "growth_over_lysmt": 0, "is_total": False},
+                {"market_segment": "OEM + STU + DEF", "prev_year_actual_month": 0, "prev_year_actual_mtd": 0, "target": 0, "actual": 0, "achievement_pct": 0, "sale_for_the_day": 0, "growth_over_lysmt": 0, "is_total": True},
+                {"market_segment": "Domestic", "prev_year_actual_month": 0, "prev_year_actual_mtd": 0, "target": 0, "actual": 0, "achievement_pct": 0, "sale_for_the_day": 0, "growth_over_lysmt": 0, "is_total": True}
             ]
 
         # 6. Save into cache table
