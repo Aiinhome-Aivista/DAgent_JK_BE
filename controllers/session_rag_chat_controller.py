@@ -448,8 +448,8 @@ def _load_hana(session_id, get_fn):
         biz_rules = """[SCHEMA] db:SAP_S4 table:BUSINESS_RELATIONSHIPS_AND_RULES
 SAP S/4HANA Sales & Distribution (SD) Architecture and Table Context:
 1. Fact Views:
-   - ZPVF_SD_SalesHistory_01_TR: Historical Invoices Fact view (~30,044,097 rows, years 2006 to 2025). Use for historical period queries, multi-year trends, and prior period sales.
-   - ZPVF_SD_CurrentSales_01_TR: Current Period MTD Invoices Fact view (~1,000,000 rows, year 2026). Use for current period / MTD sales questions, top customers, and general sales analysis.
+   - ZPVF_SD_SalesHistory_01_TR: Historical Invoices Fact view (~30,044,097 rows). Contains ALL historical invoices for ALL months and years prior to the active current rolling month. If the user asks for ANY month, quarter, or year prior to the current month, you MUST query ZPVF_SD_SalesHistory_01_TR!
+   - ZPVF_SD_CurrentSales_01_TR: Current Period MTD Invoices Fact view (~1,000,000 rows). ONLY contains transactions for the active current rolling month. For ANY prior month, DO NOT use CurrentSales; query ZPVF_SD_SalesHistory_01_TR!
    - ZPVF_SD_CancelledSalesInvoice_01_TR: Cancelled Invoices Reference view (~50,000 rows). Contains list of cancelled invoices.
    - ZIVF_SD_Sales_Plan_Target_01_TR: Sales Plan & Target view (~200,000 rows). Target Value is PLAN_VALUE (or REV_PLAN_VAL), Target Qty is ORG_PLAN (or REV_PLAN).
    CRITICAL SAP HANA CASING FOR FACT COLUMNS (MUST USE DOUBLE QUOTES):
@@ -1323,9 +1323,8 @@ Generate clean, highly efficient, and 100% syntactically correct SAP HANA SQL th
 SCHEMA & BUSINESS DEFINITIONS:
 1. TARGET SCHEMA / VIEWS:
    - Schema: "SAP_S4"
-   - Fact Views:
-     * "SAP_S4"."ZPVF_SD_CurrentSales_01_TR" (Current Period / Rolling MTD Sales Fact View - FAST, use for current sales, top customers, recent data)
-     * "SAP_S4"."ZPVF_SD_SalesHistory_01_TR" (Historical Sales Fact View - use for multi-year trends or historical prior periods)
+   - Fact Views:     * "SAP_S4"."ZPVF_SD_CurrentSales_01_TR" (Current Period / Rolling MTD Sales Fact View - ONLY active current rolling month. FAST)
+     * "SAP_S4"."ZPVF_SD_SalesHistory_01_TR" (Historical Sales Fact View - contains all past history for all months and years prior to the current rolling month. For ANY past month or historical period prior to the current month, ALWAYS query this view)
      * "SAP_S4"."ZPVF_SD_CancelledSalesInvoice_01_TR" (Cancelled Sales Invoices Reference View)
      * "SAP_S4"."ZIVF_SD_Sales_Plan_Target_01_TR" (Sales Plan & Target View: Target Revenue = PLAN_VALUE, Target Qty = ORG_PLAN)
    
@@ -2730,9 +2729,21 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
         if not sql_sys or not sql_sys.strip():
             sql_sys = DEFAULT_SQL_SYS
 
+        now_dt = datetime.datetime.now()
+        current_ymonth = now_dt.strftime("%Y%m")
+        current_month_name = now_dt.strftime("%B %Y")
+
         sql_user = f"Schemas available:\n{schema_context}\n\nOriginal Question: {question}\n\nCanonical Query (Structured Intent):\n{canonical_query_str}"
         if "SAP_S4" in schema_context or "ZPVF_" in schema_context:
             sql_user += (
+                f"\n\nCRITICAL DYNAMIC TABLE ROUTING MANDATE (Active System Month: {current_month_name} / YMONTH: {current_ymonth}):\n"
+                f"1. \"SAP_S4\".\"ZPVF_SD_CurrentSales_01_TR\": Contains ONLY the CURRENT active rolling month ({current_month_name}) MTD sales transactions.\n"
+                f"2. \"SAP_S4\".\"ZPVF_SD_SalesHistory_01_TR\": Contains ALL HISTORICAL transactions for ALL months and years prior to the current rolling month.\n"
+                f"3. DYNAMIC ROUTING RULE:\n"
+                f"   - If the user asks for ANY month, quarter, or year PRIOR to the current rolling month (i.e. any period before {current_month_name}, including past months of this year or previous years), you MUST query \"SAP_S4\".\"ZPVF_SD_SalesHistory_01_TR\"!\n"
+                f"   - NEVER query CurrentSales for past months; CurrentSales only holds the active rolling current month and will return NULL for past dates.\n"
+                f"   - If the user asks for current month, today, MTD, or recent live sales, query \"SAP_S4\".\"ZPVF_SD_CurrentSales_01_TR\".\n"
+                f"   - If the user asks for all-time sales or a period spanning both past and current months, use UNION ALL of both fact views.\n"
                 "\n\nCRITICAL MANDATE FOR NAMES & DESCRIPTIONS:\n"
                 "When the question asks for customers, products, categories, territories, regions, or zones, "
                 "you MUST join the corresponding Master table to the point and SELECT the human-readable NAME / DESCRIPTION:\n"
@@ -3122,11 +3133,16 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                             if status_callback:
                                 status_callback("computing", intent=intent, row_count=len(sql_results) if sql_results else 0)
 
-                            # ── SMART 0-ROW FALLBACK (SAP HANA) ──
-                            if is_hana and not sql_results:
-                                print("[SQL_EXEC] 0 rows returned from SAP HANA query. Attempting smart fallbacks...")
+                            # ── SMART 0-ROW / ALL-NULL FALLBACK (SAP HANA) ──
+                            is_empty_or_all_null = not sql_results or (
+                                len(sql_results) == 1 and isinstance(sql_results[0], dict) and all(v is None for v in sql_results[0].values())
+                            )
+                            if is_hana and is_empty_or_all_null:
+                                print(f"[SQL_EXEC] 0 rows or all-NULL aggregation returned from SAP HANA query. Attempting smart fallbacks...")
+                                if sql_results:
+                                    sql_results = []
                                 
-                                # Fallback 1: If CurrentSales view returned 0 rows, try SalesHistory view
+                                # Fallback 1: If CurrentSales view returned 0 rows or all-NULL, try SalesHistory view
                                 if "ZPVF_SD_CurrentSales_01_TR" in run_query:
                                     print("[SQL_EXEC] Fallback 1: Retrying on SalesHistory view instead of CurrentSales...")
                                     alt_query = run_query.replace("ZPVF_SD_CurrentSales_01_TR", "ZPVF_SD_SalesHistory_01_TR")
@@ -3135,14 +3151,16 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                         h_rows = cur_sql.fetchall()
                                         if h_rows:
                                             cols = [desc[0] for desc in cur_sql.description] if cur_sql.description else []
-                                            sql_results = [dict(zip(cols, r)) for r in h_rows]
-                                            run_query = alt_query
-                                            sql_query = alt_query
-                                            print(f"[SQL_EXEC] SalesHistory fallback SUCCESS! Returned {len(sql_results)} rows.")
+                                            candidate_results = [dict(zip(cols, r)) for r in h_rows]
+                                            if not (len(candidate_results) == 1 and all(v is None for v in candidate_results[0].values())):
+                                                sql_results = candidate_results
+                                                run_query = alt_query
+                                                sql_query = alt_query
+                                                print(f"[SQL_EXEC] SalesHistory fallback SUCCESS! Returned {len(sql_results)} valid rows.")
                                     except Exception as h_ex:
                                         print(f"[SQL_EXEC] SalesHistory fallback error: {h_ex}")
 
-                                # Fallback 1b: If SalesHistory view returned 0 rows, try CurrentSales view
+                                # Fallback 1b: If SalesHistory view returned 0 rows or all-NULL, try CurrentSales view
                                 if not sql_results and "ZPVF_SD_SalesHistory_01_TR" in run_query:
                                     print("[SQL_EXEC] Fallback 1b: Retrying on CurrentSales view instead of SalesHistory...")
                                     alt_query = run_query.replace("ZPVF_SD_SalesHistory_01_TR", "ZPVF_SD_CurrentSales_01_TR")
@@ -3151,10 +3169,12 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                         h_rows = cur_sql.fetchall()
                                         if h_rows:
                                             cols = [desc[0] for desc in cur_sql.description] if cur_sql.description else []
-                                            sql_results = [dict(zip(cols, r)) for r in h_rows]
-                                            run_query = alt_query
-                                            sql_query = alt_query
-                                            print(f"[SQL_EXEC] CurrentSales fallback SUCCESS! Returned {len(sql_results)} rows.")
+                                            candidate_results = [dict(zip(cols, r)) for r in h_rows]
+                                            if not (len(candidate_results) == 1 and all(v is None for v in candidate_results[0].values())):
+                                                sql_results = candidate_results
+                                                run_query = alt_query
+                                                sql_query = alt_query
+                                                print(f"[SQL_EXEC] CurrentSales fallback SUCCESS! Returned {len(sql_results)} valid rows.")
                                     except Exception as h_ex:
                                         print(f"[SQL_EXEC] CurrentSales fallback error: {h_ex}")
 
