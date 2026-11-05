@@ -1382,6 +1382,14 @@ SCHEMA & BUSINESS DEFINITIONS:
    - Distribution channel: If the user explicitly asks for a distribution channel or dealer channel, filter fact."distribution_channel" = '10' (as string literal). If not mentioned in the query, DO NOT filter by distribution channel so all valid sales are included!
    - Cancellation check: AND (fact."indicator_cancel" IS NULL OR fact."indicator_cancel" NOT IN ('X', 'Y', '1')).
      DO NOT join ZPVF_SD_CancelledSalesInvoice_01_TR.
+   - AGGREGATION VS BREAKDOWN RULE:
+     * When the user asks for total/overall metrics (e.g. "total volume", "total invoice value", "total NDP value", "total tyre quantity", "total replacement sales for [month]"), aggregate directly: SELECT SUM(fact."volume"), SUM(fact."ndp_value"), SUM(fact."invoice_value"), SUM(fact."Tyre_Quantity").
+     * MANDATORY CUSTOMER MASTER FILTER FOR ALL SALES:
+       To match official SAP Analytics (Zsales_test), ALL sales queries MUST join Customer Master to exclude invalid/test/scrap accounts (KLABC = 'X'):
+       JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm ON (fact."dealer_code" = cm.KUNNR OR LTRIM(fact."dealer_code", '0') = LTRIM(cm.KUNNR, '0'))
+       WHERE ... AND (cm.KLABC IS NULL OR cm.KLABC <> 'X')
+     * DO NOT join SKUMaster or CategoryMaster and DO NOT group by product unless the question explicitly asks for a product breakdown (e.g. "by product", "by SKU", "by category", "top 5 products").
+     * CRITICAL: "tyre quantity" refers directly to the fact column fact."Tyre_Quantity". It does NOT mean filtering by cat.CAT_DESC = 'TYRE' or grouping by SKU!
    - MASTER TABLES & DESCRIPTIVE NAMES / DESCRIPTIONS MANDATE:
      Whenever the user query asks for Customers, Dealers, Products, Materials, SKUs, Categories, Territories, Regions, or Zones:
      YOU MUST JOIN THE CORRESPONDING MASTER TABLE TO FETCH THE HUMAN-READABLE NAME/DESCRIPTION.
@@ -2739,7 +2747,11 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                 f"\n\nCRITICAL DYNAMIC TABLE ROUTING MANDATE (Active System Month: {current_month_name} / YMONTH: {current_ymonth}):\n"
                 f"1. \"SAP_S4\".\"ZPVF_SD_CurrentSales_01_TR\": Contains ONLY the CURRENT active rolling month ({current_month_name}) MTD sales transactions.\n"
                 f"2. \"SAP_S4\".\"ZPVF_SD_SalesHistory_01_TR\": Contains ALL HISTORICAL transactions for ALL months and years prior to the current rolling month.\n"
-                f"3. DYNAMIC ROUTING RULE:\n"
+                f"3. MANDATORY CUSTOMER MASTER FILTER (KLABC <> 'X'):\n"
+                f"   - Official SAP Analytics (Zsales_test) requires excluding invalid/scrap accounts (KLABC = 'X').\n"
+                f"   - ALWAYS JOIN \"SAP_S4\".\"ZIVF_CustomerMaster_01_MD\" cm ON (fact.\"dealer_code\" = cm.KUNNR OR LTRIM(fact.\"dealer_code\", '0') = LTRIM(cm.KUNNR, '0'))\n"
+                f"   - ALWAYS filter: AND (cm.KLABC IS NULL OR cm.KLABC <> 'X')\n"
+                f"4. DYNAMIC ROUTING RULE:\n"
                 f"   - If the user asks for ANY month, quarter, or year PRIOR to the current rolling month (i.e. any period before {current_month_name}, including past months of this year or previous years), you MUST query \"SAP_S4\".\"ZPVF_SD_SalesHistory_01_TR\"!\n"
                 f"   - NEVER query CurrentSales for past months; CurrentSales only holds the active rolling current month and will return NULL for past dates.\n"
                 f"   - If the user asks for current month, today, MTD, or recent live sales, query \"SAP_S4\".\"ZPVF_SD_CurrentSales_01_TR\".\n"
