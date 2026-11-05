@@ -1015,7 +1015,11 @@ def _compute_core_kpis(cursor) -> dict:
     if is_sap and sku_tbl:
         run("top_construction", f"""
             SELECT
-                COALESCE(sk.CONSTUCTION, sk.BULD_TYPE, 'Unmapped Construction') AS construction_description,
+                CASE 
+                    WHEN UPPER(TRIM(sk.CONSTUCTION)) IN ('2', 'RADIAL') OR UPPER(TRIM(sk.CONSTUCTION)) LIKE '%RADIAL%' THEN 'Radial'
+                    WHEN UPPER(TRIM(sk.CONSTUCTION)) IN ('1', 'BIAS') OR UPPER(TRIM(sk.CONSTUCTION)) LIKE '%BIAS%' THEN 'Bias'
+                    ELSE COALESCE(NULLIF(TRIM(sk.CONSTUCTION), ''), NULLIF(TRIM(sk.BULD_TYPE), ''), 'Unmapped Construction')
+                END AS construction_description,
                 ROUND(SUM(sd.{col_revenue})/10000000, 2) AS Revenue
             FROM `{sales_tbl}` sd
             JOIN `{sku_tbl}` sk ON sd.{col_sku} = sk.MATNR
@@ -1040,33 +1044,33 @@ def _compute_core_kpis(cursor) -> dict:
             """, required_tables=[sales_tbl, sku_tbl, cons_tbl])
 
 
-    # Tyre Type
-    if is_sap and sku_tbl:
-        run("top_tyre_type", f"""
-            SELECT
-                COALESCE(sk.TYRE_TYPE, sk.TYRE_TP, sk.TT_TYPE, 'Unmapped Tyre Type') AS tyre_type_name,
-                ROUND(SUM(sd.{col_revenue})/10000000, 2) AS Revenue
-            FROM `{sales_tbl}` sd
-            JOIN `{sku_tbl}` sk ON sd.{col_sku} = sk.MATNR
-            WHERE (sk.TYRE_TYPE IS NOT NULL AND sk.TYRE_TYPE != '') OR (sk.TYRE_TP IS NOT NULL AND sk.TYRE_TP != '')
-            GROUP BY tyre_type_name
-            ORDER BY Revenue DESC
-            LIMIT 1
-        """, required_tables=[sales_tbl, sku_tbl])
-    elif sku_tbl:
-        tt_tbl = resolve("tyre_type_master")
-        if tt_tbl:
-            run("top_tyre_type", f"""
-                SELECT
-                    COALESCE(tt.tyre_type_name, 'Unmapped Tyre Type') AS tyre_type_name,
-                    ROUND(SUM(sd.{col_revenue})/10000000, 2) AS Revenue
-                FROM `{sales_tbl}` sd
-                JOIN `{sku_tbl}` sk ON sd.{col_sku} = sk.MATNR
-                JOIN `{tt_tbl}` tt ON sk.tyre_type = tt.tyre_type_code
-                GROUP BY tyre_type_name
-                ORDER BY Revenue DESC
-                LIMIT 1
-            """, required_tables=[sales_tbl, sku_tbl, tt_tbl])
+    # Tyre Type (commented out per UI request)
+    # if is_sap and sku_tbl:
+    #     run("top_tyre_type", f"""
+    #         SELECT
+    #             COALESCE(sk.TYRE_TYPE, sk.TYRE_TP, sk.TT_TYPE, 'Unmapped Tyre Type') AS tyre_type_name,
+    #             ROUND(SUM(sd.{col_revenue})/10000000, 2) AS Revenue
+    #         FROM `{sales_tbl}` sd
+    #         JOIN `{sku_tbl}` sk ON sd.{col_sku} = sk.MATNR
+    #         WHERE (sk.TYRE_TYPE IS NOT NULL AND sk.TYRE_TYPE != '') OR (sk.TYRE_TP IS NOT NULL AND sk.TYRE_TP != '')
+    #         GROUP BY tyre_type_name
+    #         ORDER BY Revenue DESC
+    #         LIMIT 1
+    #     """, required_tables=[sales_tbl, sku_tbl])
+    # elif sku_tbl:
+    #     tt_tbl = resolve("tyre_type_master")
+    #     if tt_tbl:
+    #         run("top_tyre_type", f"""
+    #             SELECT
+    #                 COALESCE(tt.tyre_type_name, 'Unmapped Tyre Type') AS tyre_type_name,
+    #                 ROUND(SUM(sd.{col_revenue})/10000000, 2) AS Revenue
+    #             FROM `{sales_tbl}` sd
+    #             JOIN `{sku_tbl}` sk ON sd.{col_sku} = sk.MATNR
+    #             JOIN `{tt_tbl}` tt ON sk.tyre_type = tt.tyre_type_code
+    #             GROUP BY tyre_type_name
+    #             ORDER BY Revenue DESC
+    #             LIMIT 1
+    #         """, required_tables=[sales_tbl, sku_tbl, tt_tbl])
 
 
     # Top/Bottom 5 Products
@@ -1795,27 +1799,36 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
     if sku_view:
         run("top_construction", f"""
             SELECT
-                COALESCE(NULLIF(TRIM(sk."CONSTUCTION"), ''), NULLIF(TRIM(sk."BULD_TYPE"), ''), 'Unknown') AS construction_description,
+                CASE 
+                    WHEN UPPER(TRIM(sk."CONSTUCTION")) IN ('2', 'RADIAL') OR UPPER(TRIM(sk."CONSTUCTION")) LIKE '%RADIAL%' THEN 'Radial'
+                    WHEN UPPER(TRIM(sk."CONSTUCTION")) IN ('1', 'BIAS') OR UPPER(TRIM(sk."CONSTUCTION")) LIKE '%BIAS%' THEN 'Bias'
+                    ELSE COALESCE(NULLIF(TRIM(sk."CONSTUCTION"), ''), NULLIF(TRIM(sk."BULD_TYPE"), ''), 'Unknown')
+                END AS construction_description,
                 ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue
             FROM "{schema}"."{sales_view}" s
             INNER JOIN "{schema}"."{sku_view}" sk ON TRIM(s."SKU") = TRIM(sk."MATNR")
             {sales_where}
-            GROUP BY COALESCE(NULLIF(TRIM(sk."CONSTUCTION"), ''), NULLIF(TRIM(sk."BULD_TYPE"), ''), 'Unknown')
+            GROUP BY CASE 
+                WHEN UPPER(TRIM(sk."CONSTUCTION")) IN ('2', 'RADIAL') OR UPPER(TRIM(sk."CONSTUCTION")) LIKE '%RADIAL%' THEN 'Radial'
+                WHEN UPPER(TRIM(sk."CONSTUCTION")) IN ('1', 'BIAS') OR UPPER(TRIM(sk."CONSTUCTION")) LIKE '%BIAS%' THEN 'Bias'
+                ELSE COALESCE(NULLIF(TRIM(sk."CONSTUCTION"), ''), NULLIF(TRIM(sk."BULD_TYPE"), ''), 'Unknown')
+            END
             ORDER BY revenue DESC
             LIMIT 1
         """)
 
-        run("top_tyre_type", f"""
-            SELECT
-                COALESCE(NULLIF(TRIM(sk."TYRE_TYPE"), ''), NULLIF(TRIM(sk."TYRE_TP"), ''), 'Unknown') AS tyre_type_name,
-                ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue
-            FROM "{schema}"."{sales_view}" s
-            INNER JOIN "{schema}"."{sku_view}" sk ON TRIM(s."SKU") = TRIM(sk."MATNR")
-            {sales_where}
-            GROUP BY COALESCE(NULLIF(TRIM(sk."TYRE_TYPE"), ''), NULLIF(TRIM(sk."TYRE_TP"), ''), 'Unknown')
-            ORDER BY revenue DESC
-            LIMIT 1
-        """)
+        # Tyre Type (commented out per UI request)
+        # run("top_tyre_type", f"""
+        #     SELECT
+        #         COALESCE(NULLIF(TRIM(sk."TYRE_TYPE"), ''), NULLIF(TRIM(sk."TYRE_TP"), ''), 'Unknown') AS tyre_type_name,
+        #         ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue
+        #     FROM "{schema}"."{sales_view}" s
+        #     INNER JOIN "{schema}"."{sku_view}" sk ON TRIM(s."SKU") = TRIM(sk."MATNR")
+        #     {sales_where}
+        #     GROUP BY COALESCE(NULLIF(TRIM(sk."TYRE_TYPE"), ''), NULLIF(TRIM(sk."TYRE_TP"), ''), 'Unknown')
+        #     ORDER BY revenue DESC
+        #     LIMIT 1
+        # """)
 
         run("top_5_products", f"""
             SELECT
@@ -2772,7 +2785,7 @@ ALSO, generate a category-wise trend report as a "line_chart" visualization extr
 
 Return ONLY this JSON:
 {{
-  "report": "TITLE: <Create a descriptive business-focused title based on the data>\\n\\n### Executive Summary\\n<Write exactly 5 to 8 lines summarizing overall business performance, key trends, and main takeaways based purely on the data.>\\n\\n### Key Business Insights\\n\\n**1. Overall Performance**\\n- **Total Revenue**: <Value>\\n- **Total Quantity**: <Value>\\n- **Total Invoices**: <Value>\\n- **Average Invoice Value**: <Value>\\n\\n**2. Revenue Trend**\\n- **Highest Sales Month**: <Value>\\n- **Lowest Sales Month**: <Value>\\n- **Monthly Growth**: <Value>\\n\\n**3. Product Performance**\\n- **Top Category**: <Value>\\n- **Top Construction**: <Value>\\n- **Top Tyre Type**: <Value>\\n- **Top Product**: <Value>\\n- **Lowest Selling Product**: <Value>\\n\\n**4. Customer Performance**\\n- **Top Customers**: <Value>\\n- **Dealer Contribution**: <Value>\\n- **Fleet Contribution**: <Value>\\n- **OEM Contribution**: <Value>\\n- **Customer Concentration**: <Value>\\n\\n**5. Geography**\\n- **Top Zone**: <Value>\\n- **Top Region**: <Value>\\n- **Top Territory**: <Value>\\n- **Lowest Territory**: <Value>\\n\\n**6. Distribution**\\n- **Replacement**: <Value>\\n- **OEM**: <Value>\\n- **STU**: <Value>\\n- **DEF**: <Value>\\n- **Contribution %**: <Value>\\n\\n**7. Target Performance**\\n- **Total Target Value**: <Value>\\n- **Overall Achievement %**: <Value>\\n- **Target Shortfall**: <Value>\\n- **Quantity Achievement %**: <Value>\\n- **Top Target Shortfall Territory**: <Value>\\n\\n### Business Risks\\n- <Data-driven Risk 1 (e.g. High customer concentration)>\\n- <Data-driven Risk 2 (e.g. High discount dependency)>\\n- <Data-driven Risk 3>\\n\\n### Actionable Recommendations\\n- <Data-driven Recommendation 1 (e.g. Improve sales in low-performing territories)>\\n- <Data-driven Recommendation 2 (e.g. Reduce dependency on top customers)>\\n- <Data-driven Recommendation 3>",
+  "report": "TITLE: <Create a descriptive business-focused title based on the data>\\n\\n### Executive Summary\\n<Write exactly 5 to 8 lines summarizing overall business performance, key trends, and main takeaways based purely on the data.>\\n\\n### Key Business Insights\\n\\n**1. Overall Performance**\\n- **Total Revenue**: <Value>\\n- **Total Quantity**: <Value>\\n- **Total Invoices**: <Value>\\n- **Average Invoice Value**: <Value>\\n\\n**2. Revenue Trend**\\n- **Highest Sales Month**: <Value>\\n- **Lowest Sales Month**: <Value>\\n- **Monthly Growth**: <Value>\\n\\n**3. Product Performance**\\n- **Top Category**: <Value>\\n- **Top Construction**: <Value>\\n- **Top Product**: <Value>\\n- **Lowest Selling Product**: <Value>\\n\\n**4. Customer Performance**\\n- **Top Customers**: <Value>\\n- **Dealer Contribution**: <Value>\\n- **Fleet Contribution**: <Value>\\n- **OEM Contribution**: <Value>\\n- **Customer Concentration**: <Value>\\n\\n**5. Geography**\\n- **Top Zone**: <Value>\\n- **Top Region**: <Value>\\n- **Top Territory**: <Value>\\n- **Lowest Territory**: <Value>\\n\\n**6. Distribution**\\n- **Replacement**: <Value>\\n- **OEM**: <Value>\\n- **STU**: <Value>\\n- **DEF**: <Value>\\n- **Contribution %**: <Value>\\n\\n**7. Target Performance**\\n- **Total Target Value**: <Value>\\n- **Overall Achievement %**: <Value>\\n- **Target Shortfall**: <Value>\\n- **Quantity Achievement %**: <Value>\\n- **Top Target Shortfall Territory**: <Value>\\n\\n### Business Risks\\n- <Data-driven Risk 1 (e.g. High customer concentration)>\\n- <Data-driven Risk 2 (e.g. High discount dependency)>\\n- <Data-driven Risk 3>\\n\\n### Actionable Recommendations\\n- <Data-driven Recommendation 1 (e.g. Improve sales in low-performing territories)>\\n- <Data-driven Recommendation 2 (e.g. Reduce dependency on top customers)>\\n- <Data-driven Recommendation 3>",
   "follow_up_questions": ["What ...?", "What ...?", "What ...?", "What ...?", "What ...?"],
   "visualizations": [
     {{

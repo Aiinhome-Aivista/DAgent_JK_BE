@@ -172,28 +172,28 @@ def execute_hana_analysis(hana_conn, schema):
     except Exception as e:
         print(f"[Warning] Construction query error: {e}")
 
-    # 3c. Tyre Type
-    try:
-        q_tt = f"""
-            SELECT 
-                COALESCE(NULLIF(TRIM(sk.TYRE_TYPE), ''), 'General Tyre') AS "tt",
-                ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000, 2) AS "rev"
-            FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR" s
-            JOIN "{schema}"."ZIVR_SKUMaster_01_TR" sk ON (s."SKU" = sk.MATNR OR LTRIM(s."SKU", '0') = LTRIM(sk.MATNR, '0'))
-            WHERE (s."indicator_cancel" IS NULL OR s."indicator_cancel" NOT IN ('X', 'Y', '1'))
-              AND s."invoice_date" >= '{target_yr}-01-01'
-              AND sk.TYRE_TYPE IS NOT NULL AND sk.TYRE_TYPE <> ''
-            GROUP BY COALESCE(NULLIF(TRIM(sk.TYRE_TYPE), ''), 'General Tyre')
-            ORDER BY "rev" DESC
-        """
-        sanitize_and_execute_hana(cur, schema, q_tt)
-        tt_row = cur.fetchone()
-        if tt_row:
-            res["top_tyre_type"] = tt_row[0]
-            res["top_tyre_type_rev"] = float(tt_row[1] or 0)
-            print(f"[3c/7 Tyre Type] Top: {res['top_tyre_type']} (₹{res['top_tyre_type_rev']:.2f} Cr)")
-    except Exception as e:
-        print(f"[Warning] Tyre type query error: {e}")
+    # 3c. Tyre Type (commented out per UI request)
+    # try:
+    #     q_tt = f"""
+    #         SELECT 
+    #             COALESCE(NULLIF(TRIM(sk.TYRE_TYPE), ''), 'General Tyre') AS "tt",
+    #             ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000, 2) AS "rev"
+    #         FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR" s
+    #         JOIN "{schema}"."ZIVR_SKUMaster_01_TR" sk ON (s."SKU" = sk.MATNR OR LTRIM(s."SKU", '0') = LTRIM(sk.MATNR, '0'))
+    #         WHERE (s."indicator_cancel" IS NULL OR s."indicator_cancel" NOT IN ('X', 'Y', '1'))
+    #           AND s."invoice_date" >= '{target_yr}-01-01'
+    #           AND sk.TYRE_TYPE IS NOT NULL AND sk.TYRE_TYPE <> ''
+    #         GROUP BY COALESCE(NULLIF(TRIM(sk.TYRE_TYPE), ''), 'General Tyre')
+    #         ORDER BY "rev" DESC
+    #     """
+    #     sanitize_and_execute_hana(cur, schema, q_tt)
+    #     tt_row = cur.fetchone()
+    #     if tt_row:
+    #         res["top_tyre_type"] = tt_row[0]
+    #         res["top_tyre_type_rev"] = float(tt_row[1] or 0)
+    #         print(f"[3c/7 Tyre Type] Top: {res['top_tyre_type']} (₹{res['top_tyre_type_rev']:.2f} Cr)")
+    # except Exception as e:
+    #     print(f"[Warning] Tyre type query error: {e}")
 
     # 3d. Top & Lowest Product
     try:
@@ -502,7 +502,6 @@ Sales performance analysis for active period 2026 demonstrates total revenue of 
 **3. Product Performance**
 - **Top Category**: {top_cat} (₹{top_cat_rev:,.2f} Cr)
 - **Top Construction**: {top_con} (₹{top_con_rev:,.2f} Cr)
-- **Top Tyre Type**: {top_tt} (₹{top_tt_rev:,.2f} Cr)
 - **Top Product**: {top_p} (₹{top_p_rev:,.2f} Cr)
 - **Lowest Selling Product**: {low_p} (₹{low_p_rev:,.2f} Cr)
 
