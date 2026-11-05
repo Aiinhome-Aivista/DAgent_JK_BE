@@ -2858,6 +2858,38 @@ def run_daily_session_analysis_scheduler(get_connection_func, session_id=None):
                     _save_cache(sid, data_hash, str(rep), "", [], ["SAP HANA"], conn)
                     refreshed.append(sid)
 
+                    # Also update session_chat_history so UI (SummaryCard & Sidebar) binds the latest report immediately
+                    try:
+                        today_str = datetime.now().strftime("%d_%m_%Y")
+                        default_q = f"default_{today_str}"
+                        ch_cur = conn.cursor(dictionary=True) if hasattr(conn, "cursor") else conn.cursor()
+                        ch_cur.execute("""
+                            SELECT id FROM session_chat_history
+                            WHERE session_id = %s AND (question LIKE 'default_%' OR question = 'default')
+                            ORDER BY id DESC LIMIT 1
+                        """, (sid,))
+                        ex_row = ch_cur.fetchone()
+                        if ex_row:
+                            ch_cur.execute("""
+                                UPDATE session_chat_history
+                                SET question = %s, answer = %s, created_at = NOW()
+                                WHERE id = %s
+                            """, (default_q, str(rep), ex_row["id"]))
+                        else:
+                            ch_cur.execute("SELECT user_id FROM workspaces WHERE session_id = %s LIMIT 1", (sid,))
+                            ws_u = ch_cur.fetchone()
+                            u_id = ws_u["user_id"] if ws_u and ws_u.get("user_id") else 1
+                            ch_cur.execute("""
+                                INSERT INTO session_chat_history
+                                (session_id, user_id, turn_index, visit_number, question, answer, mode)
+                                VALUES (%s, %s, 0, 1, %s, %s, 'answer')
+                            """, (sid, u_id, default_q, str(rep)))
+                        conn.commit()
+                        ch_cur.close()
+                        print(f"[Scheduled Analysis] session_chat_history updated for session {sid}", flush=True)
+                    except Exception as ch_err:
+                        print(f"[Scheduled Analysis] session_chat_history update note: {ch_err}", flush=True)
+
                     # Fresh Vector DB insert (deletes previous session vectors and inserts fresh)
                     try:
                         from controllers.vector_store import push_session_analysis_and_kgraph_to_vector_db
