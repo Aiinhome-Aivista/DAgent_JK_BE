@@ -38,7 +38,7 @@
 #   - MAX_CTX_CHARS reduced to 15000 for faster LLM
 #   - Auto chat history save after every answer
 
-import re, json, time, hashlib, math, requests, mysql.connector, threading, os
+import re, json, time, datetime, hashlib, math, requests, mysql.connector, threading, os
 from collections import defaultdict
 
 try:
