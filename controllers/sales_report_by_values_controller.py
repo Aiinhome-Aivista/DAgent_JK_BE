@@ -167,6 +167,7 @@ def query_sales_report_by_values_hana(cursor, schema, year_month: str, selected_
             TO_DATE(P_YEAR_MONTH || '01', 'YYYYMMDD') AS CURRENT_MONTH_START,
             ADD_DAYS(P_SELECTED_DATE, 1) AS CURRENT_MTD_END,
             ADD_MONTHS(TO_DATE(P_YEAR_MONTH || '01', 'YYYYMMDD'), -12) AS PREVIOUS_MONTH_START,
+            ADD_MONTHS(TO_DATE(P_YEAR_MONTH || '01', 'YYYYMMDD'), -11) AS PREVIOUS_MONTH_END,
             ADD_MONTHS(TO_DATE(P_YEAR_MONTH || '01', 'YYYYMMDD'), 1) AS CURRENT_MONTH_END,
             ADD_MONTHS(P_SELECTED_DATE, -12) AS PREVIOUS_SELECTED_DATE
         FROM INPUT_PARAMS
@@ -301,7 +302,7 @@ def query_sales_report_by_values_hana(cursor, schema, year_month: str, selected_
             SUM(
                 CASE
                     WHEN S."invoice_date" >= D.PREVIOUS_MONTH_START
-                     AND S."invoice_date" < D.CURRENT_MONTH_START
+                     AND S."invoice_date" < D.PREVIOUS_MONTH_END
                      AND S.SEGMENT = '4_Whlrs'
                     THEN S."invoice_value"
                     ELSE 0
@@ -310,7 +311,7 @@ def query_sales_report_by_values_hana(cursor, schema, year_month: str, selected_
             SUM(
                 CASE
                     WHEN S."invoice_date" >= D.PREVIOUS_MONTH_START
-                     AND S."invoice_date" < D.CURRENT_MONTH_START
+                     AND S."invoice_date" < D.PREVIOUS_MONTH_END
                      AND S.SEGMENT = '2_3_Whlrs'
                     THEN S."invoice_value"
                     ELSE 0
@@ -429,6 +430,18 @@ def query_sales_report_by_values_hana(cursor, schema, year_month: str, selected_
     raw_rows = cursor.fetchall()
     results = []
 
+    def _clean_zone(name):
+        n = str(name or "").strip()
+        u = n.upper()
+        if "EAST" in u: return "East"
+        if "NORTH" in u: return "North"
+        if "CENTRAL" in u: return "Central"
+        if "WEST" in u: return "West"
+        if "SOUTH" in u and ("II" in u or "2" in u): return "South - II"
+        if "SOUTH" in u: return "South - I"
+        if "NEPAL" in u: return "Nepal"
+        return n
+
     tot_prev_4w = 0.0
     tot_prev_23w = 0.0
     tot_target_4w = 0.0
@@ -438,7 +451,7 @@ def query_sales_report_by_values_hana(cursor, schema, year_month: str, selected_
     tot_sale_for_the_day = 0.0
 
     for r in raw_rows:
-        z_name = str(r[0] or "").strip()
+        z_name = _clean_zone(r[0])
         sort_ord = int(r[1] or 99)
         p_4w = round(float(r[2] or 0), 2)
         p_23w = round(float(r[3] or 0), 2)
