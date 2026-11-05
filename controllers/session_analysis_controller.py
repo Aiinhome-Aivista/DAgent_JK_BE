@@ -92,6 +92,64 @@ def _load_cache(session_id: str, data_hash: str, conn) -> dict | None:
 
 
 
+
+def sync_session_chat_history_with_report(conn, session_id: str, report: str) -> None:
+    """
+    Ensure session_chat_history is 100% in sync with the latest analysis report
+    for ALL users belonging to the given workspace (session_id).
+    """
+    if not conn or not session_id or not report:
+        return
+    ch_cur = None
+    try:
+        from datetime import datetime
+        today_str = datetime.now().strftime("%d_%m_%Y")
+        default_q = f"default_{today_str}"
+        ch_cur = conn.cursor(dictionary=True) if hasattr(conn, "cursor") else conn.cursor()
+
+        # 1. Update ALL existing default analysis rows for this session_id across ALL users
+        ch_cur.execute("""
+            UPDATE session_chat_history
+            SET question = %s, answer = %s, created_at = NOW()
+            WHERE session_id = %s AND (question LIKE 'default_%' OR question = 'default' OR question = 'Generated Session Analysis Report')
+        """, (default_q, str(report), session_id))
+
+        # 2. Find all users associated with this workspace (owner in workspaces + users in workspace_users)
+        ch_cur.execute("""
+            SELECT DISTINCT user_id FROM (
+                SELECT user_id FROM workspaces WHERE session_id = %s
+                UNION
+                SELECT user_id FROM workspace_users WHERE session_id = %s
+            ) AS u WHERE user_id IS NOT NULL
+        """, (session_id, session_id))
+        ws_users = [r["user_id"] for r in ch_cur.fetchall() if r.get("user_id")]
+        if not ws_users:
+            ws_users = [1]
+
+        # 3. Ensure each user in this workspace has at least one default row
+        for u_id in ws_users:
+            ch_cur.execute("""
+                SELECT id FROM session_chat_history
+                WHERE session_id = %s AND user_id = %s AND (question LIKE 'default_%' OR question = 'default')
+                LIMIT 1
+            """, (session_id, int(u_id)))
+            if not ch_cur.fetchone():
+                ch_cur.execute("""
+                    INSERT INTO session_chat_history
+                    (session_id, user_id, turn_index, visit_number, question, answer, mode)
+                    VALUES (%s, %s, 0, 1, %s, %s, 'answer')
+                """, (session_id, int(u_id), default_q, str(report)))
+
+        conn.commit()
+        print(f"[Analysis] session_chat_history fully synced across {len(ws_users)} user(s) for session {session_id}", flush=True)
+    except Exception as ch_err:
+        print(f"[Analysis] sync_session_chat_history error: {ch_err}", flush=True)
+    finally:
+        if ch_cur:
+            try: ch_cur.close()
+            except Exception: pass
+
+
 def _save_cache(session_id: str, data_hash: str,
                 report: str, graph_url: str,
                 topics: list, databases: list, conn) -> None:
@@ -120,6 +178,7 @@ def _save_cache(session_id: str, data_hash: str,
         ))
         conn.commit()
         print(f"[Cache] SAVED session={session_id}  topics={topics}  databases={databases}")
+        sync_session_chat_history_with_report(conn, session_id, report)
     except Exception as e:
         print(f"[Cache] save error: {e}")
         raise   # re-raise so the caller knows save failed
@@ -1818,21 +1877,38 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
         """)
 
         run("dealer_contribution_pct", f"""
-            SELECT ROUND(SUM(CASE WHEN UPPER(TRIM(cm."CH_TYPE")) LIKE '%DEAL%' OR UPPER(TRIM(cm."CH_TYPE")) = 'REPL' THEN COALESCE(s."invoice_value", 0) ELSE 0 END) * 100.0 / NULLIF(SUM(COALESCE(s."invoice_value", 0)), 0), 2) AS dealer_contribution_percentage
+            SELECT ROUND(SUM(CASE 
+                WHEN s."distribution_channel" = '10' 
+                  OR UPPER(TRIM(cm."CH_TYPE")) IN ('DL', 'DEALER', 'REPL', 'D') 
+                  OR UPPER(TRIM(cm."CH_TYPE")) LIKE '%DEAL%' 
+                  OR cm."KTOKD" IN ('0001', 'Z001') 
+                THEN COALESCE(s."invoice_value", 0) ELSE 0 END) * 100.0 / NULLIF(SUM(COALESCE(s."invoice_value", 0)), 0), 2) AS dealer_contribution_percentage
             FROM "{schema}"."{sales_view}" s
             {cust_join}
             {sales_where}
         """)
 
         run("fleet_contribution_pct", f"""
-            SELECT ROUND(SUM(CASE WHEN UPPER(TRIM(cm."CH_TYPE")) LIKE '%FLEET%' OR UPPER(TRIM(cm."KDGRP")) LIKE '%FLEET%' THEN COALESCE(s."invoice_value", 0) ELSE 0 END) * 100.0 / NULLIF(SUM(COALESCE(s."invoice_value", 0)), 0), 2) AS fleet_contribution_percentage
+            SELECT ROUND(SUM(CASE 
+                WHEN UPPER(TRIM(cm."CH_TYPE")) IN ('FL', 'FLEET', 'F') 
+                  OR UPPER(TRIM(cm."CH_TYPE")) LIKE '%FLEET%' 
+                  OR UPPER(TRIM(cm."KDGRP")) LIKE '%FLEET%' 
+                  OR cm."KTOKD" IN ('0003', 'Z003') 
+                  OR UPPER(TRIM(cm."DLR_CATG")) LIKE '%FLEET%'
+                THEN COALESCE(s."invoice_value", 0) ELSE 0 END) * 100.0 / NULLIF(SUM(COALESCE(s."invoice_value", 0)), 0), 2) AS fleet_contribution_percentage
             FROM "{schema}"."{sales_view}" s
             {cust_join}
             {sales_where}
         """)
 
         run("oem_contribution_pct", f"""
-            SELECT ROUND(SUM(CASE WHEN UPPER(TRIM(cm."CH_TYPE")) LIKE '%OEM%' OR UPPER(TRIM(cm."KDGRP")) LIKE '%OEM%' THEN COALESCE(s."invoice_value", 0) ELSE 0 END) * 100.0 / NULLIF(SUM(COALESCE(s."invoice_value", 0)), 0), 2) AS oem_contribution_percentage
+            SELECT ROUND(SUM(CASE 
+                WHEN s."distribution_channel" = '20' 
+                  OR UPPER(TRIM(cm."CH_TYPE")) IN ('OE', 'OEM', 'O') 
+                  OR UPPER(TRIM(cm."CH_TYPE")) LIKE '%OEM%' 
+                  OR UPPER(TRIM(cm."KDGRP")) LIKE '%OEM%' 
+                  OR cm."KTOKD" IN ('0002', 'Z002')
+                THEN COALESCE(s."invoice_value", 0) ELSE 0 END) * 100.0 / NULLIF(SUM(COALESCE(s."invoice_value", 0)), 0), 2) AS oem_contribution_percentage
             FROM "{schema}"."{sales_view}" s
             {cust_join}
             {sales_where}
@@ -2883,40 +2959,9 @@ def session_analysis_controller(get_connection_func):
         visualizations = analysis.get("visualizations", [])
 
 
-        # 6. Save to cache
+        # 6. Save to cache and sync session_chat_history for all workspace users
         _save_cache(session_id, data_hash, report, graph_url, topics, databases, conn)
-
-        # Update or insert into session_chat_history so UI SummaryCard binds immediately on manual button hit as well
-        try:
-            today_str = datetime.now().strftime("%d_%m_%Y")
-            default_q = f"default_{today_str}"
-            ch_cur = conn.cursor(dictionary=True) if hasattr(conn, "cursor") else conn.cursor()
-            ch_cur.execute("""
-                SELECT id FROM session_chat_history
-                WHERE session_id = %s AND (question LIKE 'default_%' OR question = 'default')
-                ORDER BY id DESC LIMIT 1
-            """, (session_id,))
-            ex_row = ch_cur.fetchone()
-            if ex_row:
-                ch_cur.execute("""
-                    UPDATE session_chat_history
-                    SET question = %s, answer = %s, created_at = NOW()
-                    WHERE id = %s
-                """, (default_q, str(report), ex_row["id"]))
-            else:
-                ch_cur.execute("SELECT user_id FROM workspaces WHERE session_id = %s LIMIT 1", (session_id,))
-                ws_u = ch_cur.fetchone()
-                u_id = ws_u["user_id"] if ws_u and ws_u.get("user_id") else 1
-                ch_cur.execute("""
-                    INSERT INTO session_chat_history
-                    (session_id, user_id, turn_index, visit_number, question, answer, mode)
-                    VALUES (%s, %s, 0, 1, %s, %s, 'answer')
-                """, (session_id, u_id, default_q, str(report)))
-            conn.commit()
-            ch_cur.close()
-            print(f"[Analysis] session_chat_history updated for session {session_id}", flush=True)
-        except Exception as ch_err:
-            print(f"[Analysis] session_chat_history update note: {ch_err}", flush=True)
+        sync_session_chat_history_with_report(conn, session_id, report)
 
         # 7. Step 4: Store in Vector DB (ChromaDB) - Kept separate if skip_vector is requested
         skip_vector = data.get("skip_vector", False) or data.get("is_scheduled", False)
@@ -2998,39 +3043,8 @@ def run_daily_session_analysis_scheduler(get_connection_func, session_id=None):
                     if isinstance(rep, dict):
                         rep = json.dumps(rep, ensure_ascii=False)
                     _save_cache(sid, data_hash, str(rep), "", [], ["SAP HANA"], conn)
+                    sync_session_chat_history_with_report(conn, sid, str(rep))
                     refreshed.append(sid)
-
-                    # Also update session_chat_history so UI (SummaryCard & Sidebar) binds the latest report immediately
-                    try:
-                        today_str = datetime.now().strftime("%d_%m_%Y")
-                        default_q = f"default_{today_str}"
-                        ch_cur = conn.cursor(dictionary=True) if hasattr(conn, "cursor") else conn.cursor()
-                        ch_cur.execute("""
-                            SELECT id FROM session_chat_history
-                            WHERE session_id = %s AND (question LIKE 'default_%' OR question = 'default')
-                            ORDER BY id DESC LIMIT 1
-                        """, (sid,))
-                        ex_row = ch_cur.fetchone()
-                        if ex_row:
-                            ch_cur.execute("""
-                                UPDATE session_chat_history
-                                SET question = %s, answer = %s, created_at = NOW()
-                                WHERE id = %s
-                            """, (default_q, str(rep), ex_row["id"]))
-                        else:
-                            ch_cur.execute("SELECT user_id FROM workspaces WHERE session_id = %s LIMIT 1", (sid,))
-                            ws_u = ch_cur.fetchone()
-                            u_id = ws_u["user_id"] if ws_u and ws_u.get("user_id") else 1
-                            ch_cur.execute("""
-                                INSERT INTO session_chat_history
-                                (session_id, user_id, turn_index, visit_number, question, answer, mode)
-                                VALUES (%s, %s, 0, 1, %s, %s, 'answer')
-                            """, (sid, u_id, default_q, str(rep)))
-                        conn.commit()
-                        ch_cur.close()
-                        print(f"[Scheduled Analysis] session_chat_history updated for session {sid}", flush=True)
-                    except Exception as ch_err:
-                        print(f"[Scheduled Analysis] session_chat_history update note: {ch_err}", flush=True)
 
                     # Fresh Vector DB insert (deletes previous session vectors and inserts fresh)
                     try:

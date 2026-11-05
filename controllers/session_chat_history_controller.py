@@ -712,6 +712,20 @@ def get_chat_history(get_connection_func):
             """, (int(user_id), session_id, session_id, int(user_id)))
 
         rows = cur.fetchall()
+
+        # Fetch latest report from session_analysis_cache to guarantee default analysis is always current
+        latest_cached_report = None
+        try:
+            cur.execute("""
+                SELECT report FROM session_analysis_cache
+                WHERE session_id = %s
+                ORDER BY id DESC LIMIT 1
+            """, (session_id,))
+            c_row = cur.fetchone()
+            if c_row and c_row.get("report"):
+                latest_cached_report = c_row["report"]
+        except Exception:
+            pass
         grouped_sessions = defaultdict(list)
         grouped_users = {}
 

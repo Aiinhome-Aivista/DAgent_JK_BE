@@ -245,9 +245,9 @@ def execute_hana_analysis(hana_conn, schema):
         q_chan = f"""
             SELECT 
                 CASE 
-                    WHEN UPPER(TRIM(cm.CH_TYPE)) IN ('DL', 'DEALER') OR cm.KTOKD IN ('0001', 'Z001') THEN 'Dealer'
-                    WHEN UPPER(TRIM(cm.CH_TYPE)) IN ('FL', 'FLEET') OR cm.KTOKD IN ('0003', 'Z003') THEN 'Fleet'
-                    WHEN UPPER(TRIM(cm.CH_TYPE)) IN ('OE', 'OEM') OR s."distribution_channel" = '20' THEN 'OEM'
+                    WHEN s."distribution_channel" = '10' OR UPPER(TRIM(cm.CH_TYPE)) IN ('DL', 'DEALER', 'REPL', 'D') OR UPPER(TRIM(cm.CH_TYPE)) LIKE '%DEAL%' OR cm.KTOKD IN ('0001', 'Z001') THEN 'Dealer'
+                    WHEN UPPER(TRIM(cm.CH_TYPE)) IN ('FL', 'FLEET', 'F') OR UPPER(TRIM(cm.CH_TYPE)) LIKE '%FLEET%' OR cm.KTOKD IN ('0003', 'Z003') OR UPPER(TRIM(cm.KDGRP)) LIKE '%FLEET%' THEN 'Fleet'
+                    WHEN s."distribution_channel" = '20' OR UPPER(TRIM(cm.CH_TYPE)) IN ('OE', 'OEM', 'O') OR UPPER(TRIM(cm.CH_TYPE)) LIKE '%OEM%' OR cm.KTOKD IN ('0002', 'Z002') THEN 'OEM'
                     ELSE 'Other'
                 END AS "ch",
                 ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000, 2) AS "rev"
@@ -257,9 +257,9 @@ def execute_hana_analysis(hana_conn, schema):
               AND s."invoice_date" >= '{target_yr}-01-01'
             GROUP BY 
                 CASE 
-                    WHEN UPPER(TRIM(cm.CH_TYPE)) IN ('DL', 'DEALER') OR cm.KTOKD IN ('0001', 'Z001') THEN 'Dealer'
-                    WHEN UPPER(TRIM(cm.CH_TYPE)) IN ('FL', 'FLEET') OR cm.KTOKD IN ('0003', 'Z003') THEN 'Fleet'
-                    WHEN UPPER(TRIM(cm.CH_TYPE)) IN ('OE', 'OEM') OR s."distribution_channel" = '20' THEN 'OEM'
+                    WHEN s."distribution_channel" = '10' OR UPPER(TRIM(cm.CH_TYPE)) IN ('DL', 'DEALER', 'REPL', 'D') OR UPPER(TRIM(cm.CH_TYPE)) LIKE '%DEAL%' OR cm.KTOKD IN ('0001', 'Z001') THEN 'Dealer'
+                    WHEN UPPER(TRIM(cm.CH_TYPE)) IN ('FL', 'FLEET', 'F') OR UPPER(TRIM(cm.CH_TYPE)) LIKE '%FLEET%' OR cm.KTOKD IN ('0003', 'Z003') OR UPPER(TRIM(cm.KDGRP)) LIKE '%FLEET%' THEN 'Fleet'
+                    WHEN s."distribution_channel" = '20' OR UPPER(TRIM(cm.CH_TYPE)) IN ('OE', 'OEM', 'O') OR UPPER(TRIM(cm.CH_TYPE)) LIKE '%OEM%' OR cm.KTOKD IN ('0002', 'Z002') THEN 'OEM'
                     ELSE 'Other'
                 END
         """
@@ -611,6 +611,13 @@ def update_single_session(mysql_conn, session_id):
 
     mysql_conn.commit()
     cur.close()
+
+    # Sync session_chat_history for all workspace users
+    try:
+        from controllers.session_analysis_controller import sync_session_chat_history_with_report
+        sync_session_chat_history_with_report(mysql_conn, session_id, updated_report)
+    except Exception as se:
+        print(f"[Warning] Could not sync chat history from update_session_summary: {se}")
 
     # Optionally sync to Vector DB
     try:
