@@ -1384,6 +1384,7 @@ SCHEMA & BUSINESS DEFINITIONS:
      DO NOT join ZPVF_SD_CancelledSalesInvoice_01_TR.
    - AGGREGATION VS BREAKDOWN RULE:
      * When the user asks for total/overall metrics (e.g. "total volume", "total invoice value", "total NDP value", "total tyre quantity", "total replacement sales for [month]"), aggregate directly: SELECT SUM(fact."volume"), SUM(fact."ndp_value"), SUM(fact."invoice_value"), SUM(fact."Tyre_Quantity").
+     * CRITICAL: NEVER write "GROUP BY ()"! In SAP HANA, "GROUP BY ()" causes a fatal syntax error. When calculating overall totals, DO NOT include a GROUP BY clause at all!
      * MANDATORY CUSTOMER MASTER FILTER FOR ALL SALES:
        To match official SAP Analytics (Zsales_test), ALL sales queries MUST join Customer Master to exclude invalid/test/scrap accounts (KLABC = 'X'):
        JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm ON (fact."dealer_code" = cm.KUNNR OR LTRIM(fact."dealer_code", '0') = LTRIM(cm.KUNNR, '0'))
@@ -3119,6 +3120,12 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                         run_query,
                                         flags=re.IGNORECASE
                                     )
+
+                                # Strip invalid empty GROUP BY () in SAP HANA
+                                run_query = re.sub(r'\bGROUP\s+BY\s*\(\s*\)', ' ', run_query, flags=re.IGNORECASE)
+                                run_query = re.sub(r'\bGROUP\s+BY\s*;\s*$', ';', run_query, flags=re.IGNORECASE)
+                                run_query = re.sub(r'\bGROUP\s+BY\s*$', '', run_query, flags=re.IGNORECASE)
+                                sql_query = run_query
 
                                 print(f"[SQL_EXEC] Executing on SAP HANA:\n{run_query}")
 
