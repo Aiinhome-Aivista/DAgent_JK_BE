@@ -775,7 +775,8 @@ def get_chat_history(get_connection_func):
                 "querySessionId": f"session_visit_{v_num}",     # e.g., "session_visit_1"
                 "querySessionHistory": history,                  # The list of chats
                 "userId": grouped_users[v_num]["userId"],
-                "userName": grouped_users[v_num]["userName"]
+                "userName": grouped_users[v_num]["userName"],
+                "createdAt": history[-1].get("created_at") if history else None
             })
 
         final_response = {
