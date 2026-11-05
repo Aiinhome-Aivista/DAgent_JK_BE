@@ -564,8 +564,15 @@ def _sync_to_arango(session_id: str, nodes: list, edges: list, target_arango_db:
 
     print("[DEBUG] _sync_to_arango: REACHED BACKUP BLOCK", flush=True)
     from database.kgraph_backup_service import backup_kgraph_collections
-    bkp_result = backup_kgraph_collections(db, nodes_col_name, edges_col_name)
+    bkp_result = backup_kgraph_collections(
+        db, nodes_col_name, edges_col_name,
+        session_id=session_id, new_nodes=nodes, new_edges=edges
+    )
     print(f"[DEBUG] _sync_to_arango: BACKUP DONE -- skipped={bkp_result.get('skipped')}", flush=True)
+
+    if bkp_result.get('skipped') and bkp_result.get('reason') == 'content_identical':
+        print(f"[ArangoDB] Graph content identical for session '{session_id}' -- skipping redundant node/edge overwrite.", flush=True)
+        return
 
 
     nodes_col = db.collection(nodes_col_name)
@@ -1584,7 +1591,7 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
     # 1. distribution_channel = 10
     # 2. indicator_cancel NOT IN ('X', 'Y', '1')
     # 3. Not in CancelledSalesInvoice (invoice_number, Plant, FKART)
-    canc_filter = f'AND NOT EXISTS (SELECT 1 FROM "{schema}"."{canc_view}" c WHERE c."invoice_number" = s."invoice_number" AND c."Plant" = s."Plant" AND c."FKART" = s."FKART")' if canc_view else ''
+    canc_filter = f'AND NOT EXISTS (SELECT 1 FROM "{schema}"."{canc_view}" c WHERE c."invoice_number" = s."invoice_number" AND c."plant" = s."plant" AND c."FKART" = s."FKART")' if canc_view else ''
     sales_where = f'WHERE s."invoice_date" IS NOT NULL AND (s."distribution_channel" = \'10\' OR s."distribution_channel" = 10) AND (s."indicator_cancel" IS NULL OR s."indicator_cancel" NOT IN (\'X\', \'Y\', \'1\')) {canc_filter}'
 
     # ---------- 1. Overall Performance ----------
@@ -2850,6 +2857,19 @@ def run_daily_session_analysis_scheduler(get_connection_func, session_id=None):
                         rep = json.dumps(rep, ensure_ascii=False)
                     _save_cache(sid, data_hash, str(rep), "", [], ["SAP HANA"], conn)
                     refreshed.append(sid)
+
+                    # Fresh Vector DB insert (deletes previous session vectors and inserts fresh)
+                    try:
+                        from controllers.vector_store import push_session_analysis_and_kgraph_to_vector_db
+                        v_res = push_session_analysis_and_kgraph_to_vector_db(
+                            session_id=sid,
+                            report=str(rep),
+                            ontology_analysis=analysis.get("ontology_analysis"),
+                            conn=conn
+                        )
+                        print(f"[Scheduled Analysis] Fresh Vector DB update result: {v_res}", flush=True)
+                    except Exception as ve:
+                        print(f"[Scheduled Analysis] Vector DB update error (non-fatal): {ve}", flush=True)
             except Exception as s_err:
                 print(f"[Scheduled Analysis] Session {sid} error: {s_err}", flush=True)
 

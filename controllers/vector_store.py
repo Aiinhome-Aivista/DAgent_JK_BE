@@ -204,6 +204,13 @@ def push_session_analysis_and_kgraph_to_vector_db(
         metadata={"hnsw:space": "cosine"}
     )
 
+    # Clean previous vectors for this session so fresh vectors are cleanly inserted
+    try:
+        collection.delete(where={"session_id": str(session_id)})
+        print(f"[VectorStore] Existing vectors cleared for session '{session_id}' in collection '{col_name}'. Inserting fresh vectors...", flush=True)
+    except Exception as del_err:
+        print(f"[VectorStore] Existing vectors clean note: {del_err}", flush=True)
+
     documents = []
     metadatas = []
     ids = []

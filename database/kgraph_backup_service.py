@@ -16,8 +16,40 @@ from datetime import datetime
 
 _BACKUP_SUFFIX = "_backup_"
 
+def _log_backup_action(session_id, action_type, nodes_col, edges_col, cur_nodes, cur_edges, status, details=""):
+    try:
+        import mysql.connector
+        from database.config import MYSQL_CONFIG
+        conn = mysql.connector.connect(**MYSQL_CONFIG)
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS `kgraph_backup_logs` (
+                `id` INT AUTO_INCREMENT PRIMARY KEY,
+                `session_id` VARCHAR(100),
+                `action_type` VARCHAR(50),
+                `nodes_col_name` VARCHAR(100),
+                `edges_col_name` VARCHAR(100),
+                `cur_nodes` INT DEFAULT 0,
+                `cur_edges` INT DEFAULT 0,
+                `status` VARCHAR(50),
+                `details` TEXT,
+                `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cur.execute("""
+            INSERT INTO `kgraph_backup_logs` 
+            (`session_id`, `action_type`, `nodes_col_name`, `edges_col_name`, `cur_nodes`, `cur_edges`, `status`, `details`)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        """, (session_id, action_type, nodes_col, edges_col, cur_nodes, cur_edges, status, details))
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as log_err:
+        print(f"[KGraph-Backup] Warning: could not log to MySQL: {log_err}", flush=True)
 
-def backup_kgraph_collections(db, nodes_col_name: str, edges_col_name: str, max_backups: int = 5) -> dict:
+
+
+def backup_kgraph_collections(db, nodes_col_name: str, edges_col_name: str, max_backups: int = 5, session_id: str = None, new_nodes: list = None, new_edges: list = None) -> dict:
     """
     Takes a safe in-database backup of the current K-Graph before new data is synced.
 
@@ -72,7 +104,26 @@ def backup_kgraph_collections(db, nodes_col_name: str, edges_col_name: str, max_
     if cur_nodes == 0 and cur_edges == 0:
         print("[KGraph-Backup] K-Graph is empty (first run or purged) -- backup skipped.", flush=True)
         result["skipped"] = True
+        _log_backup_action(session_id, "BACKUP_SKIPPED", nodes_col_name, edges_col_name, cur_nodes, cur_edges, "SKIPPED", "Graph is empty")
         return result
+
+    # Check if incoming graph is identical to current graph state (no changes detected)
+    if new_nodes is not None and new_edges is not None:
+        if cur_nodes == len(new_nodes) and cur_edges == len(new_edges):
+            try:
+                sample_keys = [n["id"] for n in new_nodes[:50]]
+                existing_count = next(db.aql.execute(
+                    f"RETURN LENGTH(FOR doc IN {nodes_col_name} FILTER doc.original_id IN @keys RETURN 1)",
+                    bind_vars={"keys": sample_keys}
+                ), 0)
+                if existing_count == len(sample_keys):
+                    print(f"[KGraph-Backup] Graph content identical ({cur_nodes} nodes, {cur_edges} edges) -- backup skipped.", flush=True)
+                    result["skipped"] = True
+                    result["reason"] = "content_identical"
+                    _log_backup_action(session_id, "BACKUP_SKIPPED", nodes_col_name, edges_col_name, cur_nodes, cur_edges, "SKIPPED", "Graph content identical, no changes detected")
+                    return result
+            except Exception as check_err:
+                print(f"[KGraph-Backup] Quick identity check note: {check_err}", flush=True)
     print("[KGraph-Backup] Graph is non-empty -- proceeding with mandatory backup...", flush=True)
 
     # Step 2: Enforce retention policy (keep `max_backups - 1` newest old backups, plus the 1 we are creating)
@@ -139,6 +190,7 @@ def backup_kgraph_collections(db, nodes_col_name: str, edges_col_name: str, max_
 
         print(f"[KGraph-Backup] Backup created: {vbk}  ({cur_nodes} nodes)", flush=True)
         print(f"[KGraph-Backup] Backup created: {ebk}  ({cur_edges} edges)", flush=True)
+        _log_backup_action(session_id, "BACKUP_CREATED", nodes_col_name, edges_col_name, cur_nodes, cur_edges, "SUCCESS", f"Created: {vbk}, {ebk}")
 
     except Exception as bkp_err:
         # Roll back any partially created backup collections
