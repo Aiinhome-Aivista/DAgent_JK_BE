@@ -1327,7 +1327,7 @@ SCHEMA & BUSINESS DEFINITIONS:
      * "SAP_S4"."ZPVF_SD_CurrentSales_01_TR" (Current Period / Rolling MTD Sales Fact View - FAST, use for current sales, top customers, recent data)
      * "SAP_S4"."ZPVF_SD_SalesHistory_01_TR" (Historical Sales Fact View - use for multi-year trends or historical prior periods)
      * "SAP_S4"."ZPVF_SD_CancelledSalesInvoice_01_TR" (Cancelled Sales Invoices Reference View)
-     * "SAP_S4"."ZIVF_SD_Sales_Plan_Target_01_TR" (Sales Plan & Target View: Target Revenue = PLAN_VALUE or REV_PLAN_VAL, Target Qty = ORG_PLAN or REV_PLAN)
+     * "SAP_S4"."ZIVF_SD_Sales_Plan_Target_01_TR" (Sales Plan & Target View: Target Revenue = PLAN_VALUE, Target Qty = ORG_PLAN)
    
    - Master Views & Primary Join Keys:
      * Customer Master: "SAP_S4"."ZIVF_CustomerMaster_01_MD"
@@ -1357,7 +1357,13 @@ SCHEMA & BUSINESS DEFINITIONS:
         - Never exclude target records because tgt.REG_CODE is missing.
         - If a Region filter is explicitly requested, derive the region through Territory Master: tm.REGIO = rm."region_code".
         Other Keys: tgt.YMONTH = da.YMONTH (Month/Period), tgt.MATNR = sk.MATNR (SKU), tgt.CAT_CODE = cat.CAT_CODE (Category)
-       Target Revenue: tgt.PLAN_VALUE (or tgt.REV_PLAN_VAL), Target Qty: tgt.ORG_PLAN (or tgt.REV_PLAN)
+        Target & Plan Metrics (support every variation user asks for):
+        - "Plan Value" / "Target Value" / "Target Revenue" / "Plan Revenue": tgt.PLAN_VALUE (e.g. SUM(tgt.PLAN_VALUE))
+        - "Revised Plan Value" / "Revised Value" / "Revised Target Value": tgt.REV_PLAN_VAL (e.g. SUM(tgt.REV_PLAN_VAL))
+        - "Original Plan" / "Target Quantity" / "Plan Qty": tgt.ORG_PLAN (e.g. SUM(tgt.ORG_PLAN))
+        - "Revised Plan" / "Revised Quantity" / "Revised Plan Qty": tgt.REV_PLAN (e.g. SUM(tgt.REV_PLAN))
+        - "Old Plan": tgt.OLD_PLAN
+        - "HO Plan" / "Head Office Plan": tgt.HO_PLAN (Qty), tgt.PLAN_HO_VAL (Value)
 
 2. CRITICAL SAP HANA CASE-SENSITIVITY & QUOTING RULES:
    - In SAP HANA, unquoted column names automatically become UPPERCASE!
@@ -1403,8 +1409,35 @@ SCHEMA & BUSINESS DEFINITIONS:
      ALWAYS use case-insensitive matching with UPPER and LIKE or TRIM:
      e.g., UPPER(TRIM(rm."region_name")) LIKE UPPER('%Jaipur%')
      NEVER write rm."region_name" = 'Jaipur' as it returns 0 rows if stored in uppercase (e.g. 'JAIPUR')!
-   - NO UNREQUESTED DISTRIBUTION CHANNEL FILTER:
-     Filter fact."distribution_channel" = '10' ONLY IF the user explicitly asked for channel 10 or dealer channel. If not mentioned, DO NOT include fact."distribution_channel" = '10' so all valid channel sales are captured!
+    - DISTRIBUTION CHANNEL MAPPING & RULES:
+      * "Replacement" / "Dealer channel" / "Domestic sales": fact."distribution_channel" = '10'
+      * "OEM" (Original Equipment Manufacturer): fact."distribution_channel" = '20'
+      * "STU" (State Transport Undertakings / Govt Fleet): fact."distribution_channel" = '30'
+      * "DEF" (Defense sales): fact."distribution_channel" = '40'
+      * "Export" / "Other": fact."distribution_channel" = '50'
+      * NO UNREQUESTED DISTRIBUTION CHANNEL FILTER: Filter by distribution channel ONLY IF the user explicitly requested a specific channel (e.g. Replacement, OEM, STU, DEF). If not mentioned, DO NOT filter by distribution channel so all valid sales are captured!
+
+    - VEHICLE SEGMENT & CATEGORY MAPPING (from Category Master cat & SKU Master sk):
+      * "Scooter" tyres: UPPER(TRIM(cat.CAT_DESC)) = 'SCOOTER'
+      * "Motorcycle" / "Bike" tyres: UPPER(TRIM(cat.CAT_DESC)) = 'MOTOR'
+      * "3 Wheeler" / "Auto" tyres: UPPER(TRIM(cat.CAT_DESC)) = '3WH'
+      * "2/3 Wheeler" (Two & Three Wheelers): UPPER(TRIM(cat.CAT_DESC)) IN ('MOTOR', '3WH', 'SCOOTER')
+      * "4 Wheeler" / Commercial tyres: UPPER(TRIM(cat.CAT_DESC)) NOT IN ('MOTOR', '3WH', 'SCOOTER', 'TR', 'NT', 'AL', 'IE')
+      * "TBR" (Truck & Bus Radial): UPPER(TRIM(cat.CAT_DESC)) = 'TBR'
+      * "PCR" (Passenger Car Radial): UPPER(TRIM(cat.CAT_DESC)) = 'PCR'
+      * "LCV" (Light Commercial Vehicle): UPPER(TRIM(cat.CAT_DESC)) = 'LCV'
+      * "Farm" / "Agriculture": UPPER(TRIM(cat.CAT_DESC)) = 'FARM'
+      * "OTR" (Off The Road): UPPER(TRIM(cat.CAT_DESC)) = 'OTR'
+      * Construction: sk.CONSTUCTION (Radial, Bias)
+      * Tyre Type: sk.TYRE_TYPE (TRUCK, LCV, CAR, 3W, SCV, FARM, OTR)
+
+    - MEASURES & MONETARY METRICS (fact table columns):
+      * "Sales" / "Revenue" / "Invoice Value" / "Turnover": SUM(fact."invoice_value")
+      * "NDP" / "NDP Value" / "Net Dealer Price": SUM(fact."ndp_value")
+      * "Taxable Value" / "Taxable Sales": SUM(fact."taxable_value")
+      * "Discount" / "Total Discount": SUM(fact."total_discount")
+      * "GST" / "Tax": SUM(fact."gst")
+      * "Quantity" / "Volume" / "Units": SUM(fact."Tyre_Quantity")
    - SUBQUERY & CTE JOIN KEY HYGIENE (LEADING ZEROS):
      Whenever comparing dealer/customer codes between CTEs, tables, or subqueries, ALWAYS wrap in LTRIM:
      ON (LTRIM(ad.dealer_code, '0') = LTRIM(rs.dealer_code, '0'))
@@ -2067,8 +2100,11 @@ def _build_business_map(table_cols, workspace_id):
     PRODUCT_HIERARCHY = ["CAT_DESC", "CONSTUCTION", "TYRE_TYPE", "BRAND", "MAKTX", "CATEGORY", "CONSTRUCTION", "vehicle type"]
     COLUMN_SYNONYMS = {
         "product category": "CAT_DESC", "category": "CAT_DESC", "categories": "CAT_DESC", "category name": "CAT_DESC",
-        "construction": "CONSTUCTION", "tyre type": "CONSTUCTION", "tire type": "CONSTUCTION",
+        "construction": "CONSTUCTION", "tyre type": "TYRE_TYPE", "tire type": "TYRE_TYPE",
         "radial": "CONSTUCTION", "bias": "CONSTUCTION",
+        "scooter": "CAT_DESC", "motorcycle": "CAT_DESC", "bike": "CAT_DESC", "2 wheeler": "CAT_DESC", "3 wheeler": "CAT_DESC", "auto": "CAT_DESC",
+        "tbr": "CAT_DESC", "pcr": "CAT_DESC", "lcv": "CAT_DESC", "farm": "CAT_DESC", "otr": "CAT_DESC",
+        "replacement": "distribution_channel", "oem": "distribution_channel", "stu": "distribution_channel", "defense": "distribution_channel", "channel": "distribution_channel",
         "brand": "BRAND", "product": "MAKTX", "product name": "MAKTX", "product description": "MAKTX",
         "material": "MATNR", "material description": "MAKTX", "sku": "SKU",
         "region": "region_name", "region name": "region_name", "zone": "P_ZONE", "zone name": "NAME",
@@ -2076,7 +2112,14 @@ def _build_business_map(table_cols, workspace_id):
         "dealer": "NAME1", "customer": "NAME1", "dealer name": "NAME1", "customer name": "NAME1",
         "dealer code": "dealer_code", "customer code": "KUNNR",
         "month": "YMONTH", "year": "CAL_YEAR", "quarter": "QTR",
-        "sales": "invoice_value", "revenue": "invoice_value", "volume": "Tyre_Quantity",
+        "sales": "invoice_value", "revenue": "invoice_value", "volume": "Tyre_Quantity", "quantity": "Tyre_Quantity",
+        "ndp": "ndp_value", "ndp value": "ndp_value", "taxable": "taxable_value", "taxable value": "taxable_value",
+        "discount": "total_discount", "total discount": "total_discount", "gst": "gst",
+        "plan value": "PLAN_VALUE", "target value": "PLAN_VALUE", "target revenue": "PLAN_VALUE", "plan revenue": "PLAN_VALUE",
+        "revised plan value": "REV_PLAN_VAL", "revised value": "REV_PLAN_VAL", "revised target value": "REV_PLAN_VAL", "revised target": "REV_PLAN_VAL",
+        "original plan": "ORG_PLAN", "target quantity": "ORG_PLAN", "target qty": "ORG_PLAN", "plan quantity": "ORG_PLAN", "plan qty": "ORG_PLAN",
+        "revised plan": "REV_PLAN", "revised quantity": "REV_PLAN", "revised qty": "REV_PLAN", "revised plan qty": "REV_PLAN",
+        "net dealer price": "ndp_value"
     }
     
     # Fetch from database
