@@ -2830,7 +2830,7 @@ def run_daily_session_analysis_scheduler(get_connection_func, session_id=None):
     try:
         conn = get_connection_func()
         if not conn:
-            return jsonify({"status": "error", "message": "Failed to connect to database"}), 500
+            return {"status": "error", "message": "Failed to connect to database"}
 
         sessions_to_refresh = []
         if session_id:
@@ -2873,14 +2873,14 @@ def run_daily_session_analysis_scheduler(get_connection_func, session_id=None):
             except Exception as s_err:
                 print(f"[Scheduled Analysis] Session {sid} error: {s_err}", flush=True)
 
-        return jsonify({
+        return {
             "status": "success",
             "message": f"Daily session analysis summary refreshed successfully for {len(refreshed)} session(s)",
             "refreshed_sessions": refreshed
-        }), 200
+        }
     except Exception as e:
         print(f"[Scheduled Analysis] Error: {e}", flush=True)
-        return jsonify({"status": "error", "message": str(e)}), 500
+        return {"status": "error", "message": str(e)}
     finally:
         if conn:
             try: conn.close()

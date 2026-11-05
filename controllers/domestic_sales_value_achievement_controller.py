@@ -824,23 +824,26 @@ def bulk_sync_domestic_sales_value_achievement(mysql_conn, session_id: str, user
         from helper.sap_connection import detect_sales_dates
         det_year, det_month, det_day = detect_sales_dates(h_cur, schema)
         master_months = fetch_master_months(h_cur, schema)
-        print(f"[{TABLE_NAME}] Bulk syncing {len(master_months)} months for detected year {det_year}...", flush=True)
+        curr_yr = int(det_year)
+        years_to_sync = [curr_yr, curr_yr - 1]
+        print(f"[{TABLE_NAME}] Bulk syncing {len(master_months)} months for years {years_to_sync} (current and previous)...", flush=True)
 
-        for m_item in master_months:
-            mo_num = m_item["month_no"]
-            ym = f"{det_year}{str(mo_num).zfill(2)}"
-            try:
-                if mo_num == det_month:
-                    sel_date = f"{det_year}-{str(mo_num).zfill(2)}-{str(det_day).zfill(2)}"
-                else:
-                    last_d = calendar.monthrange(det_year, mo_num)[1]
-                    sel_date = f"{det_year}-{str(mo_num).zfill(2)}-{str(last_d).zfill(2)}"
+        for yr in years_to_sync:
+            for m_item in master_months:
+                mo_num = m_item["month_no"]
+                ym = f"{yr}{str(mo_num).zfill(2)}"
+                try:
+                    if yr == curr_yr and mo_num == det_month:
+                        sel_date = f"{yr}-{str(mo_num).zfill(2)}-{str(det_day).zfill(2)}"
+                    else:
+                        last_d = calendar.monthrange(yr, mo_num)[1]
+                        sel_date = f"{yr}-{str(mo_num).zfill(2)}-{str(last_d).zfill(2)}"
 
-                rows = query_domestic_sales_value_achievement_hana(h_cur, schema, ym, sel_date)
-                if rows:
-                    save_data_to_table(mysql_conn, session_id, ym, sel_date, rows)
-            except Exception as e_m:
-                print(f"[{TABLE_NAME}] Error syncing month {ym}: {e_m}", flush=True)
+                    rows = query_domestic_sales_value_achievement_hana(h_cur, schema, ym, sel_date)
+                    if rows:
+                        save_data_to_table(mysql_conn, session_id, ym, sel_date, rows)
+                except Exception as e_m:
+                    print(f"[{TABLE_NAME}] Error syncing month {ym}: {e_m}", flush=True)
 
         h_cur.close()
         return True
