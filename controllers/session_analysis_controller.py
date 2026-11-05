@@ -1,3 +1,4 @@
+from datetime import datetime
 import hashlib
 import re
 import json
@@ -1899,24 +1900,132 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
         """)
 
     # ---------- 6. Distribution Channels ----------
-    if cust_view:
-        run("channel_distribution", f"""
-            SELECT
-                ROUND(SUM(CASE WHEN UPPER(TRIM(cm."CH_TYPE")) = 'REPL' OR UPPER(TRIM(cm."CH_TYPE")) LIKE '%REPL%' THEN COALESCE(s."invoice_value", 0) ELSE 0 END) * 100.0 / NULLIF(SUM(COALESCE(s."invoice_value", 0)), 0), 2) AS replacement_pct,
-                ROUND(SUM(CASE WHEN UPPER(TRIM(cm."CH_TYPE")) = 'OEM' OR UPPER(TRIM(cm."CH_TYPE")) LIKE '%OEM%' THEN COALESCE(s."invoice_value", 0) ELSE 0 END) * 100.0 / NULLIF(SUM(COALESCE(s."invoice_value", 0)), 0), 2) AS oem_pct,
-                ROUND(SUM(CASE WHEN UPPER(TRIM(cm."CH_TYPE")) = 'STU' OR UPPER(TRIM(cm."CH_TYPE")) LIKE '%STU%' THEN COALESCE(s."invoice_value", 0) ELSE 0 END) * 100.0 / NULLIF(SUM(COALESCE(s."invoice_value", 0)), 0), 2) AS stu_pct,
-                ROUND(SUM(CASE WHEN UPPER(TRIM(cm."CH_TYPE")) = 'DEF' OR UPPER(TRIM(cm."CH_TYPE")) LIKE '%DEF%' THEN COALESCE(s."invoice_value", 0) ELSE 0 END) * 100.0 / NULLIF(SUM(COALESCE(s."invoice_value", 0)), 0), 2) AS def_pct
-            FROM "{schema}"."{sales_view}" s
-            {cust_join}
-            {sales_where}
+    # Query distribution_channel directly from sales view across all channels:
+    # 10 = Replacement, 20 = OEM, 30 = STU, 40 = DEF, 50/other = Other/Export
+    sales_where_all_channels = f'WHERE s."invoice_date" IS NOT NULL AND s."distribution_channel" IN (\'10\', \'20\', \'30\', \'40\', 10, 20, 30, 40) AND (s."indicator_cancel" IS NULL OR s."indicator_cancel" NOT IN (\'X\', \'Y\', \'1\')) {canc_filter}'
+
+    run("channel_distribution", f"""
+        SELECT
+            ROUND(SUM(CASE WHEN CAST(s."distribution_channel" AS VARCHAR(10)) = '10' THEN COALESCE(s."invoice_value", 0) ELSE 0 END) * 100.0 / NULLIF(SUM(COALESCE(s."invoice_value", 0)), 0), 2) AS replacement_pct,
+            ROUND(SUM(CASE WHEN CAST(s."distribution_channel" AS VARCHAR(10)) = '20' THEN COALESCE(s."invoice_value", 0) ELSE 0 END) * 100.0 / NULLIF(SUM(COALESCE(s."invoice_value", 0)), 0), 2) AS oem_pct,
+            ROUND(SUM(CASE WHEN CAST(s."distribution_channel" AS VARCHAR(10)) = '30' THEN COALESCE(s."invoice_value", 0) ELSE 0 END) * 100.0 / NULLIF(SUM(COALESCE(s."invoice_value", 0)), 0), 2) AS stu_pct,
+            ROUND(SUM(CASE WHEN CAST(s."distribution_channel" AS VARCHAR(10)) = '40' THEN COALESCE(s."invoice_value", 0) ELSE 0 END) * 100.0 / NULLIF(SUM(COALESCE(s."invoice_value", 0)), 0), 2) AS def_pct
+        FROM "{schema}"."{sales_view}" s
+        {sales_where_all_channels}
+    """)
+
+    run("distribution_contribution_pct", f"""
+        SELECT
+            CASE CAST(s."distribution_channel" AS VARCHAR(10))
+                WHEN '10' THEN 'Replacement'
+                WHEN '20' THEN 'OEM'
+                WHEN '30' THEN 'STU'
+                WHEN '40' THEN 'DEF'
+            END AS distribution_name,
+            ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue,
+            ROUND(SUM(COALESCE(s."invoice_value", 0)) * 100.0 / NULLIF((SELECT SUM(COALESCE(s_tot."invoice_value", 0)) FROM "{schema}"."{sales_view}" s_tot {sales_where_all_channels.replace('s."', 's_tot."')}), 0), 2) AS contribution_percentage
+        FROM "{schema}"."{sales_view}" s
+        {sales_where_all_channels}
+        GROUP BY CASE CAST(s."distribution_channel" AS VARCHAR(10))
+            WHEN '10' THEN 'Replacement'
+            WHEN '20' THEN 'OEM'
+            WHEN '30' THEN 'STU'
+            WHEN '40' THEN 'DEF'
+        END
+        ORDER BY revenue DESC
+    """)
+
+    # ---------- 7. Target Performance (from ZIVF_SD_Sales_Plan_Target_01_TR) ----------
+    if target_view:
+        tgt_val_col = 'st."PLAN_VALUE"'
+        tgt_qty_col = 'st."ORG_PLAN"'
+
+        # Match target to the period/months present in sales fact view
+        tgt_period_filter = f'WHERE st."YMONTH" IN (SELECT DISTINCT TO_VARCHAR(s."invoice_date", \'YYYYMM\') FROM "{schema}"."{sales_view}" s WHERE s."invoice_date" IS NOT NULL)'
+
+        # Check if period filter matches rows; if not, fallback gracefully
+        test_cnt = 0
+        try:
+            cur.execute(f'SELECT COUNT(*) FROM "{schema}"."{target_view}" st {tgt_period_filter}')
+            row_cnt = cur.fetchone()
+            test_cnt = row_cnt[0] if row_cnt else 0
+        except Exception:
+            pass
+
+        if test_cnt == 0:
+            # Fallback to matching year
+            tgt_period_filter = f'WHERE SUBSTR(st."YMONTH", 1, 4) IN (SELECT DISTINCT TO_VARCHAR(s."invoice_date", \'YYYY\') FROM "{schema}"."{sales_view}" s WHERE s."invoice_date" IS NOT NULL)'
+            try:
+                cur.execute(f'SELECT COUNT(*) FROM "{schema}"."{target_view}" st {tgt_period_filter}')
+                row_cnt = cur.fetchone()
+                if not row_cnt or row_cnt[0] == 0:
+                    tgt_period_filter = ''
+            except Exception:
+                tgt_period_filter = ''
+
+        # 1. Total Target Value (aligned to period)
+        run("total_target_value", f"""
+            SELECT ROUND(SUM({tgt_val_col}) / 10000000.0, 2) AS total_target_value
+            FROM "{schema}"."{target_view}" st
+            {tgt_period_filter}
         """)
 
-    # ---------- 7. Target Performance ----------
-    if target_view:
-        run("total_target_value", f"""
-            SELECT ROUND(SUM(COALESCE("PLAN_VALUE", 0)) / 10000000.0, 2) AS total_target_value
-            FROM "{schema}"."{target_view}"
+        # 2. Target vs Actual Revenue & Achievement %
+        run("target_performance", f"""
+            SELECT
+                ROUND(SUM({tgt_val_col}) / 10000000.0, 2) AS Total_Target_Value,
+                ROUND((SELECT SUM(COALESCE(s."invoice_value", 0)) FROM "{schema}"."{sales_view}" s {sales_where}) / 10000000.0, 2) AS Total_Actual_Revenue,
+                ROUND(((SELECT SUM(COALESCE(s."invoice_value", 0)) FROM "{schema}"."{sales_view}" s {sales_where}) * 100.0) / NULLIF(SUM({tgt_val_col}), 0), 2) AS Overall_Achievement_Percentage,
+                ROUND((SUM({tgt_val_col}) - (SELECT SUM(COALESCE(s."invoice_value", 0)) FROM "{schema}"."{sales_view}" s {sales_where})) / 10000000.0, 2) AS Target_Shortfall_Value
+            FROM "{schema}"."{target_view}" st
+            {tgt_period_filter}
         """)
+
+        # 3. Target vs Actual Quantity & Achievement %
+        run("target_vs_actual_quantity", f"""
+            SELECT
+                ROUND(SUM({tgt_qty_col}), 2) AS Total_Target_Quantity,
+                ROUND((SELECT SUM(COALESCE(s."Tyre_Quantity", 0)) FROM "{schema}"."{sales_view}" s {sales_where}), 2) AS Total_Actual_Quantity,
+                ROUND(((SELECT SUM(COALESCE(s."Tyre_Quantity", 0)) FROM "{schema}"."{sales_view}" s {sales_where}) * 100.0) / NULLIF(SUM({tgt_qty_col}), 0), 2) AS Quantity_Achievement_Percentage
+            FROM "{schema}"."{target_view}" st
+            {tgt_period_filter}
+        """)
+
+        # 4. Top Territory Target Shortfall
+        if terr_view and cust_view:
+            run("territory_target_shortfall", f"""
+                SELECT
+                    COALESCE(NULLIF(TRIM(tm."NAME"), ''), NULLIF(TRIM(st."TERR_CODE"), ''), 'Unmapped Territory') AS territory_name,
+                    ROUND(SUM({tgt_val_col}) / 10000000.0, 2) AS Target_Value,
+                    ROUND(COALESCE(act.actual_revenue, 0) / 10000000.0, 2) AS Actual_Revenue,
+                    ROUND((COALESCE(act.actual_revenue, 0) * 100.0) / NULLIF(SUM({tgt_val_col}), 0), 2) AS Achievement_Percentage,
+                    ROUND((SUM({tgt_val_col}) - COALESCE(act.actual_revenue, 0)) / 10000000.0, 2) AS Shortfall_Value
+                FROM "{schema}"."{target_view}" st
+                LEFT JOIN "{schema}"."{terr_view}" tm ON TRIM(st."TERR_CODE") = TRIM(tm."BZIRK")
+                LEFT JOIN (
+                    SELECT cm."BZIRK", SUM(COALESCE(sd."invoice_value", 0)) AS actual_revenue
+                    FROM "{schema}"."{sales_view}" sd
+                    {cust_join.replace('s."', 'sd."')}
+                    {sales_where.replace('s."', 'sd."')}
+                    GROUP BY cm."BZIRK"
+                ) act ON TRIM(st."TERR_CODE") = TRIM(act."BZIRK")
+                {tgt_period_filter}
+                GROUP BY COALESCE(NULLIF(TRIM(tm."NAME"), ''), NULLIF(TRIM(st."TERR_CODE"), ''), 'Unmapped Territory'), act.actual_revenue
+                ORDER BY Shortfall_Value DESC
+                LIMIT 5
+            """)
+        elif terr_view:
+            run("territory_target_shortfall", f"""
+                SELECT
+                    COALESCE(NULLIF(TRIM(tm."NAME"), ''), NULLIF(TRIM(st."TERR_CODE"), ''), 'Unmapped Territory') AS territory_name,
+                    ROUND(SUM({tgt_val_col}) / 10000000.0, 2) AS Target_Value
+                FROM "{schema}"."{target_view}" st
+                LEFT JOIN "{schema}"."{terr_view}" tm ON TRIM(st."TERR_CODE") = TRIM(tm."BZIRK")
+                {tgt_period_filter}
+                GROUP BY COALESCE(NULLIF(TRIM(tm."NAME"), ''), NULLIF(TRIM(st."TERR_CODE"), ''), 'Unmapped Territory')
+                ORDER BY Target_Value DESC
+                LIMIT 5
+            """)
 
     try:
         cur.close()
@@ -2568,7 +2677,7 @@ CRITICAL INSTRUCTIONS:
 7. Date Formatting: The 'Month' column or any period formatted as YYYYMM (e.g., 202601, 202512) must be translated into readable month names (e.g., 'January 2026', 'December 2025') in your report.
 8. Respond ONLY in valid JSON with a single key: "report".
 9. If a "VERIFIED KPI BLOCK" appears in the data, those numbers are pre-computed and exact — copy them into the report verbatim. Do NOT recompute, re-derive, estimate, or override them using anything from the "SUPPLEMENTARY EXECUTED INSIGHTS" section. The supplementary insights are for color/context only (e.g. the Executive Summary, Business Risks, Actionable Recommendations) — never for the numeric fields already present in the VERIFIED KPI BLOCK.
-10. In the VERIFIED KPI BLOCK, map these field names directly to report labels: claims_amount → "Claims", returns_amount → "Returns", discount_percentage → "Discount %", fleet_contribution_pct → "Fleet Contribution", oem_contribution_pct → "OEM Contribution", target_performance → "Target vs Actual Performance" (Total Target Value, Overall Achievement %, Target Shortfall), target_vs_actual_quantity → "Quantity Achievement %", territory_target_shortfall → "Territory Target Shortfall".
+10. In the VERIFIED KPI BLOCK, map these field names directly to report labels: claims_amount → "Claims", returns_amount → "Returns", discount_percentage → "Discount %", fleet_contribution_pct → "Fleet Contribution", oem_contribution_pct → "OEM Contribution", channel_distribution / distribution_contribution_pct → "Distribution" (Replacement %, OEM %, STU %, DEF %, and breakdown with Contribution %), target_performance → "Target vs Actual Performance" (Total Target Value, Overall Achievement %, Target Shortfall), target_vs_actual_quantity → "Quantity Achievement %", territory_target_shortfall → "Territory Target Shortfall".
 11. UNIT RULE (critical): The monetary values in the VERIFIED KPI BLOCK are ALREADY IN CRORES. You MUST append " Cr" to them. Display them EXACTLY as given, formatted with a ₹ symbol and " Cr" (e.g. if the value is 995.04, write "₹995.04 Cr"). Do NOT divide or multiply them further.
 """
 
@@ -2587,7 +2696,7 @@ ALSO, generate a category-wise trend report as a "line_chart" visualization extr
 
 Return ONLY this JSON:
 {{
-  "report": "TITLE: <Create a descriptive business-focused title based on the data>\\n\\n### Executive Summary\\n<Write exactly 5 to 8 lines summarizing overall business performance, key trends, and main takeaways based purely on the data.>\\n\\n### Key Business Insights\\n\\n**1. Overall Performance**\\n- **Total Revenue**: <Value>\\n- **Total Quantity**: <Value>\\n- **Total Invoices**: <Value>\\n- **Average Invoice Value**: <Value>\\n\\n**2. Revenue Trend**\\n- **Highest Sales Month**: <Value>\\n- **Lowest Sales Month**: <Value>\\n- **Monthly Growth**: <Value>\\n\\n**3. Product Performance**\\n- **Top Category**: <Value>\\n- **Top Construction**: <Value>\\n- **Top Tyre Type**: <Value>\\n- **Top Product**: <Value>\\n- **Lowest Selling Product**: <Value>\\n\\n**4. Customer Performance**\\n- **Top Customers**: <Value>\\n- **Dealer Contribution**: <Value>\\n- **Fleet Contribution**: <Value>\\n- **OEM Contribution**: <Value>\\n- **Customer Concentration**: <Value>\\n\\n**5. Geography**\\n- **Top Zone**: <Value>\\n- **Top Region**: <Value>\\n- **Top Territory**: <Value>\\n- **Lowest Territory**: <Value>\\n\\n**6. Distribution**\\n- **Replacement**: <Value>\\n- **OEM**: <Value>\\n- **STU**: <Value>\\n- **DEF**: <Value>\\n- **Contribution %**: <Value>\\n\\n**7. Target Performance**\\n- **Total Target Value**: <Value>\\n- **Overall Achievement %**: <Value>\\n- **Target Shortfall**: <Value>\\n- **Quantity Achievement %**: <Value>\\n- **Top Target Shortfall Territory**: <Value>\\n\\n**8. Route-to-Market (RtM) Ontology Benchmark**\\n- **Ontology Completeness**: <Completeness Score from RtM Ontology Gap Analysis or N/A>\\n- **Mapped Enterprise Dimensions**: <Summary of matched entities, e.g. Coverage Plan (TCP/TCR), Fulfillment Orders (SupplyOrders)>\\n- **Missing Nodes**: <List all missing nodes with their criticality, e.g., 10 unmapped entities: FieldForceRep (High), GeographyNode/Territory (High), Distributor/Wholesaler (High), CustomerOutlet (High), Product/SKU (High), AssortmentPlan (Medium), CallVisit (Medium), RetailAudit (Medium), SuggestedOrder (Medium), TradeInvestment (Medium)>\\n- **Missing Relationships**: <List key unmapped join relationships from analysis, e.g., 17 unmapped join relationships including FieldForceRep -> covers -> GeographyNode, FieldForceRep -> executes -> CallVisit, CoveragePlan -> schedules -> CallVisit, Distributor -> supplies -> CustomerOutlet, CallVisit -> visits -> CustomerOutlet, etc.>\\n- **Coverage Gaps in Route-to-Market Architecture**: <Key strategic coverage gaps and missing capabilities>\\n- **Operational Blind Spots**: <Key blind spots from ontology analysis>\\n\\n### Business Risks\\n- <Data-driven Risk 1 (e.g. High customer concentration)>\\n- <Data-driven Risk 2 (e.g. High discount dependency)>\\n- <Data-driven Risk 3>\\n\\n### Actionable Recommendations\\n- <Data-driven Recommendation 1 (e.g. Improve sales in low-performing territories)>\\n- <Data-driven Recommendation 2 (e.g. Reduce dependency on top customers)>\\n- <Data-driven Recommendation 3>\\n\\n### Strategic Conclusion\\n<A final strategic conclusion summarizing the path forward for the business.>",
+  "report": "TITLE: <Create a descriptive business-focused title based on the data>\\n\\n### Executive Summary\\n<Write exactly 5 to 8 lines summarizing overall business performance, key trends, and main takeaways based purely on the data.>\\n\\n### Key Business Insights\\n\\n**1. Overall Performance**\\n- **Total Revenue**: <Value>\\n- **Total Quantity**: <Value>\\n- **Total Invoices**: <Value>\\n- **Average Invoice Value**: <Value>\\n\\n**2. Revenue Trend**\\n- **Highest Sales Month**: <Value>\\n- **Lowest Sales Month**: <Value>\\n- **Monthly Growth**: <Value>\\n\\n**3. Product Performance**\\n- **Top Category**: <Value>\\n- **Top Construction**: <Value>\\n- **Top Tyre Type**: <Value>\\n- **Top Product**: <Value>\\n- **Lowest Selling Product**: <Value>\\n\\n**4. Customer Performance**\\n- **Top Customers**: <Value>\\n- **Dealer Contribution**: <Value>\\n- **Fleet Contribution**: <Value>\\n- **OEM Contribution**: <Value>\\n- **Customer Concentration**: <Value>\\n\\n**5. Geography**\\n- **Top Zone**: <Value>\\n- **Top Region**: <Value>\\n- **Top Territory**: <Value>\\n- **Lowest Territory**: <Value>\\n\\n**6. Distribution**\\n- **Replacement**: <Value>\\n- **OEM**: <Value>\\n- **STU**: <Value>\\n- **DEF**: <Value>\\n- **Contribution %**: <Value>\\n\\n**7. Target Performance**\\n- **Total Target Value**: <Value>\\n- **Overall Achievement %**: <Value>\\n- **Target Shortfall**: <Value>\\n- **Quantity Achievement %**: <Value>\\n- **Top Target Shortfall Territory**: <Value>\\n\\n### Business Risks\\n- <Data-driven Risk 1 (e.g. High customer concentration)>\\n- <Data-driven Risk 2 (e.g. High discount dependency)>\\n- <Data-driven Risk 3>\\n\\n### Actionable Recommendations\\n- <Data-driven Recommendation 1 (e.g. Improve sales in low-performing territories)>\\n- <Data-driven Recommendation 2 (e.g. Reduce dependency on top customers)>\\n- <Data-driven Recommendation 3>",
   "follow_up_questions": ["What ...?", "What ...?", "What ...?", "What ...?", "What ...?"],
   "visualizations": [
     {{
@@ -2607,9 +2716,10 @@ Return ONLY this JSON:
 RULES:
 - Replace all <...> with REAL business insights and metrics from the actual data provided.
 - DO NOT mention tables, rows, columns, data types, nulls, or database schema. Keep it 100% business-focused.
-- If Route-to-Market (RtM) Golden Ontology Benchmark appears in the provided context, accurately reflect the completeness score, mapped dimensions, missing entities, and blind spots in section 8.
-- In Section 8 (Route-to-Market (RtM) Ontology Benchmark), you MUST explicitly include both '- **Missing Nodes**:' (listing the unmapped nodes with criticality) and '- **Missing Relationships**:' (listing the unmapped join relationships) as separate text bullets, exactly like the other bullets.
-- NEVER mention the word 'template', 'golden copy', or 'sample' anywhere in the report. Present missing entities purely as 'Unmapped Strategic Business Dimensions' or 'Coverage Gaps in Route-to-Market Architecture'.
+# (Route-to-Market & Strategic Conclusion commented out per UI request; uncomment below to re-enable)
+# - If Route-to-Market (RtM) Golden Ontology Benchmark appears in the provided context, accurately reflect the completeness score, mapped dimensions, missing entities, and blind spots in section 8.
+# - In Section 8 (Route-to-Market (RtM) Ontology Benchmark), you MUST explicitly include both '- **Missing Nodes**:' (listing the unmapped nodes with criticality) and '- **Missing Relationships**:' (listing the unmapped join relationships) as separate text bullets, exactly like the other bullets.
+# - NEVER mention the word 'template', 'golden copy', or 'sample' anywhere in the report. Present missing entities purely as 'Unmapped Strategic Business Dimensions' or 'Coverage Gaps in Route-to-Market Architecture'.
 - If a specific metric (e.g., Target Performance, OEM Contribution, Highest/Lowest Sales Month, YTD) is not explicitly calculated and available in the provided data, write "N/A based on available data" rather than hallucinating or guessing based on overall date ranges. Keep the bullet structure intact.
 - Use \\n for newlines inside the JSON string.
 - Every point must reference a specific value, name, or number from the actual data. DO NOT INVENT NUMBERS for entities just to fulfill this rule.
@@ -2775,6 +2885,38 @@ def session_analysis_controller(get_connection_func):
 
         # 6. Save to cache
         _save_cache(session_id, data_hash, report, graph_url, topics, databases, conn)
+
+        # Update or insert into session_chat_history so UI SummaryCard binds immediately on manual button hit as well
+        try:
+            today_str = datetime.now().strftime("%d_%m_%Y")
+            default_q = f"default_{today_str}"
+            ch_cur = conn.cursor(dictionary=True) if hasattr(conn, "cursor") else conn.cursor()
+            ch_cur.execute("""
+                SELECT id FROM session_chat_history
+                WHERE session_id = %s AND (question LIKE 'default_%' OR question = 'default')
+                ORDER BY id DESC LIMIT 1
+            """, (session_id,))
+            ex_row = ch_cur.fetchone()
+            if ex_row:
+                ch_cur.execute("""
+                    UPDATE session_chat_history
+                    SET question = %s, answer = %s, created_at = NOW()
+                    WHERE id = %s
+                """, (default_q, str(report), ex_row["id"]))
+            else:
+                ch_cur.execute("SELECT user_id FROM workspaces WHERE session_id = %s LIMIT 1", (session_id,))
+                ws_u = ch_cur.fetchone()
+                u_id = ws_u["user_id"] if ws_u and ws_u.get("user_id") else 1
+                ch_cur.execute("""
+                    INSERT INTO session_chat_history
+                    (session_id, user_id, turn_index, visit_number, question, answer, mode)
+                    VALUES (%s, %s, 0, 1, %s, %s, 'answer')
+                """, (session_id, u_id, default_q, str(report)))
+            conn.commit()
+            ch_cur.close()
+            print(f"[Analysis] session_chat_history updated for session {session_id}", flush=True)
+        except Exception as ch_err:
+            print(f"[Analysis] session_chat_history update note: {ch_err}", flush=True)
 
         # 7. Step 4: Store in Vector DB (ChromaDB) - Kept separate if skip_vector is requested
         skip_vector = data.get("skip_vector", False) or data.get("is_scheduled", False)

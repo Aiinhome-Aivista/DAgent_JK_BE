@@ -497,7 +497,7 @@ def save_chat_history(get_connection_func):
             # Update the very first turn of this visit
             cursor.execute("""
                 UPDATE session_chat_history
-                SET question=%s, answer=%s, follow_up_questions=%s, visualizations=%s, intent=%s, mode=%s
+                SET question=%s, answer=%s, follow_up_questions=%s, visualizations=%s, intent=%s, mode=%s, created_at=CURRENT_TIMESTAMP
                 WHERE session_id=%s AND visit_number=%s AND turn_index=0
             """, (
                 question,
@@ -701,6 +701,8 @@ def get_chat_history(get_connection_func):
                     (h.session_id = %s AND (
                         h.user_id = %s 
                         OR h.visit_number = 1 
+                        OR h.question LIKE 'default_%%'
+                        OR h.question = 'default'
                         OR h.session_id LIKE 'def_%%'
                         OR h.is_public = TRUE
                     ))

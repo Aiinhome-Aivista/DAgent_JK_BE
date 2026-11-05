@@ -1181,8 +1181,8 @@ def _save_history(get_fn, session_id, user_id, question, answer,
             cur.execute("""
                 SELECT COALESCE(MAX(visit_number), 0) AS max_v
                 FROM session_chat_history
-                WHERE session_id = %s AND user_id = %s
-            """, (session_id, int(user_id)))
+                WHERE session_id = %s
+            """, (session_id,))
             max_v_row = cur.fetchone()
             visit = (max_v_row["max_v"] + 1) if max_v_row else 1
 
