@@ -1396,6 +1396,12 @@ def session_analysis():
 
     return session_analysis_controller(get_db_connection)
 
+@app.route("/session-analysis/daily-refresh", methods=["POST", "GET"])
+@app.route("/api/session-analysis/daily-refresh", methods=["POST", "GET"])
+def session_analysis_daily_refresh():
+    from controllers.session_analysis_controller import run_daily_session_analysis_scheduler
+    return run_daily_session_analysis_scheduler(get_db_connection)
+
 
 
 @app.route("/session-analysis-history", methods=["GET"])

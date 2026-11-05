@@ -1518,6 +1518,406 @@ def _compute_core_kpis(cursor) -> dict:
     return kpis
 
 
+import json
+
+def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dict:
+    """
+    Computes deterministic Core KPIs directly from live SAP HANA views.
+    Returns the exact key-value structure as MySQL _compute_core_kpis so the LLM prompt
+    receives the complete VERIFIED KPI BLOCK with exact figures.
+    """
+    kpis = {}
+    if not hana_conn or not view_names:
+        return kpis
+
+    view_lookup = {v.lower().strip(): v.strip() for v in view_names}
+
+    def resolve(*names):
+        for n in names:
+            if n.lower() in view_lookup:
+                return view_lookup[n.lower()]
+        return None
+
+    # Prefer CurrentSales (active period 2026), fallback to SalesHistory
+    sales_view = resolve("ZPVF_SD_CurrentSales_01_TR", "ZPVF_SD_SalesHistory_01_TR", "ZPVF_SD_CancelledSalesInvoice_01_TR")
+    sku_view = resolve("ZIVR_SKUMaster_01_TR")
+    cat_view = resolve("ZIVF_CategoryMaster_01_TR")
+    cust_view = resolve("ZIVF_CustomerMaster_01_MD")
+    terr_view = resolve("ZIVF_TerritoryMaster_01_TR")
+    reg_view = resolve("ZIVF_RegionMaster_MD_01")
+    zone_view = resolve("ZIVF_ZoneMaster_01_TR")
+    target_view = resolve("ZIVF_SD_Sales_Plan_Target_01_TR")
+    canc_view = resolve("ZPVF_SD_CancelledSalesInvoice_01_TR")
+
+    if not sales_view:
+        print("[CoreKPI-HANA] No sales fact view found in view list", flush=True)
+        return kpis
+
+    schema = sap_schema or "SAP_S4"
+    cur = None
+    try:
+        cur = hana_conn.cursor()
+    except Exception as e:
+        print(f"[CoreKPI-HANA] Failed to create cursor: {e}", flush=True)
+        return kpis
+
+    def run(label, sql):
+        try:
+            cur.execute(sql)
+            cols = [d[0].lower() for d in cur.description] if cur.description else []
+            rows = cur.fetchall()
+            if not rows:
+                kpis[label] = None
+                return
+            result = []
+            for r in rows:
+                if isinstance(r, dict):
+                    result.append(r)
+                else:
+                    result.append(dict(zip(cols, r)))
+            kpis[label] = result
+        except Exception as e:
+            print(f"[CoreKPI-HANA] '{label}' skipped or error: {e}", flush=True)
+            kpis[label] = None
+
+    # Common business sales filters matching exact specification:
+    # 1. distribution_channel = 10
+    # 2. indicator_cancel NOT IN ('X', 'Y', '1')
+    # 3. Not in CancelledSalesInvoice (invoice_number, Plant, FKART)
+    canc_filter = f'AND NOT EXISTS (SELECT 1 FROM "{schema}"."{canc_view}" c WHERE c."invoice_number" = s."invoice_number" AND c."Plant" = s."Plant" AND c."FKART" = s."FKART")' if canc_view else ''
+    sales_where = f'WHERE s."invoice_date" IS NOT NULL AND (s."distribution_channel" = \'10\' OR s."distribution_channel" = 10) AND (s."indicator_cancel" IS NULL OR s."indicator_cancel" NOT IN (\'X\', \'Y\', \'1\')) {canc_filter}'
+
+    # ---------- 1. Overall Performance ----------
+    run("total_revenue", f"""
+        SELECT ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS total_revenue
+        FROM "{schema}"."{sales_view}" s
+        {sales_where}
+    """)
+
+    run("total_quantity", f"""
+        SELECT ROUND(SUM(COALESCE(s."Tyre_Quantity", 0)), 2) AS total_quantity
+        FROM "{schema}"."{sales_view}" s
+        {sales_where}
+    """)
+
+    run("total_transactions", f"""
+        SELECT COUNT(*) AS total_transactions
+        FROM "{schema}"."{sales_view}" s
+        {sales_where}
+    """)
+
+    run("avg_transaction_value", f"""
+        SELECT ROUND(SUM(COALESCE(s."invoice_value", 0)) / NULLIF(COUNT(*), 0), 2) AS average_transaction_value
+        FROM "{schema}"."{sales_view}" s
+        {sales_where}
+    """)
+
+    run("avg_selling_price", f"""
+        SELECT ROUND(SUM(COALESCE(s."invoice_value", 0)) / NULLIF(SUM(COALESCE(s."Tyre_Quantity", 0)), 0), 2) AS average_selling_price
+        FROM "{schema}"."{sales_view}" s
+        {sales_where}
+    """)
+
+    # ---------- 2. Revenue Trend ----------
+    run("highest_sales_month", f"""
+        SELECT
+            YEAR(s."invoice_date") AS sales_year,
+            MONTHNAME(s."invoice_date") AS month_name,
+            ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue
+        FROM "{schema}"."{sales_view}" s
+        {sales_where}
+        GROUP BY YEAR(s."invoice_date"), MONTH(s."invoice_date"), MONTHNAME(s."invoice_date")
+        ORDER BY revenue DESC
+        LIMIT 1
+    """)
+
+    run("lowest_sales_month", f"""
+        SELECT
+            YEAR(s."invoice_date") AS sales_year,
+            MONTHNAME(s."invoice_date") AS month_name,
+            ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue
+        FROM "{schema}"."{sales_view}" s
+        {sales_where}
+        GROUP BY YEAR(s."invoice_date"), MONTH(s."invoice_date"), MONTHNAME(s."invoice_date")
+        ORDER BY revenue ASC
+        LIMIT 1
+    """)
+
+    run("highest_growth_month", f"""
+        WITH MonthlyRevenue AS (
+            SELECT
+                YEAR(s."invoice_date") AS sales_year,
+                MONTH(s."invoice_date") AS sales_month,
+                MONTHNAME(s."invoice_date") AS month_name,
+                (SUM(COALESCE(s."invoice_value", 0)) / 10000000.0) AS revenue
+            FROM "{schema}"."{sales_view}" s
+            {sales_where}
+            GROUP BY YEAR(s."invoice_date"), MONTH(s."invoice_date"), MONTHNAME(s."invoice_date")
+        ),
+        Growth AS (
+            SELECT
+                sales_year, month_name,
+                ROUND(revenue, 2) AS current_revenue,
+                ROUND(
+                    (revenue - LAG(revenue) OVER(ORDER BY sales_year, sales_month))
+                    / NULLIF(LAG(revenue) OVER(ORDER BY sales_year, sales_month), 0) * 100.0
+                , 2) AS mom_growth_percentage
+            FROM MonthlyRevenue
+        )
+        SELECT * FROM Growth
+        WHERE mom_growth_percentage IS NOT NULL
+        ORDER BY mom_growth_percentage DESC
+        LIMIT 1
+    """)
+
+    run("lowest_growth_month", f"""
+        WITH MonthlyRevenue AS (
+            SELECT
+                YEAR(s."invoice_date") AS sales_year,
+                MONTH(s."invoice_date") AS sales_month,
+                MONTHNAME(s."invoice_date") AS month_name,
+                (SUM(COALESCE(s."invoice_value", 0)) / 10000000.0) AS revenue
+            FROM "{schema}"."{sales_view}" s
+            {sales_where}
+            GROUP BY YEAR(s."invoice_date"), MONTH(s."invoice_date"), MONTHNAME(s."invoice_date")
+        ),
+        Growth AS (
+            SELECT
+                sales_year, month_name,
+                ROUND(revenue, 2) AS current_revenue,
+                ROUND(
+                    (revenue - LAG(revenue) OVER(ORDER BY sales_year, sales_month))
+                    / NULLIF(LAG(revenue) OVER(ORDER BY sales_year, sales_month), 0) * 100.0
+                , 2) AS mom_growth_percentage
+            FROM MonthlyRevenue
+        )
+        SELECT * FROM Growth
+        WHERE mom_growth_percentage IS NOT NULL
+        ORDER BY mom_growth_percentage ASC
+        LIMIT 1
+    """)
+
+    # ---------- 3. Product Performance ----------
+    if sku_view and cat_view:
+        run("top_category", f"""
+            SELECT
+                COALESCE(NULLIF(TRIM(cat."CAT_DESC"), ''), NULLIF(TRIM(cat."SHORT_DESC"), ''), 'Unmapped Category') AS category_name,
+                ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue
+            FROM "{schema}"."{sales_view}" s
+            INNER JOIN "{schema}"."{sku_view}" sk ON TRIM(s."SKU") = TRIM(sk."MATNR")
+            LEFT JOIN "{schema}"."{cat_view}" cat ON TRIM(sk."CAT_CODE") = TRIM(cat."CAT_CODE")
+            {sales_where}
+            GROUP BY COALESCE(NULLIF(TRIM(cat."CAT_DESC"), ''), NULLIF(TRIM(cat."SHORT_DESC"), ''), 'Unmapped Category')
+            ORDER BY revenue DESC
+            LIMIT 1
+        """)
+
+        run("lowest_category", f"""
+            SELECT
+                COALESCE(NULLIF(TRIM(cat."CAT_DESC"), ''), NULLIF(TRIM(cat."SHORT_DESC"), ''), 'Unmapped Category') AS category_name,
+                ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue
+            FROM "{schema}"."{sales_view}" s
+            INNER JOIN "{schema}"."{sku_view}" sk ON TRIM(s."SKU") = TRIM(sk."MATNR")
+            LEFT JOIN "{schema}"."{cat_view}" cat ON TRIM(sk."CAT_CODE") = TRIM(cat."CAT_CODE")
+            {sales_where}
+            GROUP BY COALESCE(NULLIF(TRIM(cat."CAT_DESC"), ''), NULLIF(TRIM(cat."SHORT_DESC"), ''), 'Unmapped Category')
+            ORDER BY revenue ASC
+            LIMIT 1
+        """)
+
+    if sku_view:
+        run("top_construction", f"""
+            SELECT
+                COALESCE(NULLIF(TRIM(sk."CONSTUCTION"), ''), NULLIF(TRIM(sk."BULD_TYPE"), ''), 'Unknown') AS construction_description,
+                ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue
+            FROM "{schema}"."{sales_view}" s
+            INNER JOIN "{schema}"."{sku_view}" sk ON TRIM(s."SKU") = TRIM(sk."MATNR")
+            {sales_where}
+            GROUP BY COALESCE(NULLIF(TRIM(sk."CONSTUCTION"), ''), NULLIF(TRIM(sk."BULD_TYPE"), ''), 'Unknown')
+            ORDER BY revenue DESC
+            LIMIT 1
+        """)
+
+        run("top_tyre_type", f"""
+            SELECT
+                COALESCE(NULLIF(TRIM(sk."TYRE_TYPE"), ''), NULLIF(TRIM(sk."TYRE_TP"), ''), 'Unknown') AS tyre_type_name,
+                ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue
+            FROM "{schema}"."{sales_view}" s
+            INNER JOIN "{schema}"."{sku_view}" sk ON TRIM(s."SKU") = TRIM(sk."MATNR")
+            {sales_where}
+            GROUP BY COALESCE(NULLIF(TRIM(sk."TYRE_TYPE"), ''), NULLIF(TRIM(sk."TYRE_TP"), ''), 'Unknown')
+            ORDER BY revenue DESC
+            LIMIT 1
+        """)
+
+        run("top_5_products", f"""
+            SELECT
+                COALESCE(NULLIF(TRIM(sk."MAKTX"), ''), NULLIF(TRIM(sk."PROD_TITLE"), ''), TRIM(s."SKU")) AS product_name,
+                ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue
+            FROM "{schema}"."{sales_view}" s
+            INNER JOIN "{schema}"."{sku_view}" sk ON TRIM(s."SKU") = TRIM(sk."MATNR")
+            {sales_where}
+            GROUP BY COALESCE(NULLIF(TRIM(sk."MAKTX"), ''), NULLIF(TRIM(sk."PROD_TITLE"), ''), TRIM(s."SKU"))
+            ORDER BY revenue DESC
+            LIMIT 5
+        """)
+
+        run("bottom_5_products", f"""
+            SELECT
+                COALESCE(NULLIF(TRIM(sk."MAKTX"), ''), NULLIF(TRIM(sk."PROD_TITLE"), ''), TRIM(s."SKU")) AS product_name,
+                ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue
+            FROM "{schema}"."{sales_view}" s
+            INNER JOIN "{schema}"."{sku_view}" sk ON TRIM(s."SKU") = TRIM(sk."MATNR")
+            {sales_where}
+            GROUP BY COALESCE(NULLIF(TRIM(sk."MAKTX"), ''), NULLIF(TRIM(sk."PROD_TITLE"), ''), TRIM(s."SKU"))
+            ORDER BY revenue ASC
+            LIMIT 5
+        """)
+
+    # ---------- 4. Customer Performance ----------
+    # Customer Master business filter: KLABC <> 'X'
+    if cust_view:
+        cust_join = f"""
+            INNER JOIN "{schema}"."{cust_view}" cm ON (
+                (s."dealer_code" = cm."KUNNR" OR
+                 LPAD(TRIM(s."dealer_code"), 10, '0') = cm."KUNNR" OR
+                 LTRIM(s."dealer_code", '0') = LTRIM(cm."KUNNR", '0'))
+                AND (cm."KLABC" IS NULL OR cm."KLABC" <> 'X')
+            )
+        """
+        run("top_customer", f"""
+            SELECT
+                COALESCE(NULLIF(TRIM(cm."NAME1"), ''), NULLIF(TRIM(cm."BNAME"), ''), TRIM(s."dealer_code")) AS customer_name,
+                ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue
+            FROM "{schema}"."{sales_view}" s
+            {cust_join}
+            {sales_where}
+            GROUP BY COALESCE(NULLIF(TRIM(cm."NAME1"), ''), NULLIF(TRIM(cm."BNAME"), ''), TRIM(s."dealer_code"))
+            ORDER BY revenue DESC
+            LIMIT 1
+        """)
+
+        run("top_5_customers", f"""
+            SELECT
+                COALESCE(NULLIF(TRIM(cm."NAME1"), ''), NULLIF(TRIM(cm."BNAME"), ''), TRIM(s."dealer_code")) AS customer_name,
+                ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue
+            FROM "{schema}"."{sales_view}" s
+            {cust_join}
+            {sales_where}
+            GROUP BY COALESCE(NULLIF(TRIM(cm."NAME1"), ''), NULLIF(TRIM(cm."BNAME"), ''), TRIM(s."dealer_code"))
+            ORDER BY revenue DESC
+            LIMIT 5
+        """)
+
+        run("dealer_contribution_pct", f"""
+            SELECT ROUND(SUM(CASE WHEN UPPER(TRIM(cm."CH_TYPE")) LIKE '%DEAL%' OR UPPER(TRIM(cm."CH_TYPE")) = 'REPL' THEN COALESCE(s."invoice_value", 0) ELSE 0 END) * 100.0 / NULLIF(SUM(COALESCE(s."invoice_value", 0)), 0), 2) AS dealer_contribution_percentage
+            FROM "{schema}"."{sales_view}" s
+            {cust_join}
+            {sales_where}
+        """)
+
+        run("fleet_contribution_pct", f"""
+            SELECT ROUND(SUM(CASE WHEN UPPER(TRIM(cm."CH_TYPE")) LIKE '%FLEET%' OR UPPER(TRIM(cm."KDGRP")) LIKE '%FLEET%' THEN COALESCE(s."invoice_value", 0) ELSE 0 END) * 100.0 / NULLIF(SUM(COALESCE(s."invoice_value", 0)), 0), 2) AS fleet_contribution_percentage
+            FROM "{schema}"."{sales_view}" s
+            {cust_join}
+            {sales_where}
+        """)
+
+        run("oem_contribution_pct", f"""
+            SELECT ROUND(SUM(CASE WHEN UPPER(TRIM(cm."CH_TYPE")) LIKE '%OEM%' OR UPPER(TRIM(cm."KDGRP")) LIKE '%OEM%' THEN COALESCE(s."invoice_value", 0) ELSE 0 END) * 100.0 / NULLIF(SUM(COALESCE(s."invoice_value", 0)), 0), 2) AS oem_contribution_percentage
+            FROM "{schema}"."{sales_view}" s
+            {cust_join}
+            {sales_where}
+        """)
+
+    # ---------- 5. Geography ----------
+    if cust_view and (terr_view or reg_view or zone_view):
+        terr_join = f'LEFT JOIN "{schema}"."{terr_view}" tm ON (cm."BZIRK" = tm."BZIRK" OR TRIM(cm."BZIRK") = TRIM(tm."BZIRK"))' if terr_view else ''
+        reg_join = f'LEFT JOIN "{schema}"."{reg_view}" rm ON (tm."REGIO" = rm."region_code" OR TRIM(tm."REGIO") = TRIM(rm."region_code"))' if (terr_view and reg_view) else ''
+        zone_join = f'LEFT JOIN "{schema}"."{zone_view}" zm ON (COALESCE(tm."P_ZONE", rm."zone_code") = zm."P_ZONE")' if (zone_view and terr_view and reg_view) else ''
+
+        run("top_zone", f"""
+            SELECT
+                COALESCE(NULLIF(TRIM(zm."NAME"), ''), NULLIF(TRIM(zm."P_ZONE"), ''), NULLIF(TRIM(tm."P_ZONE"), ''), 'Unknown') AS zone_name,
+                ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue
+            FROM "{schema}"."{sales_view}" s
+            {cust_join}
+            {terr_join}
+            {reg_join}
+            {zone_join}
+            {sales_where}
+            GROUP BY COALESCE(NULLIF(TRIM(zm."NAME"), ''), NULLIF(TRIM(zm."P_ZONE"), ''), NULLIF(TRIM(tm."P_ZONE"), ''), 'Unknown')
+            ORDER BY revenue DESC
+            LIMIT 1
+        """)
+
+        run("top_region", f"""
+            SELECT
+                COALESCE(NULLIF(TRIM(rm."region_name"), ''), NULLIF(TRIM(rm."region_code"), ''), 'Unknown') AS region_name,
+                ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue
+            FROM "{schema}"."{sales_view}" s
+            {cust_join}
+            {terr_join}
+            {reg_join}
+            {sales_where}
+            GROUP BY COALESCE(NULLIF(TRIM(rm."region_name"), ''), NULLIF(TRIM(rm."region_code"), ''), 'Unknown')
+            ORDER BY revenue DESC
+            LIMIT 1
+        """)
+
+        run("top_territory", f"""
+            SELECT
+                COALESCE(NULLIF(TRIM(tm."NAME"), ''), NULLIF(TRIM(tm."BZIRK"), ''), 'Unknown') AS territory_name,
+                ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue
+            FROM "{schema}"."{sales_view}" s
+            {cust_join}
+            {terr_join}
+            {sales_where}
+            GROUP BY COALESCE(NULLIF(TRIM(tm."NAME"), ''), NULLIF(TRIM(tm."BZIRK"), ''), 'Unknown')
+            ORDER BY revenue DESC
+            LIMIT 1
+        """)
+
+        run("lowest_territory", f"""
+            SELECT
+                COALESCE(NULLIF(TRIM(tm."NAME"), ''), NULLIF(TRIM(tm."BZIRK"), ''), 'Unknown') AS territory_name,
+                ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue
+            FROM "{schema}"."{sales_view}" s
+            {cust_join}
+            {terr_join}
+            {sales_where}
+            GROUP BY COALESCE(NULLIF(TRIM(tm."NAME"), ''), NULLIF(TRIM(tm."BZIRK"), ''), 'Unknown')
+            ORDER BY revenue ASC
+            LIMIT 1
+        """)
+
+    # ---------- 6. Distribution Channels ----------
+    if cust_view:
+        run("channel_distribution", f"""
+            SELECT
+                ROUND(SUM(CASE WHEN UPPER(TRIM(cm."CH_TYPE")) = 'REPL' OR UPPER(TRIM(cm."CH_TYPE")) LIKE '%REPL%' THEN COALESCE(s."invoice_value", 0) ELSE 0 END) * 100.0 / NULLIF(SUM(COALESCE(s."invoice_value", 0)), 0), 2) AS replacement_pct,
+                ROUND(SUM(CASE WHEN UPPER(TRIM(cm."CH_TYPE")) = 'OEM' OR UPPER(TRIM(cm."CH_TYPE")) LIKE '%OEM%' THEN COALESCE(s."invoice_value", 0) ELSE 0 END) * 100.0 / NULLIF(SUM(COALESCE(s."invoice_value", 0)), 0), 2) AS oem_pct,
+                ROUND(SUM(CASE WHEN UPPER(TRIM(cm."CH_TYPE")) = 'STU' OR UPPER(TRIM(cm."CH_TYPE")) LIKE '%STU%' THEN COALESCE(s."invoice_value", 0) ELSE 0 END) * 100.0 / NULLIF(SUM(COALESCE(s."invoice_value", 0)), 0), 2) AS stu_pct,
+                ROUND(SUM(CASE WHEN UPPER(TRIM(cm."CH_TYPE")) = 'DEF' OR UPPER(TRIM(cm."CH_TYPE")) LIKE '%DEF%' THEN COALESCE(s."invoice_value", 0) ELSE 0 END) * 100.0 / NULLIF(SUM(COALESCE(s."invoice_value", 0)), 0), 2) AS def_pct
+            FROM "{schema}"."{sales_view}" s
+            {cust_join}
+            {sales_where}
+        """)
+
+    # ---------- 7. Target Performance ----------
+    if target_view:
+        run("total_target_value", f"""
+            SELECT ROUND(SUM(COALESCE("PLAN_VALUE", 0)) / 10000000.0, 2) AS total_target_value
+            FROM "{schema}"."{target_view}"
+        """)
+
+    try:
+        cur.close()
+    except Exception:
+        pass
+
+    return kpis
+
 
 
 def _fetch_agentic_insights(cursor, tables_info: list, db_type: str) -> list:
@@ -1952,7 +2352,7 @@ def _fetch_db_data(session_id: str, databases: list, conn) -> list:
         except Exception as outer_e:
             print(f"[Analysis] Outer PostgreSQL block error: {outer_e}")
 
-    # ── 3. SAP HANA (Stored Metadata & Trigger K-Graph Build) ──
+    # ── 3. SAP HANA (Live Core KPIs & Stored Metadata) ──
     hana_cursor = None
     try:
         hana_cursor = conn.cursor(dictionary=True)
@@ -1963,26 +2363,38 @@ def _fetch_db_data(session_id: str, databases: list, conn) -> list:
         """, (session_id,))
         hana_rows = hana_cursor.fetchall()
         if hana_rows:
-            # Trigger HANA K-Graph build synchronously from stored metadata only
-            from database.hana_kgraph_service import build_hana_kgraph_from_metadata, get_hana_kgraph_status
-            unique_cids = list({r["connection_id"] for r in hana_rows if r.get("connection_id")})
+            view_names = [hr.get("view_name") for hr in hana_rows if hr.get("view_name")]
+            schema_name = next((hr.get("schema_name") for hr in hana_rows if hr.get("schema_name")), "SAP_S4")
+
+            # 1. Deterministic Core KPIs directly from live SAP HANA views
+            hana_core_kpis = {}
+            try:
+                from helper.sap_connection import get_sap_connection_for_session
+                h_conn, h_tunnel, h_schema = get_sap_connection_for_session(conn, session_id)
+                if h_conn:
+                    eff_schema = h_schema or schema_name or "SAP_S4"
+                    hana_core_kpis = _compute_core_kpis_hana(h_conn, eff_schema, view_names)
+                    try: h_conn.close()
+                    except Exception: pass
+                    if h_tunnel:
+                        try: h_tunnel.stop()
+                        except Exception: pass
+            except Exception as hkpi_e:
+                print(f"[Analysis] SAP HANA Core KPIs execution note: {hkpi_e}", flush=True)
+
+            # 2. Read existing K-Graph and Ontology (Keeps K-Graph separate from analysis calculations)
             last_ontology_analysis = None
             last_hana_kgraph = None
-            for cid in unique_cids:
-                status_rows = get_hana_kgraph_status(session_id=session_id, connection_id=cid, include_graph=True)
-                status_info = status_rows[0] if status_rows else None
-                cur_status = status_info.get("status") if status_info else None
-                if cur_status != "ready":
-                    print(f"[Analysis] Building HANA K-Graph on Continue to Process for connection {cid} from stored metadata...")
-                    build_res = build_hana_kgraph_from_metadata(cid, session_id)
-                    if build_res and isinstance(build_res, dict):
-                        if build_res.get("ontology_analysis"):
-                            last_ontology_analysis = build_res["ontology_analysis"]
-                        if build_res.get("graph"):
-                            last_hana_kgraph = build_res["graph"]
-                elif status_info and status_info.get("graph") and isinstance(status_info["graph"], dict):
-                    last_hana_kgraph = status_info["graph"]
-                    last_ontology_analysis = status_info["graph"].get("ontology_analysis")
+            try:
+                from database.hana_kgraph_service import get_hana_kgraph_status
+                unique_cids = list({r["connection_id"] for r in hana_rows if r.get("connection_id")})
+                for cid in unique_cids:
+                    status_rows = get_hana_kgraph_status(session_id=session_id, connection_id=cid, include_graph=True)
+                    if status_rows and status_rows[0].get("graph"):
+                        last_hana_kgraph = status_rows[0]["graph"]
+                        last_ontology_analysis = status_rows[0]["graph"].get("ontology_analysis")
+            except Exception as kg_err:
+                print(f"[Analysis] K-Graph read status note: {kg_err}", flush=True)
 
             hana_tables = []
             for hr in hana_rows:
@@ -2004,15 +2416,19 @@ def _fetch_db_data(session_id: str, databases: list, conn) -> list:
                     "business_aggregates": [f"Total Rows: {int(hr.get('row_count') or 0):,}"]
                 })
 
-            results.append({
+            db_result_hana = {
                 "source_type": "database",
                 "external_database": "SAP HANA",
                 "new_user_db": "sap_hana_metadata",
                 "tables": hana_tables,
                 "ontology_analysis": last_ontology_analysis,
                 "hana_kgraph": last_hana_kgraph
-            })
-            print(f"[Analysis] SAP HANA metadata added to analysis context: {len(hana_tables)} views.")
+            }
+            if hana_core_kpis:
+                db_result_hana["core_kpis"] = hana_core_kpis
+
+            results.append(db_result_hana)
+            print(f"[Analysis] SAP HANA metadata + {len(hana_core_kpis)} Core KPIs added to analysis context.")
     except Exception as hana_err:
         print(f"[Analysis] SAP HANA data fetch/build error: {hana_err}")
     finally:
@@ -2353,12 +2769,14 @@ def session_analysis_controller(get_connection_func):
         # 6. Save to cache
         _save_cache(session_id, data_hash, report, graph_url, topics, databases, conn)
 
-        # 7. Step 4: Store in Vector DB (ChromaDB)
+        # 7. Step 4: Store in Vector DB (ChromaDB) - Kept separate if skip_vector is requested
+        skip_vector = data.get("skip_vector", False) or data.get("is_scheduled", False)
         vector_res = None
-        try:
-            from controllers.vector_store import push_session_analysis_and_kgraph_to_vector_db
-            hana_kgraph = next((d.get("hana_kgraph") for d in db_data if d.get("hana_kgraph")), None)
-            vector_res = push_session_analysis_and_kgraph_to_vector_db(
+        if not skip_vector:
+            try:
+                from controllers.vector_store import push_session_analysis_and_kgraph_to_vector_db
+                hana_kgraph = next((d.get("hana_kgraph") for d in db_data if d.get("hana_kgraph")), None)
+                vector_res = push_session_analysis_and_kgraph_to_vector_db(
                 session_id=session_id,
                 report=report,
                 kgraph=hana_kgraph,
@@ -2367,9 +2785,9 @@ def session_analysis_controller(get_connection_func):
                 ontology_analysis=ontology_analysis,
                 conn=conn
             )
-            print(f"[Analysis] Vector DB push result: {vector_res}")
-        except Exception as v_err:
-            print(f"[Analysis] Vector DB push error (non-fatal): {v_err}")
+                print(f"[Analysis] Vector DB push result: {vector_res}")
+            except Exception as v_err:
+                print(f"[Analysis] Vector DB push error (non-fatal): {v_err}")
 
 
         return jsonify({
@@ -2392,3 +2810,58 @@ def session_analysis_controller(get_connection_func):
         }), 500
     finally:
         if conn: conn.close()
+
+
+def run_daily_session_analysis_scheduler(get_connection_func, session_id=None):
+    """
+    Background Scheduler Function:
+    Periodically updates the executive analysis summary for active sessions.
+    Re-runs Core KPIs and updates session_analysis_cache.
+    Keeps K-Graph and Vector separate (no rebuilds).
+    """
+    conn = None
+    try:
+        conn = get_connection_func()
+        if not conn:
+            return jsonify({"status": "error", "message": "Failed to connect to database"}), 500
+
+        sessions_to_refresh = []
+        if session_id:
+            sessions_to_refresh.append(session_id)
+        else:
+            cur = conn.cursor(dictionary=True) if hasattr(conn, "cursor") else conn.cursor()
+            cur.execute("SELECT DISTINCT session_id FROM workspaces WHERE session_id IS NOT NULL AND session_id != '' ORDER BY id DESC LIMIT 5")
+            sessions_to_refresh = [r["session_id"] for r in cur.fetchall() if r.get("session_id")]
+            cur.close()
+
+        refreshed = []
+        for sid in sessions_to_refresh:
+            try:
+                db_data = _fetch_db_data(sid, ["SAP HANA"], conn)
+                if not any(len(d.get("tables", [])) > 0 for d in db_data):
+                    continue
+
+                context = _build_context([], db_data)
+                data_hash = _hash_context(context)
+                analysis = _call_mistral(context, [], ["SAP HANA"])
+                if analysis and analysis.get("report"):
+                    rep = analysis["report"]
+                    if isinstance(rep, dict):
+                        rep = json.dumps(rep, ensure_ascii=False)
+                    _save_cache(sid, data_hash, str(rep), "", [], ["SAP HANA"], conn)
+                    refreshed.append(sid)
+            except Exception as s_err:
+                print(f"[Scheduled Analysis] Session {sid} error: {s_err}", flush=True)
+
+        return jsonify({
+            "status": "success",
+            "message": f"Daily session analysis summary refreshed successfully for {len(refreshed)} session(s)",
+            "refreshed_sessions": refreshed
+        }), 200
+    except Exception as e:
+        print(f"[Scheduled Analysis] Error: {e}", flush=True)
+        return jsonify({"status": "error", "message": str(e)}), 500
+    finally:
+        if conn:
+            try: conn.close()
+            except: pass
