@@ -2077,6 +2077,11 @@ def domestic_sales_value_achievement():
     from controllers.domestic_sales_value_achievement_controller import get_domestic_sales_value_achievement_controller
     return get_domestic_sales_value_achievement_controller(get_db_connection)
 
+@app.route("/sales-report-by-values", methods=["GET", "POST"])
+def sales_report_by_values():
+    from controllers.sales_report_by_values_controller import get_sales_report_by_values_controller
+    return get_sales_report_by_values_controller(get_db_connection)
+
 
 
 @app.route("/non-billed-accounts-pct", methods=["GET", "POST"])
