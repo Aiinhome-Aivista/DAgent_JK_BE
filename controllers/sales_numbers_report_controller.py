@@ -242,7 +242,21 @@ def query_sales_numbers_hana(cursor, schema, year_month: str, selected_date: str
     FACT_CLASSIFIED AS (
         SELECT
             CONCAT(
-                COALESCE(NULLIF(TRIM(sk."TYRE_TYPE"), ''), 'Unknown'),
+                COALESCE(
+                    NULLIF(TRIM(sk."TYRE_TYPE"), ''),
+                    NULLIF(TRIM(sk."TYRE_TP"), ''),
+                    CASE
+                        WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%TRUCK%' THEN 'TRUCK'
+                        WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%LCV%' OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%LC%' THEN 'LCV'
+                        WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%CAR%' OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%CR%' OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%CB%' THEN 'CAR'
+                        WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%JEEP%' OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%JB%' OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%JR%' THEN 'JEEP'
+                        WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%TRACTOR%' OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%TR.%' THEN 'TRACTOR'
+                        WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%3W%' OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%3 WHEELER%' THEN '3W'
+                        WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%2W%' OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%2 WHEELER%' THEN '2W'
+                        ELSE NULLIF(TRIM(cat."CAT_DESC"), '')
+                    END,
+                    'OTHERS'
+                ),
                 ' - ',
                 CASE
                     WHEN sk."CONSTUCTION" IN (1, '1')
@@ -253,7 +267,7 @@ def query_sales_numbers_hana(cursor, schema, year_month: str, selected_date: str
                          OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%RADIAL%'
                          OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%R%'
                          OR UPPER(TRIM(COALESCE(sk."CONSTUCTION", ''))) = 'RADIAL' THEN 'RADIAL'
-                    ELSE COALESCE(NULLIF(TRIM(sk."CONSTUCTION"), ''), 'Unknown')
+                    ELSE 'BIAS'
                 END
             ) AS Category,
             s."distribution_channel" AS dist_ch,
@@ -264,7 +278,7 @@ def query_sales_numbers_hana(cursor, schema, year_month: str, selected_date: str
             COALESCE(cm."KLABC", '') AS klabc
         FROM SALES_FILTERED s
         LEFT JOIN "{schema}"."ZIVR_SKUMaster_01_TR" sk
-            ON TRIM(s."SKU") = TRIM(sk."MATNR")
+            ON (s."SKU" = sk."MATNR" OR TRIM(s."SKU") = TRIM(sk."MATNR") OR LTRIM(s."SKU", '0') = LTRIM(sk."MATNR", '0'))
         LEFT JOIN "{schema}"."ZIVF_CategoryMaster_01_TR" cat
             ON TRIM(sk."CAT_CODE") = TRIM(cat."CAT_CODE")
         LEFT JOIN "{schema}"."ZIVF_CustomerMaster_01_MD" cm
@@ -303,7 +317,22 @@ def query_sales_numbers_hana(cursor, schema, year_month: str, selected_date: str
     AGG_TARGET AS (
         SELECT
             CONCAT(
-                COALESCE(NULLIF(TRIM(sk."TYRE_TYPE"), ''), 'Unknown'),
+                COALESCE(
+                    NULLIF(TRIM(sk."TYRE_TYPE"), ''),
+                    NULLIF(TRIM(sk."TYRE_TP"), ''),
+                    NULLIF(TRIM(tgt."MAT_TYPE"), ''),
+                    CASE
+                        WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%TRUCK%' THEN 'TRUCK'
+                        WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%LCV%' OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%LC%' THEN 'LCV'
+                        WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%CAR%' OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%CR%' OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%CB%' THEN 'CAR'
+                        WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%JEEP%' OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%JB%' OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%JR%' THEN 'JEEP'
+                        WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%TRACTOR%' OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%TR.%' THEN 'TRACTOR'
+                        WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%3W%' OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%3 WHEELER%' THEN '3W'
+                        WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%2W%' OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%2 WHEELER%' THEN '2W'
+                        ELSE NULLIF(TRIM(cat."CAT_DESC"), '')
+                    END,
+                    'OTHERS'
+                ),
                 ' - ',
                 CASE
                     WHEN sk."CONSTUCTION" IN (1, '1')
@@ -314,17 +343,34 @@ def query_sales_numbers_hana(cursor, schema, year_month: str, selected_date: str
                          OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%RADIAL%'
                          OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%R%'
                          OR UPPER(TRIM(COALESCE(sk."CONSTUCTION", ''))) = 'RADIAL' THEN 'RADIAL'
-                    ELSE COALESCE(NULLIF(TRIM(sk."CONSTUCTION"), ''), 'Unknown')
+                    ELSE 'BIAS'
                 END
             ) AS Category,
-            SUM(COALESCE(NULLIF(tgt."ORG_PLAN", 0), NULLIF(tgt."REV_PLAN", 0), 0)) AS Target_Qty
+            SUM(COALESCE(NULLIF(tgt."ORG_PLAN", 0), NULLIF(tgt."REV_PLAN", 0), NULLIF(tgt."HO_PLAN", 0), NULLIF(tgt."REG_PLAN", 0), NULLIF(tgt."AREA_PLAN", 0), 0)) AS Target_Qty
         FROM "{schema}"."ZIVF_SD_Sales_Plan_Target_01_TR" tgt
-        JOIN "{schema}"."ZIVR_SKUMaster_01_TR" sk ON (TRIM(tgt."MATNR") = TRIM(sk."MATNR"))
-        LEFT JOIN "{schema}"."ZIVF_CategoryMaster_01_TR" cat ON (TRIM(tgt."CAT_CODE") = TRIM(cat."CAT_CODE"))
-        WHERE tgt."YMONTH" = '{year_month}'
+        LEFT JOIN "{schema}"."ZIVR_SKUMaster_01_TR" sk
+            ON (tgt."MATNR" = sk."MATNR" OR TRIM(tgt."MATNR") = TRIM(sk."MATNR") OR LTRIM(tgt."MATNR", '0') = LTRIM(sk."MATNR", '0'))
+        LEFT JOIN "{schema}"."ZIVF_CategoryMaster_01_TR" cat
+            ON (COALESCE(NULLIF(TRIM(tgt."CAT_CODE"), ''), NULLIF(TRIM(sk."CAT_CODE"), '')) = TRIM(cat."CAT_CODE"))
+        WHERE (CAST(tgt."YMONTH" AS VARCHAR) = '{year_month}' OR tgt."YMONTH" = '{year_month}')
         GROUP BY
             CONCAT(
-                COALESCE(NULLIF(TRIM(sk."TYRE_TYPE"), ''), 'Unknown'),
+                COALESCE(
+                    NULLIF(TRIM(sk."TYRE_TYPE"), ''),
+                    NULLIF(TRIM(sk."TYRE_TP"), ''),
+                    NULLIF(TRIM(tgt."MAT_TYPE"), ''),
+                    CASE
+                        WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%TRUCK%' THEN 'TRUCK'
+                        WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%LCV%' OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%LC%' THEN 'LCV'
+                        WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%CAR%' OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%CR%' OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%CB%' THEN 'CAR'
+                        WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%JEEP%' OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%JB%' OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%JR%' THEN 'JEEP'
+                        WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%TRACTOR%' OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%TR.%' THEN 'TRACTOR'
+                        WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%3W%' OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%3 WHEELER%' THEN '3W'
+                        WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%2W%' OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%2 WHEELER%' THEN '2W'
+                        ELSE NULLIF(TRIM(cat."CAT_DESC"), '')
+                    END,
+                    'OTHERS'
+                ),
                 ' - ',
                 CASE
                     WHEN sk."CONSTUCTION" IN (1, '1')
@@ -335,7 +381,7 @@ def query_sales_numbers_hana(cursor, schema, year_month: str, selected_date: str
                          OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%RADIAL%'
                          OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%R%'
                          OR UPPER(TRIM(COALESCE(sk."CONSTUCTION", ''))) = 'RADIAL' THEN 'RADIAL'
-                    ELSE COALESCE(NULLIF(TRIM(sk."CONSTUCTION"), ''), 'Unknown')
+                    ELSE 'BIAS'
                 END
             )
     ),

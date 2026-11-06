@@ -2807,30 +2807,47 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                 "- For Territory/Region/Zone: SELECT tm.NAME AS territory_name, tm.BZIRK AS territory_code, rm.\"region_name\", rm.\"region_code\", zm.NAME AS zone_name.\n"
                 "ALWAYS select BOTH the human-readable Name (for UI display) AND the Code (for safe JOINs across CTEs/subqueries)!\n\n"
                 "CRITICAL RULES FOR ACTUAL VS TARGET / PLAN COMPARISONS:\n"
-                "1. Target View 'ZIVF_SD_Sales_Plan_Target_01_TR' ALREADY has 'YMONTH' directly on the view! NEVER join 'ZITR_DayAttribute_01_TR' to the target view (DayAttribute has daily rows, so joining on YMONTH creates a catastrophic 30x Cartesian duplicate explosion)!\n"
-                "2. TARGET VS ACTUAL GRAIN & FILTER RULES:\n"
+                "1. TARGET-ONLY QUERIES (NO ACTUAL SALES REQUESTED):\n"
+                "   - If the user asks ONLY for target or sales plan (e.g. 'what is the total target for July 2026', 'target revenue for 2026', 'sales plan for April 2026'):\n"
+                "     DO NOT create an actual_sales CTE! DO NOT query sales history or current sales! Query ONLY 'ZIVF_SD_Sales_Plan_Target_01_TR' directly:\n"
+                "     SELECT SUM(tgt.PLAN_VALUE) AS target_sales_value, SUM(tgt.ORG_PLAN) AS target_sales_qty\n"
+                "     FROM \"SAP_S4\".\"ZIVF_SD_Sales_Plan_Target_01_TR\" tgt\n"
+                "     WHERE (CAST(tgt.YMONTH AS VARCHAR) = '202607' OR tgt.YMONTH = 202607);\n"
+                "2. TARGET VS ACTUAL COMPARISON QUERIES:\n"
+                "   - NEVER EVER USE 'CROSS JOIN'! If actual sales has 0 invoices for that period, CROSS JOIN deletes all rows and returns 0 rows total!\n"
+                "   - For overall/single territory/zone aggregation without GROUP BY, use scalar subqueries on FROM DUMMY:\n"
+                "     SELECT\n"
+                "       (SELECT COALESCE(SUM(fact.\"invoice_value\"), 0) FROM \"SAP_S4\".\"ZPVF_SD_SalesHistory_01_TR\" fact WHERE ...) AS actual_sales_value,\n"
+                "       (SELECT COALESCE(SUM(fact.\"Tyre_Quantity\"), 0) FROM \"SAP_S4\".\"ZPVF_SD_SalesHistory_01_TR\" fact WHERE ...) AS actual_sales_qty,\n"
+                "       (SELECT COALESCE(SUM(tgt.PLAN_VALUE), 0) FROM \"SAP_S4\".\"ZIVF_SD_Sales_Plan_Target_01_TR\" tgt WHERE ...) AS target_sales_value,\n"
+                "       (SELECT COALESCE(SUM(tgt.ORG_PLAN), 0) FROM \"SAP_S4\".\"ZIVF_SD_Sales_Plan_Target_01_TR\" tgt WHERE ...) AS target_sales_qty\n"
+                "     FROM DUMMY;\n"
+                "   - For grouped comparisons (by Zone, Region, Territory), ALWAYS use FULL OUTER JOIN with target_plans as primary:\n"
+                "     FROM target_plans t FULL OUTER JOIN actual_sales a ON t.zone_name = a.zone_name\n"
+                "     and in SELECT and WHERE, use COALESCE(t.zone_name, a.zone_name, 'Unknown')! NEVER use actual_sales LEFT JOIN target_plans!\n"
+                "3. TARGET VIEW 'ZIVF_SD_Sales_Plan_Target_01_TR' RULES:\n"
+                "   - Target view ALREADY has 'YMONTH' directly on the view! NEVER join 'ZITR_DayAttribute_01_TR' to the target view (Cartesian blow-up)!\n"
+                "   - In YMONTH filter, match both string and int: (CAST(tgt.YMONTH AS VARCHAR) = '202607' OR tgt.YMONTH = 202607 OR tgt.YMONTH = '202607').\n"
+                "4. 2026 ACTUAL SALES FACT VIEW:\n"
+                "   - Note: Recent/rolling-month invoices (e.g. 2026-04 onwards) exist in 'ZPVF_SD_CurrentSales_01_TR'. For historical periods use 'ZPVF_SD_SalesHistory_01_TR'. If querying 2026 actual sales and unsure, combine with UNION ALL.\n"
+                "5. TARGET VS ACTUAL GRAIN & FILTER RULES:\n"
                 "   - ZONE (North Zone, West Zone, South Zone, East Zone):\n"
                 "     * In ZIVF_ZoneMaster_01_TR, zm.NAME is 'NORTH', 'WEST', 'SOUTH', 'EAST', 'CENTRAL' (WITHOUT 'Zone'!) and zm.P_ZONE is 'NZ', 'WZ', 'SZ', 'EZ', 'CZ'.\n"
                 "     * Filter: (UPPER(TRIM(zm.NAME)) = 'NORTH' OR tm.P_ZONE = 'NZ').\n"
                 "     * Group CTEs ONLY by zm.NAME AS zone_name (or tm.P_ZONE). NEVER group by region when answering a Zone question!\n"
                 "     * In actual_sales: JOIN CustomerMaster cm, TerritoryMaster tm ON cm.BZIRK = tm.BZIRK, ZoneMaster zm ON tm.P_ZONE = zm.P_ZONE.\n"
                 "     * In target_plans: JOIN TerritoryMaster tm ON tgt.TERR_CODE = tm.BZIRK, ZoneMaster zm ON tm.P_ZONE = zm.P_ZONE.\n"
-                "     * Outer Query: JOIN ON a.zone_name = t.zone_name.\n"
+                "     * Outer Query: FROM target_plans t FULL OUTER JOIN actual_sales a ON t.zone_name = a.zone_name.\n"
                 "   - REGION (e.g. Jaipur Region):\n"
                 "     * In target_plans: JOIN TerritoryMaster tm ON tgt.TERR_CODE = tm.BZIRK, JOIN RegionMaster rm ON tm.REGIO = rm.\"region_code\". Filter: UPPER(TRIM(rm.\"region_name\")) LIKE '%JAIPUR%'.\n"
                 "     * In actual_sales: JOIN CustomerMaster cm, TerritoryMaster tm ON cm.BZIRK = tm.BZIRK, RegionMaster rm ON tm.REGIO = rm.\"region_code\". Filter: UPPER(TRIM(rm.\"region_name\")) LIKE '%JAIPUR%'.\n"
-                "     * Group CTEs by rm.\"region_name\". Join ON a.region_name = t.region_name.\n"
+                "     * Group CTEs by rm.\"region_name\". Join: FROM target_plans t FULL OUTER JOIN actual_sales a ON t.region_name = a.region_name.\n"
                 "   - TERRITORY (e.g. Territory 1101, Territory 1102):\n"
-                "     * IN ACTUAL_SALES: You MUST filter cm.BZIRK = '1101'! Territory is in cm.BZIRK on Customer Master, NOT in the fact table.\n"
+                "     * IN ACTUAL_SALES: Filter cm.BZIRK = '1101' on Customer Master.\n"
                 "     * IN TARGET_PLANS: Filter tgt.TERR_CODE = '1101'.\n"
-                "     * Join CTEs ON a.territory_code = t.territory_code (or CROSS JOIN if aggregating a single territory).\n"
-                "   - PRODUCT / TYRE TYPE (e.g. TBR tyres, PCR, 4 Wheeler):\n"
-                "     * In target_plans: Filter UPPER(TRIM(tgt.MAT_TYPE)) LIKE '%TBR%' (or 'PCR', '4WHEELER').\n"
-                "     * In actual_sales: JOIN SKUMaster sk ON fact.\"SKU\" = sk.MATNR. Filter: (UPPER(sk.TYRE_TYPE) LIKE '%TBR%' OR UPPER(sk.TYRE_TP) LIKE '%TBR%' OR UPPER(sk.CONSTUCTION) LIKE '%TBR%').\n"
                 "   - TIME PERIOD FILTERING:\n"
-                "     * Specific Month (e.g. July 2026): in actual_sales filter fact.\"invoice_date\" >= '2026-07-01' AND fact.\"invoice_date\" < '2026-08-01'. In target_plans filter tgt.YMONTH = '202607'.\n"
-                "     * Full Year (e.g. 2026): in actual_sales filter fact.\"invoice_date\" >= '2026-01-01' AND fact.\"invoice_date\" < '2027-01-01'. In target_plans filter tgt.YMONTH LIKE '2026%'.\n"
-                "     * Current Month: in actual_sales query ZPVF_SD_CurrentSales_01_TR. In target_plans filter current month YMONTH.\n"
+                "     * Specific Month (e.g. July 2026): in actual_sales filter fact.\"invoice_date\" >= '2026-07-01' AND fact.\"invoice_date\" < '2026-08-01'. In target_plans filter (CAST(tgt.YMONTH AS VARCHAR) = '202607' OR tgt.YMONTH = 202607).\n"
+                "     * Full Year (e.g. 2026): in actual_sales filter fact.\"invoice_date\" >= '2026-01-01' AND fact.\"invoice_date\" < '2027-01-01'. In target_plans filter CAST(tgt.YMONTH AS VARCHAR) LIKE '2026%'.\n"
             )
         else:
             sql_user += "\n\nCRITICAL FINAL RULE: NEVER SELECT or GROUP BY `customer_master.KUNNR` or any other dimension's Primary Key! You MUST SELECT and GROUP BY the Fact Table's Foreign Key (e.g. `sales_data.customer`) instead. Selecting dimension keys causes unmatched rows to lump together as NULLs."
@@ -3223,6 +3240,48 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                     flags=re.IGNORECASE
                                 )
 
+                                # Auto-heal: Fix space in 'actual sales' alias e.g. 'FROM actual sales a'
+                                run_query = re.sub(r'\bFROM\s+actual\s+sales\s+([a-zA-Z0-9_]+)\b', r'FROM actual_sales \1', run_query, flags=re.I)
+                                run_query = re.sub(r'\bJOIN\s+actual\s+sales\s+([a-zA-Z0-9_]+)\b', r'JOIN actual_sales \1', run_query, flags=re.I)
+
+                                # Auto-heal: If Target vs Actual comparison uses CROSS JOIN, convert to FULL OUTER JOIN on 1=1
+                                # so that if actual sales has 0 invoices (e.g. future month July 2026), target records are NOT destroyed
+                                if "CROSS JOIN" in run_query.upper() and "actual_sales" in run_query.lower() and "target_plans" in run_query.lower():
+                                    run_query = re.sub(
+                                        r'\bFROM\s+actual_sales\s+([a-zA-Z0-9_]+)\s+CROSS\s+JOIN\s+target_plans\s+([a-zA-Z0-9_]+)',
+                                        r'FROM target_plans \2 FULL OUTER JOIN actual_sales \1 ON 1=1',
+                                        run_query,
+                                        flags=re.IGNORECASE
+                                    )
+                                    run_query = re.sub(
+                                        r'\bFROM\s+target_plans\s+([a-zA-Z0-9_]+)\s+CROSS\s+JOIN\s+actual_sales\s+([a-zA-Z0-9_]+)',
+                                        r'FROM target_plans \1 FULL OUTER JOIN actual_sales \2 ON 1=1',
+                                        run_query,
+                                        flags=re.IGNORECASE
+                                    )
+
+                                # Auto-heal: In Target vs Actual with LEFT JOIN from actual_sales to target_plans,
+                                # invert to target_plans FULL OUTER JOIN actual_sales so empty actuals never drops targets!
+                                if re.search(r'\bFROM\s+actual_sales\s+([a-zA-Z0-9_]+)\s+LEFT\s+JOIN\s+target_plans\s+([a-zA-Z0-9_]+)\s+ON\s+\1\.([a-zA-Z0-9_]+)\s*=\s*\2\.\3', run_query, re.I):
+                                    run_query = re.sub(
+                                        r'\bFROM\s+actual_sales\s+([a-zA-Z0-9_]+)\s+LEFT\s+JOIN\s+target_plans\s+([a-zA-Z0-9_]+)\s+ON\s+\1\.([a-zA-Z0-9_]+)\s*=\s*\2\.\3',
+                                        r'FROM target_plans \2 FULL OUTER JOIN actual_sales \1 ON \2.\3 = \1.\3',
+                                        run_query,
+                                        flags=re.I
+                                    )
+                                    run_query = re.sub(
+                                        r'\bWHERE\s+UPPER\(TRIM\(a\.([a-zA-Z0-9_]+)\)\)',
+                                        r'WHERE UPPER(TRIM(COALESCE(t.\1, a.\1)))',
+                                        run_query,
+                                        flags=re.I
+                                    )
+                                    run_query = re.sub(
+                                        r'\bCOALESCE\(a\.([a-zA-Z0-9_]+),\s*\'Unknown\'\)',
+                                        r'COALESCE(t.\1, a.\1, \'Unknown\')',
+                                        run_query,
+                                        flags=re.I
+                                    )
+
                                 # Auto-heal: If REG_CODE is compared to a text region name (e.g. LIKE '%Jaipur%') instead of numeric code
                                 m_reg_text = re.search(r'([a-zA-Z0-9_]+\.)?\"?(?:REG_CODE|region_code)\"?\s*(?:LIKE\s*UPPER\(\'\%([A-Za-z\s]+)\%\'\)|LIKE\s*\'\%([A-Za-z\s]+)\%\'|=\s*\'([A-Za-z\s]+)\')', run_query, re.I)
                                 if m_reg_text:
@@ -3455,6 +3514,38 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                             print(f"[SQL_EXEC] Relaxed LEFT JOIN fallback SUCCESS! Returned {len(sql_results)} rows.")
                                     except Exception as j_ex:
                                         print(f"[SQL_EXEC] Relaxed LEFT JOIN fallback error: {j_ex}")
+
+                                # Fallback 5: If Target was requested and CTE / JOIN yielded 0 rows / all-null, rescue Target directly
+                                if not sql_results and "ZIVF_SD_Sales_Plan_Target_01_TR" in run_query:
+                                    print("[SQL_EXEC] Fallback 5: Query yielded 0 rows; rescuing Target plan directly from target view...")
+                                    m_ym = re.search(r'YMONTH\s*=\s*\'?(\d{6})\'?', run_query, re.I)
+                                    m_yr = re.search(r'YMONTH\s*LIKE\s*\'?(\d{4})%\'?', run_query, re.I)
+                                    ym_cond = ""
+                                    if m_ym:
+                                        ym_cond = f"(CAST(tgt.YMONTH AS VARCHAR) = '{m_ym.group(1)}' OR tgt.YMONTH = {m_ym.group(1)})"
+                                    elif m_yr:
+                                        ym_cond = f"CAST(tgt.YMONTH AS VARCHAR) LIKE '{m_yr.group(1)}%'"
+
+                                    if ym_cond:
+                                        zm_match = re.search(r'UPPER\(TRIM\(.*?NAME\)\)\s*LIKE\s*\'%([A-Za-z]+)%\'', run_query, re.I)
+                                        if zm_match:
+                                            zname = zm_match.group(1)
+                                            target_rescue_sql = f"""SELECT zm.NAME AS zone_name, 0 AS actual_sales_value, SUM(tgt.PLAN_VALUE) AS target_sales_value, 0.0 AS sales_achievement_pct, 0 AS actual_sales_qty, SUM(tgt.ORG_PLAN) AS target_sales_qty, 0.0 AS qty_achievement_pct FROM "SAP_S4"."ZIVF_SD_Sales_Plan_Target_01_TR" tgt JOIN "SAP_S4"."ZIVF_TerritoryMaster_01_TR" tm ON tgt.TERR_CODE = tm.BZIRK JOIN "SAP_S4"."ZIVF_ZoneMaster_01_TR" zm ON tm.P_ZONE = zm.P_ZONE WHERE {ym_cond} AND UPPER(TRIM(zm.NAME)) LIKE '%{zname}%' GROUP BY zm.NAME"""
+                                        else:
+                                            target_rescue_sql = f"""SELECT 0 AS actual_sales_value, SUM(tgt.PLAN_VALUE) AS target_sales_value, 0.0 AS sales_achievement_pct, 0 AS actual_sales_qty, SUM(tgt.ORG_PLAN) AS target_sales_qty, 0.0 AS qty_achievement_pct FROM "SAP_S4"."ZIVF_SD_Sales_Plan_Target_01_TR" tgt WHERE {ym_cond}"""
+                                        try:
+                                            cur_sql.execute(target_rescue_sql)
+                                            t_rows = cur_sql.fetchall()
+                                            if t_rows:
+                                                cols = [desc[0] for desc in cur_sql.description] if cur_sql.description else []
+                                                cand = [dict(zip(cols, r)) for r in t_rows]
+                                                if cand and any(v.get("target_sales_value") for v in cand):
+                                                    sql_results = cand
+                                                    run_query = target_rescue_sql
+                                                    sql_query = target_rescue_sql
+                                                    print(f"[SQL_EXEC] Fallback 5 Target rescue SUCCESS! Rescued target data: {sql_results}")
+                                        except Exception as t_ex:
+                                            print(f"[SQL_EXEC] Fallback 5 Target rescue error: {t_ex}")
 
                             # Convert Decimal, Date, and non-serializable objects
                             import decimal
