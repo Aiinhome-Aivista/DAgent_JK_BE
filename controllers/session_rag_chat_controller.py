@@ -3223,6 +3223,41 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                     flags=re.IGNORECASE
                                 )
 
+                                # Auto-heal: If REG_CODE is compared to a text region name (e.g. LIKE '%Jaipur%') instead of numeric code
+                                m_reg_text = re.search(r'([a-zA-Z0-9_]+\.)?\"?(?:REG_CODE|region_code)\"?\s*(?:LIKE\s*UPPER\(\'\%([A-Za-z\s]+)\%\'\)|LIKE\s*\'\%([A-Za-z\s]+)\%\'|=\s*\'([A-Za-z\s]+)\')', run_query, re.I)
+                                if m_reg_text:
+                                    region_val = m_reg_text.group(2) or m_reg_text.group(3) or m_reg_text.group(4)
+                                    if "ZIVF_RegionMaster_MD_01" not in run_query:
+                                        if "ZIVF_TerritoryMaster_01_TR" in run_query:
+                                            rm_j = '\nLEFT JOIN "SAP_S4"."ZIVF_RegionMaster_MD_01" rm ON tm.REGIO = rm."region_code"\n'
+                                        else:
+                                            rm_j = '\nLEFT JOIN "SAP_S4"."ZIVF_RegionMaster_MD_01" rm ON tgt.REG_CODE = rm."region_code"\n'
+                                        if re.search(r'\bWHERE\b', run_query, re.I):
+                                            run_query = re.sub(r'(\bWHERE\b)', f'{rm_j}WHERE', run_query, count=1, flags=re.I)
+                                        else:
+                                            run_query += rm_j
+                                    run_query = re.sub(
+                                        r'([a-zA-Z0-9_]+\.)?\"?(?:REG_CODE|region_code)\"?\s*(?:LIKE\s*UPPER\(\'\%[A-Za-z\s]+\%\'\)|LIKE\s*\'\%[A-Za-z\s]+\%\'|=\s*\'[A-Za-z\s]+\')',
+                                        f"UPPER(TRIM(rm.\"region_name\")) LIKE UPPER('%{region_val}%')",
+                                        run_query,
+                                        count=1,
+                                        flags=re.I
+                                    )
+
+                                # Auto-heal: If TBR tyre category is queried, ensure CategoryMaster is joined and checked alongside Truck Radial
+                                if re.search(r'\bTBR\b', run_query, re.I) and "ZIVF_CategoryMaster_01_TR" not in run_query and "sk." in run_query:
+                                    cat_j = '\nLEFT JOIN "SAP_S4"."ZIVF_CategoryMaster_01_TR" cat ON TRIM(sk.CAT_CODE) = TRIM(cat.CAT_CODE)\n'
+                                    if re.search(r'\bWHERE\b', run_query, re.I):
+                                        run_query = re.sub(r'(\bWHERE\b)', f'{cat_j}WHERE', run_query, count=1, flags=re.I)
+                                    else:
+                                        run_query += cat_j
+                                    run_query = re.sub(
+                                        r'(UPPER\(TRIM\(sk\.TYRE_TYPE\)\)\s*LIKE\s*\'%TBR%\')',
+                                        "(UPPER(TRIM(cat.CAT_DESC)) = 'TBR' OR (UPPER(TRIM(sk.TYRE_TYPE)) = 'TRUCK' AND UPPER(TRIM(sk.CONSTUCTION)) = 'RADIAL'))",
+                                        run_query,
+                                        flags=re.I
+                                    )
+
                                 # Strip invalid empty GROUP BY () in SAP HANA
                                 run_query = re.sub(r'\bGROUP\s+BY\s*\(\s*\)', ' ', run_query, flags=re.IGNORECASE)
                                 run_query = re.sub(r'\bGROUP\s+BY\s*;\s*$', ';', run_query, flags=re.IGNORECASE)
@@ -3680,22 +3715,33 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
     clean_answer = re.sub(r'\s*\(source:[^)]*\)', '', clean_answer).strip()
     clean_answer = re.sub(r'\s*\[source:[^\]]*\]', '', clean_answer).strip()
 
-    # Clean raw vertical HTML tables (e.g. <th>Field</th> <th>Value</th>) when UI Table is available
-    if sql_results and re.search(r'<table>[\s\S]*?<th>\s*Field\s*</th>[\s\S]*?<th>\s*Value\s*</th>[\s\S]*?</table>', clean_answer, re.I):
+    # Clean redundant Field | Value tables (markdown or HTML) when UI Table is available
+    is_field_value_table = bool(
+        re.search(r'\|\s*\*{0,2}Field\*{0,2}\s*\|\s*\*{0,2}Value\*{0,2}\s*\|', clean_answer, re.I) or
+        re.search(r'<table>[\s\S]*?<th>\s*Field\s*</th>[\s\S]*?<th>\s*Value\s*</th>[\s\S]*?</table>', clean_answer, re.I)
+    )
+    if sql_results and is_field_value_table:
         if len(sql_results) == 1:
             r0 = sql_results[0]
             inv = r0.get("invoice_number", "")
-            cust = r0.get("Customer_name", r0.get("dealer_code", ""))
-            val = r0.get("invoice_value", 0)
-            qty = r0.get("Tyre_Quantity", 0)
+            cust = r0.get("Customer_Name", r0.get("Customer_name", r0.get("dealer_code", "")))
+            val = r0.get("invoice_value", None)
+            qty = r0.get("Tyre_Quantity", None)
             dt = r0.get("invoice_date", "")
             sku = r0.get("SKU", "")
             desc = r0.get("Material_Description", "")
-            val_fmt = f"₹{val:,.2f}" if isinstance(val, (int, float)) else str(val)
-            qty_fmt = f"{qty:,}" if isinstance(qty, (int, float)) else str(qty)
-            clean_answer = f"**Invoice Details for #{inv}**\n\n• **Customer:** {cust}\n• **Invoice Date:** {dt}\n• **Invoice Value:** {val_fmt}\n• **Tyre Quantity:** {qty_fmt} units\n• **SKU:** {sku} ({desc})\n\n*The complete record details are displayed in the structured table below:*"
+            clean_answer = f"Found record details for **Invoice #{inv}** (Customer: **{cust}**).\n\n• **SKU:** {sku} ({desc})\n"
+            if dt:
+                clean_answer += f"• **Invoice Date:** {dt}\n"
+            if val is not None:
+                val_fmt = f"₹{val:,.2f}" if isinstance(val, (int, float)) else str(val)
+                clean_answer += f"• **Invoice Value:** {val_fmt}\n"
+            if qty is not None:
+                qty_fmt = f"{qty:,}" if isinstance(qty, (int, float)) else str(qty)
+                clean_answer += f"• **Quantity:** {qty_fmt} units\n"
+            clean_answer += "\n*The complete record details are displayed in the interactive table below:*"
         else:
-            clean_answer = f"Found {len(sql_results)} records matching your query. The complete details are displayed in the structured table below:"
+            clean_answer = f"Found {len(sql_results)} records matching your query. The complete details are displayed in the interactive table below:"
 
     raw_fuq = res.get("follow_up_questions", [])
     fuq = []
