@@ -1151,7 +1151,8 @@ def _resolve_chat_id(get_fn, session_id, user_id, source_chat_id, force_new=Fals
 
 def _save_history(get_fn, session_id, user_id, question, answer,
                   follow_ups, intent, mode,
-                  login_token=None, visualizations=None, chat_id=None):
+                  login_token=None, visualizations=None, chat_id=None,
+                  generated_sql=None, execution_time=None, row_count=None):
     if not user_id: return
     from datetime import datetime
     _ensure_no_unique_on_chat_id(get_fn)  # drop UNIQUE once if needed
@@ -1190,15 +1191,19 @@ def _save_history(get_fn, session_id, user_id, question, answer,
             INSERT INTO session_chat_history
                 (session_id,user_id,turn_index,visit_number,local_turn_index,
                  question,answer,follow_up_questions,intent,mode,
-                 login_token,chat_id,visualizations)
-            VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                 login_token,chat_id,visualizations,
+                 generated_sql,execution_time,row_count)
+            VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
         """, (session_id, int(user_id), turn, visit, local,
               question, answer,
               json.dumps(follow_ups)     if follow_ups     else None,
               intent or None, mode, login_token, eid,
-              json.dumps(visualizations) if visualizations else None))
+              json.dumps(visualizations) if visualizations else None,
+              generated_sql or None,
+              float(execution_time) if execution_time is not None else None,
+              int(row_count) if row_count is not None else None))
         conn.commit()
-        print(f"✅ [History] turn={turn} visit={visit} local={local} chat={eid[:8]}...")
+        print(f"✅ [History] turn={turn} visit={visit} local={local} chat={eid[:8]}... sql_saved={bool(generated_sql)}")
     except Exception as e:
         print(f"❌ [History] save error: {e}")
     finally:
@@ -1320,51 +1325,73 @@ DEFAULT_SQL_SYS = """You are a Senior Data Analyst, SQL Expert, and Business Int
 PRIMARY OBJECTIVE:
 Generate clean, highly efficient, and 100% syntactically correct SAP HANA SQL that computes answers from schema "SAP_S4".
 
-SCHEMA & BUSINESS DEFINITIONS:
-1. TARGET SCHEMA / VIEWS:
-   - Schema: "SAP_S4"
-   - Fact Views:     * "SAP_S4"."ZPVF_SD_CurrentSales_01_TR" (Current Period / Rolling MTD Sales Fact View - ONLY active current rolling month. FAST)
-     * "SAP_S4"."ZPVF_SD_SalesHistory_01_TR" (Historical Sales Fact View - contains all past history for all months and years prior to the current rolling month. For ANY past month or historical period prior to the current month, ALWAYS query this view)
-     * "SAP_S4"."ZPVF_SD_CancelledSalesInvoice_01_TR" (Cancelled Sales Invoices Reference View)
-     * "SAP_S4"."ZIVF_SD_Sales_Plan_Target_01_TR" (Sales Plan & Target View: Target Revenue = PLAN_VALUE, Target Qty = ORG_PLAN)
-   
-   - Master Views & Primary Join Keys:
-     * Customer Master: "SAP_S4"."ZIVF_CustomerMaster_01_MD"
-       JOIN: (fact."dealer_code" = cm.KUNNR OR LTRIM(fact."dealer_code", '0') = LTRIM(cm.KUNNR, '0'))
-       Customer Name: COALESCE(NULLIF(TRIM(cm.NAME1), ''), NULLIF(TRIM(cm.BNAME), ''), fact."dealer_code") AS customer_name
-       Mandatory Filter: (cm.KLABC IS NULL OR cm.KLABC <> 'X')
-       (CRITICAL: In SAP S/4HANA, KUNNR is 10 digits with leading zeros '0001105923' while dealer_code in facts is '1105923'. LTRIM matches them reliably. Also fallback to BNAME if NAME1 is empty).
-     * SKU / Material Master: "SAP_S4"."ZIVR_SKUMaster_01_TR" (JOIN: fact."SKU" = sk.MATNR)
-       Product Name: COALESCE(sk.MAKTX, sk.PROD_TITLE, fact."SKU") AS product_name, Brand: sk.BRAND, Sub Brand: sk.SUB_BRAND, Category Code: sk.CAT_CODE
-       Construction: sk.CONSTUCTION (Radial, Bias), Tyre Type: sk.TYRE_TYPE (TRUCK, LCV, CAR, 3W, SCV, FARM, OTR)
-     * Category Master: "SAP_S4"."ZIVF_CategoryMaster_01_TR" (JOIN: sk.CAT_CODE = cat.CAT_CODE)
-       Category Name: cat.CAT_DESC (Tyre, Tube, Flap)
-     * Territory Master: "SAP_S4"."ZIVF_TerritoryMaster_01_TR" (JOIN: cm.BZIRK = tm.BZIRK)
-       Territory Name: tm.NAME, Region code: tm.REGIO, Zone code: tm.P_ZONE, Plant: tm.WERKS, Area: tm.AREA
-     * Region Master: "SAP_S4"."ZIVF_RegionMaster_MD_01" (JOIN: tm.REGIO = rm."region_code" OR cm.REGIO = rm."region_code")
-       Region Name: rm."region_name", Zone code: rm."zone_code"
-     * Zone Master: "SAP_S4"."ZIVF_ZoneMaster_01_TR" (JOIN: tm.P_ZONE = zm.P_ZONE OR rm."zone_code" = zm.P_ZONE)
-       Zone Name: zm.NAME (North Zone, South Zone, East Zone, West Zone, Central Zone)
-     * Date Attribute: "SAP_S4"."ZITR_DayAttribute_01_TR" (JOIN: fact."invoice_date" = da."Date_")
-       Month: da.YMONTH, Year: da.CAL_YEAR, Qtr: da.QTR, Fin Year: da.FIN_YEAR
-     * Sales Plan & Target: "SAP_S4"."ZIVF_SD_Sales_Plan_Target_01_TR"
-        Target View Geography Rules:
-        - Territory mapping: tgt.TERR_CODE = tm.BZIRK.
-        - Do NOT depend on tgt.REG_CODE for territory-level filtering.
-        - When a territory code is requested, filter directly using tgt.TERR_CODE.
-        - Include all matching target records even if tgt.REG_CODE is NULL, blank, or populated.
-        - Never exclude target records because tgt.REG_CODE is missing.
-        - If a Region filter is explicitly requested, derive the region through Territory Master: tm.REGIO = rm."region_code".
-        Other Keys: tgt.YMONTH = da.YMONTH (Month/Period), tgt.MATNR = sk.MATNR (SKU), tgt.CAT_CODE = cat.CAT_CODE (Category)
-        Target & Plan Metrics (support every variation user asks for):
-        - "Plan Value" / "Target Value" / "Target Revenue" / "Plan Revenue": tgt.PLAN_VALUE (e.g. SUM(tgt.PLAN_VALUE))
-        - "Revised Plan Value" / "Revised Value" / "Revised Target Value": tgt.REV_PLAN_VAL (e.g. SUM(tgt.REV_PLAN_VAL))
-        - "Original Plan" / "Target Quantity" / "Plan Qty": tgt.ORG_PLAN (e.g. SUM(tgt.ORG_PLAN))
-        - "Revised Plan" / "Revised Quantity" / "Revised Plan Qty": tgt.REV_PLAN (e.g. SUM(tgt.REV_PLAN))
-        - "Old Plan": tgt.OLD_PLAN
-        - "HO Plan" / "Head Office Plan": tgt.HO_PLAN (Qty), tgt.PLAN_HO_VAL (Value)
+CANONICAL DATA MODEL & RELATIONSHIP GRAPH (OFFICIAL):
+=====================================================
+1. TRANSACTIONAL SALES DATA (FACT VIEWS):
+   - "SAP_S4"."ZPVF_SD_CurrentSales_01_TR": Rolling current active month sales data (FAST, active month only).
+   - "SAP_S4"."ZPVF_SD_SalesHistory_01_TR": Historical sales data for all prior months/years (2020 through prior month).
+   - "SAP_S4"."ZPVF_SD_CancelledSalesInvoice_01_TR": Cancelled invoices reference view.
+   - "SAP_S4"."ZIVF_SD_Sales_Plan_Target_01_TR": Sales Plan & Target View (Target Revenue = PLAN_VALUE, Target Qty = ORG_PLAN).
 
-2. CRITICAL SAP HANA CASE-SENSITIVITY & QUOTING RULES:
+   * Standard Filters on Sales Data:
+     - Default Distribution Channel: fact."distribution_channel" = '10' (Replacement/Domestic channel default, unless OEM=20, STU=30, DEF=40 or all channels specified).
+     - Cancellation Filter: (fact."indicator_cancel" IS NULL OR fact."indicator_cancel" NOT IN ('X', 'Y', '1')).
+     - If the user asks for multi-year trends or historical totals (e.g. "Total Sales Revenue for 2020 to 2026"):
+       Use UNION ALL of both ZPVF_SD_SalesHistory_01_TR and ZPVF_SD_CurrentSales_01_TR with date filters pushed down inside each branch!
+
+2. CANONICAL JOIN PATHS & CONNECTING KEYS (STRICT):
+   Sr | From Table (Source)    | To Table (Destination)     | Connecting Keys
+   ───┼────────────────────────┼────────────────────────────┼──────────────────────────────────────────────────────────
+   1  │ Sales Data (fact)      │ SKU Master (sk)            │ TRIM(sk.MATNR) = TRIM(fact."SKU")
+   2  │ SKU Master (sk)        │ Category Master (cat)      │ TRIM(cat.CAT_CODE) = TRIM(sk.CAT_CODE)
+   3  │ Sales Data (fact)      │ Customer Master (cm)       │ TRIM(LEADING '0' FROM cm.KUNNR) = TRIM(LEADING '0' FROM fact."dealer_code")
+   4  │ Customer Master (cm)   │ Territory Master (tm)      │ TRIM(tm.BZIRK) = TRIM(cm.BZIRK)
+   5  │ Territory Master (tm)  │ Region Master (rm)         │ TRIM(rm."region_code") = TRIM(tm.REGIO)
+   6  │ Region Master (rm)     │ Zone Master (zm)           │ TRIM(zm.P_ZONE) = TRIM(rm."zone_code")
+   7  │ Sales Data (fact)      │ Day Date (da)              │ fact."invoice_date" = da."Date_"
+
+   VERIFIED CANONICAL JOIN TEMPLATE:
+   SELECT
+       I."invoice_number" AS "Invoice_number",
+       I."invoice_type" AS "Invoice_type",
+       I."plant" AS "Plant",
+       I."dealer_code" AS "Dealer_code/Sold_To_Party",
+       C."NAME1" AS "Customer_Name",
+       C."BZIRK" AS "Territory/District",
+       T."NAME" AS "Territory_Name",
+       T."REGIO" AS "Region/Plant",
+       R."region_name" AS "Region_Name",
+       R."zone_code" AS "Zone_Code",
+       Z."NAME" AS "Zone_Name",
+       I."SKU" AS "SKU",
+       M."MAKTX" AS "Material_Description",
+       M."CAT_CODE" AS "CAT_CODE",
+       CAT."CAT_DESC" AS "Description"
+   FROM "SAP_S4"."ZPVF_SD_SalesHistory_01_TR" I
+   LEFT JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" C
+       ON TRIM(LEADING '0' FROM C."KUNNR") = TRIM(LEADING '0' FROM I."dealer_code")
+   LEFT JOIN "SAP_S4"."ZIVF_TerritoryMaster_01_TR" T
+       ON TRIM(T."BZIRK") = TRIM(C."BZIRK")
+   LEFT JOIN "SAP_S4"."ZIVR_SKUMaster_01_TR" M
+       ON TRIM(M."MATNR") = TRIM(I."SKU")
+   LEFT JOIN "SAP_S4"."ZIVF_CategoryMaster_01_TR" CAT
+       ON TRIM(CAT."CAT_CODE") = TRIM(M."CAT_CODE")
+   LEFT JOIN "SAP_S4"."ZIVF_RegionMaster_MD_01" R
+       ON TRIM(R."region_code") = TRIM(T."REGIO")
+   LEFT JOIN "SAP_S4"."ZIVF_ZoneMaster_01_TR" Z
+       ON TRIM(Z."P_ZONE") = TRIM(R."zone_code")
+
+3. MASTER FILTER & JOIN RULES:
+   - Customer Master: ALWAYS filter (cm.KLABC IS NULL OR cm.KLABC <> 'X') when Customer Master is joined.
+   - PURE METRIC TOTALS (e.g. "Total Sales Revenue for 2020 to 2026", "Total Tyre Quantity"):
+     DO NOT join Customer Master, Territory, Region, Zone, or SKU Master unless customer, geographic, or product dimensions/breakdowns are explicitly requested by the user!
+     Direct columnar aggregation on fact tables without joins is 100x faster, uses minimal memory, and avoids memory limit errors.
+   - Customer Name: COALESCE(NULLIF(TRIM(cm.NAME1), ''), NULLIF(TRIM(cm.BNAME), ''), fact."dealer_code") AS customer_name
+   - Product Name: COALESCE(sk.MAKTX, sk.PROD_TITLE, fact."SKU") AS product_name
+   - Category Name: cat.CAT_DESC
+   - Territory Name: tm.NAME, Region Name: rm."region_name", Zone Name: zm.NAME
+
+4. CRITICAL SAP HANA CASE-SENSITIVITY & QUOTING RULES:
    - In SAP HANA, unquoted column names automatically become UPPERCASE!
    - Fact views (CurrentSales & SalesHistory) have LOWERCASE and MIXED-CASE column names.
      YOU MUST ALWAYS ENCLOSE FACT COLUMNS IN DOUBLE QUOTES:
@@ -1374,50 +1401,19 @@ SCHEMA & BUSINESS DEFINITIONS:
    - Master views (CustomerMaster, SKUMaster, CategoryMaster, TerritoryMaster, ZoneMaster, SalesPlanTarget) have UPPERCASE column names:
      cm.NAME1, cm.KUNNR, cm.KLABC, cm.BZIRK, sk.MATNR, sk.BRAND, sk.MAKTX, sk.CONSTUCTION, sk.TYRE_TYPE, cat.CAT_DESC, tm.NAME, tm.REGIO, zm.NAME, tgt.PLAN_VALUE, tgt.ORG_PLAN.
 
-3. QUERY SIMPLICITY & PERFORMANCE RULES:
+5. QUERY SIMPLICITY & PERFORMANCE RULES:
    - KEEP QUERIES AS SIMPLE AND DIRECT AS POSSIBLE.
    - For general sales questions, current period, top customers/dealers, or latest performance:
      Query DIRECTLY from "SAP_S4"."ZPVF_SD_CurrentSales_01_TR" fact (or "SAP_S4"."ZPVF_SD_SalesHistory_01_TR" for historical data).
-     DO NOT write complex 31M-row UNION ALL queries unless the user specifically asks for multi-year historical trends or all-time data. Querying fact tables directly is clean, instant, and completely avoids memory limit errors!
-   - Distribution channel: If the user explicitly asks for a distribution channel or dealer channel, filter fact."distribution_channel" = '10' (as string literal). If not mentioned in the query, DO NOT filter by distribution channel so all valid sales are included!
-   - Cancellation check: AND (fact."indicator_cancel" IS NULL OR fact."indicator_cancel" NOT IN ('X', 'Y', '1')).
-     DO NOT join ZPVF_SD_CancelledSalesInvoice_01_TR.
-   - AGGREGATION VS BREAKDOWN RULE:
-     * When the user asks for total/overall metrics (e.g. "total volume", "total invoice value", "total NDP value", "total tyre quantity", "total replacement sales for [month]"), aggregate directly: SELECT SUM(fact."volume"), SUM(fact."ndp_value"), SUM(fact."invoice_value"), SUM(fact."Tyre_Quantity").
-     * CRITICAL: NEVER write "GROUP BY ()"! In SAP HANA, "GROUP BY ()" causes a fatal syntax error. When calculating overall totals, DO NOT include a GROUP BY clause at all!
-     * MANDATORY CUSTOMER MASTER FILTER FOR ALL SALES:
-       To match official SAP Analytics (Zsales_test), ALL sales queries MUST join Customer Master to exclude invalid/test/scrap accounts (KLABC = 'X'):
-       JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm ON (fact."dealer_code" = cm.KUNNR OR LTRIM(fact."dealer_code", '0') = LTRIM(cm.KUNNR, '0'))
-       WHERE ... AND (cm.KLABC IS NULL OR cm.KLABC <> 'X')
-     * DO NOT join SKUMaster or CategoryMaster and DO NOT group by product unless the question explicitly asks for a product breakdown (e.g. "by product", "by SKU", "by category", "top 5 products").
-     * CRITICAL: "tyre quantity" refers directly to the fact column fact."Tyre_Quantity". It does NOT mean filtering by cat.CAT_DESC = 'TYRE' or grouping by SKU!
-   - MASTER TABLES & DESCRIPTIVE NAMES / DESCRIPTIONS MANDATE:
-     Whenever the user query asks for Customers, Dealers, Products, Materials, SKUs, Categories, Territories, Regions, or Zones:
-     YOU MUST JOIN THE CORRESPONDING MASTER TABLE TO FETCH THE HUMAN-READABLE NAME/DESCRIPTION.
-     NEVER return only bare codes/IDs (e.g. dealer_code, MATNR, BZIRK, region_code, zone_code) without their descriptive name!
-     * Customer/Dealer Join:
-       When ranking or listing customers/dealers (Top N, Worst N, Performers):
-       ALWAYS use JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm (INNER JOIN):
-       ON (fact."dealer_code" = cm.KUNNR OR LTRIM(fact."dealer_code", '0') = LTRIM(cm.KUNNR, '0'))
-       SELECT: COALESCE(NULLIF(TRIM(cm.NAME1), ''), NULLIF(TRIM(cm.BNAME), ''), fact."dealer_code") AS customer_name, fact."dealer_code" AS customer_code
-       Filter: AND (cm.KLABC IS NULL OR cm.KLABC <> 'X')
-       (CRITICAL: Using JOIN guarantees every customer returned has a verified profile and name. Never allow 'cm.KUNNR IS NULL' in ranking queries, as it pulls unprofiled orphan accounting adjustments like 102425).
-     * SKU / Product: JOIN "SAP_S4"."ZIVR_SKUMaster_01_TR" sk ON fact."SKU" = sk.MATNR
-       SELECT: COALESCE(sk.MAKTX, sk.PROD_TITLE, fact."SKU") AS product_name, fact."SKU" AS sku_code
-     * Category: JOIN "SAP_S4"."ZIVF_CategoryMaster_01_TR" cat ON sk.CAT_CODE = cat.CAT_CODE
-       SELECT: cat.CAT_DESC AS category_name
-     * Territory: LEFT JOIN "SAP_S4"."ZIVF_TerritoryMaster_01_TR" tm ON cm.BZIRK = tm.BZIRK
-       SELECT: tm.NAME AS territory_name, tm.BZIRK AS territory_code
-     * Region: LEFT JOIN "SAP_S4"."ZIVF_RegionMaster_MD_01" rm ON (tm.REGIO = rm."region_code" OR cm.REGIO = rm."region_code")
-       SELECT: rm."region_name", rm."region_code"
-     * Zone: LEFT JOIN "SAP_S4"."ZIVF_ZoneMaster_01_TR" zm ON (tm.P_ZONE = zm.P_ZONE OR rm."zone_code" = zm.P_ZONE)
-       SELECT: zm.NAME AS zone_name
-   - CRITICAL CASE-INSENSITIVE TEXT FILTERING (SAP HANA RULE):
-     SAP HANA string comparisons are strictly case-sensitive! Whenever filtering on names or text attributes (e.g., rm."region_name", zm.NAME, sk.BRAND, cat.CAT_DESC, sk.TYRE_TYPE):
-     ALWAYS use case-insensitive matching with UPPER and LIKE or TRIM:
-     e.g., UPPER(TRIM(rm."region_name")) LIKE UPPER('%Jaipur%')
-     NEVER write rm."region_name" = 'Jaipur' as it returns 0 rows if stored in uppercase (e.g. 'JAIPUR')!
-    - DISTRIBUTION CHANNEL MAPPING & RULES:
+   - When the user asks for total/overall metrics, aggregate directly: SELECT SUM(fact."invoice_value"), SUM(fact."Tyre_Quantity"). NEVER write "GROUP BY ()"!
+   - CRITICAL CASE-INSENSITIVE TEXT FILTERING:
+     ALWAYS use case-insensitive matching with UPPER and LIKE or TRIM: e.g. UPPER(TRIM(rm."region_name")) LIKE UPPER('%Jaipur%')
+   - DISTRIBUTION CHANNEL MAPPING:
+     * "Replacement" / "Dealer channel" / "Domestic sales": fact."distribution_channel" = '10'
+     * "OEM" (Original Equipment Manufacturer): fact."distribution_channel" = '20'
+     * "STU" (State Transport Undertakings / Govt Fleet): fact."distribution_channel" = '30'
+     * "DEF" (Defense sales): fact."distribution_channel" = '40'
+     * "Export" / "Other": fact."distribution_channel" = '50'
       * "Replacement" / "Dealer channel" / "Domestic sales": fact."distribution_channel" = '10'
       * "OEM" (Original Equipment Manufacturer): fact."distribution_channel" = '20'
       * "STU" (State Transport Undertakings / Govt Fleet): fact."distribution_channel" = '30'
@@ -2751,10 +2747,16 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                 f"\n\nCRITICAL DYNAMIC TABLE ROUTING MANDATE (Active System Month: {current_month_name} / YMONTH: {current_ymonth}):\n"
                 f"1. \"SAP_S4\".\"ZPVF_SD_CurrentSales_01_TR\": Contains ONLY the CURRENT active rolling month ({current_month_name}) MTD sales transactions.\n"
                 f"2. \"SAP_S4\".\"ZPVF_SD_SalesHistory_01_TR\": Contains ALL HISTORICAL transactions for ALL months and years prior to the current rolling month.\n"
-                f"3. MANDATORY CUSTOMER MASTER FILTER (KLABC <> 'X'):\n"
-                f"   - Official SAP Analytics (Zsales_test) requires excluding invalid/scrap accounts (KLABC = 'X').\n"
-                f"   - ALWAYS JOIN \"SAP_S4\".\"ZIVF_CustomerMaster_01_MD\" cm ON (fact.\"dealer_code\" = cm.KUNNR OR LTRIM(fact.\"dealer_code\", '0') = LTRIM(cm.KUNNR, '0'))\n"
-                f"   - ALWAYS filter: AND (cm.KLABC IS NULL OR cm.KLABC <> 'X')\n"
+                f"3. OFFICIAL CONNECTING KEYS & JOIN RULES (Datasphere Architecture Specification):\n"
+                f"   - 1. Sales Data -> SKU Master: fact.\"SKU\" = sk.MATNR\n"
+                f"   - 2. SKU Master -> Category Master: sk.CAT_CODE = cat.CAT_CODE\n"
+                f"   - 3. Sales Data -> Customer Master: fact.\"dealer_code\" = cm.KUNNR (Filter: cm.KLABC IS NULL OR cm.KLABC <> 'X')\n"
+                f"   - 4. Customer Master -> Territory Master: cm.BZIRK = tm.BZIRK\n"
+                f"   - 5. Territory Master -> Region Master: tm.REGIO = rm.\"region_code\"\n"
+                f"   - 6. Region Master -> Zone Master: rm.\"zone_code\" = zm.P_ZONE\n"
+                f"   - 7. Sales Data -> Day Date: fact.\"invoice_date\" = da.\"Date_\"\n"
+                f"   - For Pure Aggregate Queries (e.g. Total Sales, Total Revenue, Overall Quantity across years/months without customer/product breakdown): Aggregate DIRECTLY from the fact view (SELECT SUM(fact.\"invoice_value\")) WITHOUT joining Customer Master or other master tables. Do NOT perform unnecessary Cartesian joins across 30M rows!\n"
+                f"   - When Customer/Dealer breakdown or ranking (Top N / Worst N) is requested: JOIN \"SAP_S4\".\"ZIVF_CustomerMaster_01_MD\" cm ON (fact.\"dealer_code\" = cm.KUNNR OR LTRIM(fact.\"dealer_code\", '0') = LTRIM(cm.KUNNR, '0')) and filter (cm.KLABC IS NULL OR cm.KLABC <> 'X').\n"
                 f"4. DYNAMIC ROUTING RULE:\n"
                 f"   - If the user asks for ANY month, quarter, or year PRIOR to the current rolling month (i.e. any period before {current_month_name}, including past months of this year or previous years), you MUST query \"SAP_S4\".\"ZPVF_SD_SalesHistory_01_TR\"!\n"
                 f"   - NEVER query CurrentSales for past months; CurrentSales only holds the active rolling current month and will return NULL for past dates.\n"
@@ -2858,6 +2860,8 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
         # Track failures so we never fall through to an empty-context LLM answer.
         agg_sql_error = None
         sql_results = []
+        sql_query = None
+        exec_duration = None
 
         if sql_json and sql_json.get("sql"):
             target_db = sql_json.get("db", "").strip()
@@ -3129,12 +3133,18 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                 run_query = re.sub(r'\bGROUP\s+BY\s*;\s*$', ';', run_query, flags=re.IGNORECASE)
                                 run_query = re.sub(r'\bGROUP\s+BY\s*$', '', run_query, flags=re.IGNORECASE)
 
-                                # Mandate Customer Master join and KLABC <> 'X' filter for all Sales Fact queries
-                                if is_hana and ("ZPVF_SD_CurrentSales_01_TR" in run_query or "ZPVF_SD_SalesHistory_01_TR" in run_query):
+                                # Mandate Customer Master join and KLABC <> 'X' filter ONLY when customer/dealer dimension is requested
+                                SQL_RESERVED = {'where', 'group', 'order', 'inner', 'left', 'right', 'join', 'on', 'union', 'having', 'limit', 'as', 'from', 'select'}
+                                is_customer_query = any(k in question.lower() for k in ['customer', 'dealer', 'client', 'account', 'party']) or ("cm." in run_query) or ("kunnr" in run_query.lower())
+
+                                if is_hana and ("ZPVF_SD_CurrentSales_01_TR" in run_query or "ZPVF_SD_SalesHistory_01_TR" in run_query) and is_customer_query:
                                     if "ZIVF_CustomerMaster_01_MD" not in run_query:
                                         m_f = re.search(r'\"?ZPVF_SD_(?:CurrentSales|SalesHistory)_01_TR\"?\s+(?:AS\s+)?([a-zA-Z0-9_]+)', run_query, re.I)
-                                        f_alias = m_f.group(1) if m_f else "fact"
-                                        cm_join = f'\nJOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm ON ({f_alias}."dealer_code" = cm.KUNNR OR LTRIM({f_alias}."dealer_code", \'0\') = LTRIM(cm.KUNNR, \'0\'))\n'
+                                        f_alias = m_f.group(1) if (m_f and m_f.group(1).lower() not in SQL_RESERVED) else "fact"
+                                        if not m_f or m_f.group(1).lower() in SQL_RESERVED:
+                                            run_query = re.sub(r'(\"?ZPVF_SD_(?:CurrentSales|SalesHistory)_01_TR\"?)(?!\s+AS\b|\s+[a-zA-Z0-9_]+)', r'\1 AS fact', run_query, flags=re.I)
+                                            f_alias = "fact"
+                                        cm_join = f'\nLEFT JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm ON ({f_alias}."dealer_code" = cm.KUNNR OR LTRIM({f_alias}."dealer_code", \'0\') = LTRIM(cm.KUNNR, \'0\'))\n'
                                         if re.search(r'\bWHERE\b', run_query, re.I):
                                             run_query = re.sub(r'(\bWHERE\b)', f'{cm_join}WHERE', run_query, count=1, flags=re.I)
                                         else:
@@ -3154,7 +3164,8 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                             _t_exec_start = time.time()
                             cur_sql.execute(run_query)
                             _t_exec_done = time.time()
-                            print(f"[SQL_EXEC] cur_sql.execute() finished in {_t_exec_done - _t_exec_start:.3f}s. Fetching all rows...")
+                            exec_duration = _t_exec_done - _t_exec_start
+                            print(f"[SQL_EXEC] cur_sql.execute() finished in {exec_duration:.3f}s. Fetching all rows...")
 
                             _t_fetch_start = time.time()
                             rows = cur_sql.fetchall()

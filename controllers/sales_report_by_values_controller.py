@@ -147,8 +147,15 @@ def query_sales_report_by_values_hana(cursor, schema, year_month: str, selected_
     """
     Executes memory-optimized HANA query for Sales Report by Values (Sheet 3).
     - Strictly filtered for distribution_channel = '10' (Replacement).
+    - Connecting Keys strictly follow official Datasphere architecture:
+        1. Sales Data -> SKU Master (SKU = MATNR)
+        2. SKU Master -> Category Master (CAT_CODE = CAT_CODE)
+        3. Sales Data -> Customer Master (dealer_code = KUNNR, KLABC <> 'X')
+        4. Customer Master -> Territory Master (BZIRK = BZIRK)
+        5. Territory Master -> Region Master (REGIO = region_code)
+        6. Region Master -> Zone Master (zone_code = P_ZONE)
     - Date filters pushed down directly inside inner subqueries to avoid HANA memory limits.
-    - Categorized into 4 Wheelers & 2/3 Wheelers using complete master mappings (TYRE_TYPE, CAT_DESC, CAT_CODE).
+    - Categorized into 4 Wheelers & 2/3 Wheelers (SCOOTER, MOTOR CYCLE, 3W, etc.).
     - Targets aggregated from ZIVF_SD_Sales_Plan_Target_01_TR for YMONTH.
     - Aggregated by Zones from ZIVF_ZoneMaster_01_TR, ignoring 'Unknown'.
     """
@@ -172,184 +179,169 @@ def query_sales_report_by_values_hana(cursor, schema, year_month: str, selected_
     prev_to = f"{prev_yr}-{str(curr_mo).zfill(2)}-{str(min(day_clamped, last_day_prev)).zfill(2)}"
     prev_month_end = f"{prev_yr}-{str(curr_mo).zfill(2)}-{str(last_day_prev).zfill(2)}"
 
+    day_date = curr_to if str(selected_date).startswith(f"{curr_yr}-{str(curr_mo).zfill(2)}") else curr_month_end
+
     hana_sql = f"""
     WITH
-    fact_history AS (
+    SALES_BASE AS (
         SELECT
-            zm.NAME AS Zone_Name,
+            "invoice_date",
+            "invoice_value",
+            "distribution_channel",
+            "dealer_code",
+            "SKU",
+            "invoice_number",
+            "plant",
+            "FKART",
+            "indicator_cancel"
+        FROM "{schema}"."ZPVF_SD_SalesHistory_01_TR"
+        WHERE ("distribution_channel" = '10' OR "distribution_channel" = 10)
+          AND (
+              ("invoice_date" >= TO_DATE('{prev_from}', 'YYYY-MM-DD') AND "invoice_date" <= TO_DATE('{prev_month_end}', 'YYYY-MM-DD'))
+              OR
+              ("invoice_date" >= TO_DATE('{curr_from}', 'YYYY-MM-DD') AND "invoice_date" <= TO_DATE('{curr_month_end}', 'YYYY-MM-DD'))
+          )
+          AND ("indicator_cancel" IS NULL OR "indicator_cancel" NOT IN ('X', 'Y', '1'))
+        UNION ALL
+        SELECT
+            "invoice_date",
+            "invoice_value",
+            "distribution_channel",
+            "dealer_code",
+            "SKU",
+            "invoice_number",
+            "plant",
+            "FKART",
+            "indicator_cancel"
+        FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR"
+        WHERE ("distribution_channel" = '10' OR "distribution_channel" = 10)
+          AND (
+              ("invoice_date" >= TO_DATE('{prev_from}', 'YYYY-MM-DD') AND "invoice_date" <= TO_DATE('{prev_month_end}', 'YYYY-MM-DD'))
+              OR
+              ("invoice_date" >= TO_DATE('{curr_from}', 'YYYY-MM-DD') AND "invoice_date" <= TO_DATE('{curr_month_end}', 'YYYY-MM-DD'))
+          )
+          AND ("indicator_cancel" IS NULL OR "indicator_cancel" NOT IN ('X', 'Y', '1'))
+    ),
+
+    SALES_FILTERED AS (
+        SELECT
+            s."invoice_date",
+            s."invoice_value",
+            s."dealer_code",
+            s."SKU"
+        FROM SALES_BASE s
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM "{schema}"."ZPVF_SD_CancelledSalesInvoice_01_TR" x
+            WHERE x."invoice_number" = s."invoice_number"
+              AND x."plant" = s."plant"
+              AND x."FKART" = s."FKART"
+              AND x."indicator_cancel" = 'X'
+        )
+    ),
+
+    FACT_CLASSIFIED AS (
+        SELECT
+            zm."NAME" AS Zone_Name,
+            zm."P_ZONE" AS Zone_Code,
+            s."invoice_date",
+            s."invoice_value",
             CASE
-                WHEN UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) IN ('SCOOTER', 'MOTOR CYCLE', 'MOTORCYCLE', 'MOTOR', '3W', '3 WHEELER', '3WH')
-                  OR UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) LIKE '%SCOOTER%'
-                  OR UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) LIKE '%MOTOR CYCLE%'
-                  OR UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) LIKE '%MOTORCYCLE%'
-                  OR UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) LIKE '%3%WH%'
-                  OR UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) LIKE '%3%WHEEL%'
-                  OR UPPER(TRIM(COALESCE(sm.TYRE_TYPE, ''))) IN ('SCOOTER', 'MOTOR CYCLE', 'MOTORCYCLE', '3W', '3 WHEELER', '3WH')
+                WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) IN ('SCOOTER', 'MOTOR CYCLE', 'MOTORCYCLE', '3W', '3 WHEELER', '3WH', 'MOTOR')
+                  OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%SCOOTER%'
+                  OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%MOTOR CYCLE%'
+                  OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%MOTORCYCLE%'
+                  OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%3%WH%'
+                  OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%3%WHEEL%'
+                  OR UPPER(TRIM(COALESCE(sk."TYRE_TYPE", ''))) IN ('SCOOTER', 'MOTOR CYCLE', 'MOTORCYCLE', '3W', '3 WHEELER', '3WH')
                 THEN '2_3_Whlrs'
                 ELSE '4_Whlrs'
-            END AS Segment,
-            COALESCE(NULLIF(sh.INVOICE_VALUE, 0), NULLIF(sh.NDP_VALUE, 0), NULLIF(sh.TAXABLE_VALUE, 0), 0) AS val
-        FROM (
-            SELECT s.DEALER_CODE, s.PLANT, s.SKU, s.INVOICE_DATE, s.INDICATOR_CANCEL, s.NDP_VALUE, s.TAXABLE_VALUE, s.INVOICE_VALUE, s.DISTRIBUTION_CHANNEL 
-            FROM "{schema}"."ZPVF_SD_SalesHistory_01_TR" s
-            WHERE (s.INDICATOR_CANCEL IS NULL OR s.INDICATOR_CANCEL NOT IN ('X', 'Y', '1'))
-              AND (s.DISTRIBUTION_CHANNEL = 10 OR s.DISTRIBUTION_CHANNEL = '10')
-              AND s.INVOICE_DATE BETWEEN '{prev_from}' AND '{prev_month_end}'
-            UNION ALL
-            SELECT s.DEALER_CODE, s.PLANT, s.SKU, s.INVOICE_DATE, s.INDICATOR_CANCEL, s.NDP_VALUE, s.TAXABLE_VALUE, s.INVOICE_VALUE, s.DISTRIBUTION_CHANNEL 
-            FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR" s
-            WHERE (s.INDICATOR_CANCEL IS NULL OR s.INDICATOR_CANCEL NOT IN ('X', 'Y', '1'))
-              AND (s.DISTRIBUTION_CHANNEL = 10 OR s.DISTRIBUTION_CHANNEL = '10')
-              AND s.INVOICE_DATE BETWEEN '{prev_from}' AND '{prev_month_end}'
-        ) sh
-        LEFT JOIN "{schema}"."ZIVR_SKUMaster_01_TR" sm ON (sh.SKU = sm.MATNR)
-        LEFT JOIN "{schema}"."ZIVF_CategoryMaster_01_TR" cat ON (sm.CAT_CODE = cat.CAT_CODE)
-        LEFT JOIN "{schema}"."ZIVF_CustomerMaster_01_MD" cm ON (LPAD(TRIM(TO_VARCHAR(sh.DEALER_CODE)), 10, '0') = LPAD(TRIM(TO_VARCHAR(cm.KUNNR)), 10, '0') OR LTRIM(TO_VARCHAR(sh.DEALER_CODE), '0') = LTRIM(TO_VARCHAR(cm.KUNNR), '0'))
-        LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm_plant ON (sh.PLANT = tm_plant.WERKS)
-        LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm_bzirk ON (cm.BZIRK = tm_bzirk.BZIRK)
-        LEFT JOIN "{schema}"."ZIVF_RegionMaster_MD_01" rm ON (rm.REGION_CODE = COALESCE(NULLIF(TRIM(tm_plant.REGIO), ''), NULLIF(TRIM(tm_bzirk.REGIO), ''), NULLIF(TRIM(TO_VARCHAR(cm.REGIO)), '')))
-        LEFT JOIN "{schema}"."ZIVF_ZoneMaster_01_TR" zm ON (zm.P_ZONE = COALESCE(
-            NULLIF(TRIM(tm_plant.P_ZONE), ''),
-            NULLIF(TRIM(tm_bzirk.P_ZONE), ''),
-            NULLIF(TRIM(rm.ZONE_CODE), ''),
-            CASE 
-                WHEN SUBSTRING(TO_VARCHAR(sh.PLANT), 1, 2) IN ('36', '71', '72') THEN 'CZ'
-                WHEN SUBSTRING(TO_VARCHAR(sh.PLANT), 1, 1) = '3' THEN 'NZ'
-                WHEN SUBSTRING(TO_VARCHAR(sh.PLANT), 1, 1) = '1' THEN 'EZ'
-                WHEN SUBSTRING(TO_VARCHAR(sh.PLANT), 1, 1) = '8' THEN 'NP'
-                WHEN SUBSTRING(TO_VARCHAR(sh.PLANT), 1, 2) IN ('51', '52') THEN 'TZ'
-                WHEN SUBSTRING(TO_VARCHAR(sh.PLANT), 1, 1) = '5' THEN 'SZ'
-                WHEN SUBSTRING(TO_VARCHAR(sh.PLANT), 1, 1) = '7' THEN 'WZ'
-                ELSE NULL
-            END
-        ))
-        WHERE (cm.KLABC IS NULL OR UPPER(TRIM(cm.KLABC)) <> 'X')
-          AND zm.NAME IS NOT NULL AND TRIM(zm.NAME) != '' AND TRIM(zm.NAME) != 'Unknown'
+            END AS Segment
+        FROM SALES_FILTERED s
+        LEFT JOIN "{schema}"."ZIVR_SKUMaster_01_TR" sk 
+            ON TRIM(s."SKU") = TRIM(sk."MATNR")
+        LEFT JOIN "{schema}"."ZIVF_CategoryMaster_01_TR" cat 
+            ON TRIM(sk."CAT_CODE") = TRIM(cat."CAT_CODE")
+        LEFT JOIN "{schema}"."ZIVF_CustomerMaster_01_MD" cm 
+            ON (LTRIM(TRIM(s."dealer_code"), '0') = LTRIM(TRIM(cm."KUNNR"), '0') OR LPAD(TRIM(s."dealer_code"), 10, '0') = LPAD(TRIM(cm."KUNNR"), 10, '0'))
+        LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm 
+            ON TRIM(cm."BZIRK") = TRIM(tm."BZIRK")
+        LEFT JOIN "{schema}"."ZIVF_RegionMaster_MD_01" rm 
+            ON TRIM(tm."REGIO") = TRIM(rm."region_code")
+        LEFT JOIN "{schema}"."ZIVF_ZoneMaster_01_TR" zm 
+            ON zm."P_ZONE" = COALESCE(NULLIF(TRIM(rm."zone_code"), ''), NULLIF(TRIM(tm."P_ZONE"), ''))
+        WHERE (cm."KLABC" IS NULL OR UPPER(TRIM(cm."KLABC")) <> 'X')
+          AND zm."NAME" IS NOT NULL AND TRIM(zm."NAME") != '' AND UPPER(TRIM(zm."NAME")) NOT LIKE '%UNKNOWN%'
     ),
 
-    fact_current AS (
+    AGG_SALES AS (
         SELECT
-            zm.NAME AS Zone_Name,
-            CASE
-                WHEN UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) IN ('SCOOTER', 'MOTOR CYCLE', 'MOTORCYCLE', 'MOTOR', '3W', '3 WHEELER', '3WH')
-                  OR UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) LIKE '%SCOOTER%'
-                  OR UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) LIKE '%MOTOR CYCLE%'
-                  OR UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) LIKE '%MOTORCYCLE%'
-                  OR UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) LIKE '%3%WH%'
-                  OR UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) LIKE '%3%WHEEL%'
-                  OR UPPER(TRIM(COALESCE(sm.TYRE_TYPE, ''))) IN ('SCOOTER', 'MOTOR CYCLE', 'MOTORCYCLE', '3W', '3 WHEELER', '3WH')
-                THEN '2_3_Whlrs'
-                ELSE '4_Whlrs'
-            END AS Segment,
-            cs.INVOICE_DATE,
-            COALESCE(NULLIF(cs.INVOICE_VALUE, 0), NULLIF(cs.NDP_VALUE, 0), NULLIF(cs.TAXABLE_VALUE, 0), 0) AS val
-        FROM (
-            SELECT s.DEALER_CODE, s.PLANT, s.SKU, s.INVOICE_DATE, s.INDICATOR_CANCEL, s.NDP_VALUE, s.TAXABLE_VALUE, s.INVOICE_VALUE, s.DISTRIBUTION_CHANNEL 
-            FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR" s
-            WHERE (s.INDICATOR_CANCEL IS NULL OR s.INDICATOR_CANCEL NOT IN ('X', 'Y', '1'))
-              AND (s.DISTRIBUTION_CHANNEL = 10 OR s.DISTRIBUTION_CHANNEL = '10')
-              AND s.INVOICE_DATE BETWEEN '{curr_from}' AND '{curr_to}'
-            UNION ALL
-            SELECT s.DEALER_CODE, s.PLANT, s.SKU, s.INVOICE_DATE, s.INDICATOR_CANCEL, s.NDP_VALUE, s.TAXABLE_VALUE, s.INVOICE_VALUE, s.DISTRIBUTION_CHANNEL 
-            FROM "{schema}"."ZPVF_SD_SalesHistory_01_TR" s
-            WHERE (s.INDICATOR_CANCEL IS NULL OR s.INDICATOR_CANCEL NOT IN ('X', 'Y', '1'))
-              AND (s.DISTRIBUTION_CHANNEL = 10 OR s.DISTRIBUTION_CHANNEL = '10')
-              AND s.INVOICE_DATE BETWEEN '{curr_from}' AND '{curr_to}'
-        ) cs
-        LEFT JOIN "{schema}"."ZIVR_SKUMaster_01_TR" sm ON (cs.SKU = sm.MATNR)
-        LEFT JOIN "{schema}"."ZIVF_CategoryMaster_01_TR" cat ON (sm.CAT_CODE = cat.CAT_CODE)
-        LEFT JOIN "{schema}"."ZIVF_CustomerMaster_01_MD" cm ON (LPAD(TRIM(TO_VARCHAR(cs.DEALER_CODE)), 10, '0') = LPAD(TRIM(TO_VARCHAR(cm.KUNNR)), 10, '0') OR LTRIM(TO_VARCHAR(cs.DEALER_CODE), '0') = LTRIM(TO_VARCHAR(cm.KUNNR), '0'))
-        LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm_plant ON (cs.PLANT = tm_plant.WERKS)
-        LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm_bzirk ON (cm.BZIRK = tm_bzirk.BZIRK)
-        LEFT JOIN "{schema}"."ZIVF_RegionMaster_MD_01" rm ON (rm.REGION_CODE = COALESCE(NULLIF(TRIM(tm_plant.REGIO), ''), NULLIF(TRIM(tm_bzirk.REGIO), ''), NULLIF(TRIM(TO_VARCHAR(cm.REGIO)), '')))
-        LEFT JOIN "{schema}"."ZIVF_ZoneMaster_01_TR" zm ON (zm.P_ZONE = COALESCE(
-            NULLIF(TRIM(tm_plant.P_ZONE), ''),
-            NULLIF(TRIM(tm_bzirk.P_ZONE), ''),
-            NULLIF(TRIM(rm.ZONE_CODE), ''),
-            CASE 
-                WHEN SUBSTRING(TO_VARCHAR(cs.PLANT), 1, 2) IN ('36', '71', '72') THEN 'CZ'
-                WHEN SUBSTRING(TO_VARCHAR(cs.PLANT), 1, 1) = '3' THEN 'NZ'
-                WHEN SUBSTRING(TO_VARCHAR(cs.PLANT), 1, 1) = '1' THEN 'EZ'
-                WHEN SUBSTRING(TO_VARCHAR(cs.PLANT), 1, 1) = '8' THEN 'NP'
-                WHEN SUBSTRING(TO_VARCHAR(cs.PLANT), 1, 2) IN ('51', '52') THEN 'TZ'
-                WHEN SUBSTRING(TO_VARCHAR(cs.PLANT), 1, 1) = '5' THEN 'SZ'
-                WHEN SUBSTRING(TO_VARCHAR(cs.PLANT), 1, 1) = '7' THEN 'WZ'
-                ELSE NULL
-            END
-        ))
-        WHERE (cm.KLABC IS NULL OR UPPER(TRIM(cm.KLABC)) <> 'X')
-          AND zm.NAME IS NOT NULL AND TRIM(zm.NAME) != '' AND TRIM(zm.NAME) != 'Unknown'
-    ),
-
-    agg_history AS (
-        SELECT 
             Zone_Name,
-            SUM(CASE WHEN Segment = '4_Whlrs' THEN val ELSE 0 END) / 10000000.0 AS Prev_4W,
-            SUM(CASE WHEN Segment = '2_3_Whlrs' THEN val ELSE 0 END) / 10000000.0 AS Prev_23W
-        FROM fact_history
-        GROUP BY Zone_Name
+            Zone_Code,
+            -- Previous Year Month
+            SUM(CASE WHEN Segment = '4_Whlrs' AND "invoice_date" >= TO_DATE('{prev_from}', 'YYYY-MM-DD') AND "invoice_date" <= TO_DATE('{prev_month_end}', 'YYYY-MM-DD') THEN "invoice_value" ELSE 0 END) / 10000000.0 AS Prev_4W,
+            SUM(CASE WHEN Segment = '2_3_Whlrs' AND "invoice_date" >= TO_DATE('{prev_from}', 'YYYY-MM-DD') AND "invoice_date" <= TO_DATE('{prev_month_end}', 'YYYY-MM-DD') THEN "invoice_value" ELSE 0 END) / 10000000.0 AS Prev_23W,
+            -- Current Year Month
+            SUM(CASE WHEN Segment = '4_Whlrs' AND "invoice_date" >= TO_DATE('{curr_from}', 'YYYY-MM-DD') AND "invoice_date" <= TO_DATE('{curr_month_end}', 'YYYY-MM-DD') THEN "invoice_value" ELSE 0 END) / 10000000.0 AS Curr_4W,
+            SUM(CASE WHEN Segment = '2_3_Whlrs' AND "invoice_date" >= TO_DATE('{curr_from}', 'YYYY-MM-DD') AND "invoice_date" <= TO_DATE('{curr_month_end}', 'YYYY-MM-DD') THEN "invoice_value" ELSE 0 END) / 10000000.0 AS Curr_23W,
+            -- Sale for the Day
+            SUM(CASE WHEN "invoice_date" = TO_DATE('{day_date}', 'YYYY-MM-DD') THEN "invoice_value" ELSE 0 END) / 10000000.0 AS Sale_For_Day
+        FROM FACT_CLASSIFIED
+        GROUP BY Zone_Name, Zone_Code
     ),
 
-    agg_current AS (
-        SELECT 
-            Zone_Name,
-            SUM(CASE WHEN Segment = '4_Whlrs' THEN val ELSE 0 END) / 10000000.0 AS Curr_4W,
-            SUM(CASE WHEN Segment = '2_3_Whlrs' THEN val ELSE 0 END) / 10000000.0 AS Curr_23W,
-            SUM(CASE WHEN INVOICE_DATE = TO_DATE('{curr_to}', 'YYYY-MM-DD') THEN val ELSE 0 END) / 10000000.0 AS Sale_For_Day
-        FROM fact_current
-        GROUP BY Zone_Name
-    ),
-
-    agg_target AS (
-        SELECT 
-            zm.NAME AS Zone_Name,
+    AGG_TARGET AS (
+        SELECT
+            zm."NAME" AS Zone_Name,
+            zm."P_ZONE" AS Zone_Code,
             SUM(CASE WHEN NOT (
-                UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) IN ('SCOOTER', 'MOTOR CYCLE', 'MOTORCYCLE', 'MOTOR', '3W', '3 WHEELER', '3WH')
-                OR UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) LIKE '%SCOOTER%'
-                OR UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) LIKE '%MOTOR CYCLE%'
-                OR UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) LIKE '%MOTORCYCLE%'
-                OR UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) LIKE '%3%WH%'
-                OR UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) LIKE '%3%WHEEL%'
-                OR UPPER(TRIM(COALESCE(tgt.T_TYPE, ''))) IN ('SCOOTER', 'MOTOR CYCLE', 'MOTORCYCLE', '3W', '3 WHEELER', '3WH', '2/3 WHEELERS')
-                OR UPPER(TRIM(COALESCE(tgt.T_TYPE, ''))) LIKE '%SCOOTER%'
-                OR UPPER(TRIM(COALESCE(tgt.T_TYPE, ''))) LIKE '%MOTOR CYCLE%'
-                OR UPPER(TRIM(COALESCE(tgt.T_TYPE, ''))) LIKE '%MOTORCYCLE%'
-                OR UPPER(TRIM(COALESCE(tgt.T_TYPE, ''))) LIKE '%3%WH%'
-                OR UPPER(TRIM(COALESCE(tgt.T_TYPE, ''))) LIKE '%3%WHEEL%'
-                OR UPPER(TRIM(COALESCE(tgt.T_TYPE, ''))) LIKE '%2/3%'
+                UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) IN ('SCOOTER', 'MOTOR CYCLE', 'MOTORCYCLE', '3W', '3 WHEELER', '3WH', 'MOTOR', '2/3 WHEELERS')
+                OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%SCOOTER%'
+                OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%MOTOR CYCLE%'
+                OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%MOTORCYCLE%'
+                OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%3%WH%'
+                OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%3%WHEEL%'
+                OR UPPER(TRIM(COALESCE(tgt."T_TYPE", ''))) IN ('SCOOTER', 'MOTOR CYCLE', 'MOTORCYCLE', '3W', '3 WHEELER', '3WH', '2/3 WHEELERS')
+                OR UPPER(TRIM(COALESCE(tgt."T_TYPE", ''))) LIKE '%SCOOTER%'
+                OR UPPER(TRIM(COALESCE(tgt."T_TYPE", ''))) LIKE '%MOTOR CYCLE%'
+                OR UPPER(TRIM(COALESCE(tgt."T_TYPE", ''))) LIKE '%MOTORCYCLE%'
+                OR UPPER(TRIM(COALESCE(tgt."T_TYPE", ''))) LIKE '%3%WH%'
+                OR UPPER(TRIM(COALESCE(tgt."T_TYPE", ''))) LIKE '%3%WHEEL%'
+                OR UPPER(TRIM(COALESCE(tgt."T_TYPE", ''))) LIKE '%2/3%'
             )
-            THEN COALESCE(NULLIF(tgt.REV_PLAN_VAL, 0), NULLIF(tgt.PLAN_VALUE, 0), 0)
+            THEN COALESCE(NULLIF(tgt."REV_PLAN_VAL", 0), NULLIF(tgt."PLAN_VALUE", 0), 0)
             ELSE 0 END) / 10000000.0 AS Tgt_4W,
             SUM(CASE WHEN (
-                UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) IN ('SCOOTER', 'MOTOR CYCLE', 'MOTORCYCLE', 'MOTOR', '3W', '3 WHEELER', '3WH')
-                OR UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) LIKE '%SCOOTER%'
-                OR UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) LIKE '%MOTOR CYCLE%'
-                OR UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) LIKE '%MOTORCYCLE%'
-                OR UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) LIKE '%3%WH%'
-                OR UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) LIKE '%3%WHEEL%'
-                OR UPPER(TRIM(COALESCE(tgt.T_TYPE, ''))) IN ('SCOOTER', 'MOTOR CYCLE', 'MOTORCYCLE', '3W', '3 WHEELER', '3WH', '2/3 WHEELERS')
-                OR UPPER(TRIM(COALESCE(tgt.T_TYPE, ''))) LIKE '%SCOOTER%'
-                OR UPPER(TRIM(COALESCE(tgt.T_TYPE, ''))) LIKE '%MOTOR CYCLE%'
-                OR UPPER(TRIM(COALESCE(tgt.T_TYPE, ''))) LIKE '%MOTORCYCLE%'
-                OR UPPER(TRIM(COALESCE(tgt.T_TYPE, ''))) LIKE '%3%WH%'
-                OR UPPER(TRIM(COALESCE(tgt.T_TYPE, ''))) LIKE '%3%WHEEL%'
-                OR UPPER(TRIM(COALESCE(tgt.T_TYPE, ''))) LIKE '%2/3%'
+                UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) IN ('SCOOTER', 'MOTOR CYCLE', 'MOTORCYCLE', '3W', '3 WHEELER', '3WH', 'MOTOR', '2/3 WHEELERS')
+                OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%SCOOTER%'
+                OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%MOTOR CYCLE%'
+                OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%MOTORCYCLE%'
+                OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%3%WH%'
+                OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%3%WHEEL%'
+                OR UPPER(TRIM(COALESCE(tgt."T_TYPE", ''))) IN ('SCOOTER', 'MOTOR CYCLE', 'MOTORCYCLE', '3W', '3 WHEELER', '3WH', '2/3 WHEELERS')
+                OR UPPER(TRIM(COALESCE(tgt."T_TYPE", ''))) LIKE '%SCOOTER%'
+                OR UPPER(TRIM(COALESCE(tgt."T_TYPE", ''))) LIKE '%MOTOR CYCLE%'
+                OR UPPER(TRIM(COALESCE(tgt."T_TYPE", ''))) LIKE '%MOTORCYCLE%'
+                OR UPPER(TRIM(COALESCE(tgt."T_TYPE", ''))) LIKE '%3%WH%'
+                OR UPPER(TRIM(COALESCE(tgt."T_TYPE", ''))) LIKE '%3%WHEEL%'
+                OR UPPER(TRIM(COALESCE(tgt."T_TYPE", ''))) LIKE '%2/3%'
             )
-            THEN COALESCE(NULLIF(tgt.REV_PLAN_VAL, 0), NULLIF(tgt.PLAN_VALUE, 0), 0)
+            THEN COALESCE(NULLIF(tgt."REV_PLAN_VAL", 0), NULLIF(tgt."PLAN_VALUE", 0), 0)
             ELSE 0 END) / 10000000.0 AS Tgt_23W
         FROM "{schema}"."ZIVF_SD_Sales_Plan_Target_01_TR" tgt
-        LEFT JOIN "{schema}"."ZIVF_CategoryMaster_01_TR" cat ON (tgt.CAT_CODE = cat.CAT_CODE OR tgt.MATNR = cat.MATNR)
-        LEFT JOIN "{schema}"."ZIVF_RegionMaster_MD_01" rm ON (tgt.REG_CODE = rm.REGION_CODE)
-        LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm ON (tgt.TERR_CODE = tm.BZIRK)
-        LEFT JOIN "{schema}"."ZIVF_ZoneMaster_01_TR" zm ON (zm.P_ZONE = COALESCE(NULLIF(TRIM(rm.ZONE_CODE), ''), NULLIF(TRIM(tm.P_ZONE), '')))
-        WHERE tgt.YMONTH = '{year_month}'
-          AND zm.NAME IS NOT NULL AND TRIM(zm.NAME) != '' AND TRIM(zm.NAME) != 'Unknown'
-        GROUP BY zm.NAME
+        LEFT JOIN "{schema}"."ZIVF_CategoryMaster_01_TR" cat ON (TRIM(tgt."CAT_CODE") = TRIM(cat."CAT_CODE"))
+        LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm ON (TRIM(tgt."TERR_CODE") = TRIM(tm."BZIRK"))
+        LEFT JOIN "{schema}"."ZIVF_RegionMaster_MD_01" rm ON (TRIM(COALESCE(NULLIF(TRIM(tgt."REG_CODE"), ''), NULLIF(TRIM(tm."REGIO"), ''))) = TRIM(rm."region_code"))
+        LEFT JOIN "{schema}"."ZIVF_ZoneMaster_01_TR" zm ON (zm."P_ZONE" = COALESCE(NULLIF(TRIM(rm."zone_code"), ''), NULLIF(TRIM(tm."P_ZONE"), '')))
+        WHERE tgt."YMONTH" = '{year_month}'
+          AND zm."NAME" IS NOT NULL AND TRIM(zm."NAME") != '' AND UPPER(TRIM(zm."NAME")) NOT LIKE '%UNKNOWN%'
+        GROUP BY zm."NAME", zm."P_ZONE"
     ),
 
-    all_zones AS (
+    ALL_ZONES AS (
         SELECT DISTINCT
             NAME AS Zone_Name,
+            P_ZONE AS Zone_Code,
             CASE P_ZONE
                 WHEN 'EZ' THEN 1
                 WHEN 'NZ' THEN 2
@@ -361,41 +353,50 @@ def query_sales_report_by_values_hana(cursor, schema, year_month: str, selected_
                 ELSE 8
             END AS Sort_Order
         FROM "{schema}"."ZIVF_ZoneMaster_01_TR"
-        WHERE NAME IS NOT NULL AND TRIM(NAME) != '' AND TRIM(NAME) != 'Unknown'
+        WHERE NAME IS NOT NULL AND TRIM(NAME) != '' AND UPPER(TRIM(NAME)) NOT LIKE '%UNKNOWN%'
     )
 
     SELECT
         z.Zone_Name,
+        z.Zone_Code,
         z.Sort_Order,
-        COALESCE(h.Prev_4W,      0) AS Prev_4W,
-        COALESCE(h.Prev_23W,     0) AS Prev_23W,
+        COALESCE(s.Prev_4W,      0) AS Prev_4W,
+        COALESCE(s.Prev_23W,     0) AS Prev_23W,
         COALESCE(t.Tgt_4W,       0) AS Tgt_4W,
         COALESCE(t.Tgt_23W,      0) AS Tgt_23W,
-        COALESCE(c.Curr_4W,      0) AS Curr_4W,
-        COALESCE(c.Curr_23W,     0) AS Curr_23W,
-        COALESCE(c.Sale_For_Day, 0) AS Sale_For_Day
-    FROM all_zones z
-    LEFT JOIN agg_history h ON z.Zone_Name = h.Zone_Name
-    LEFT JOIN agg_current c ON z.Zone_Name = c.Zone_Name
-    LEFT JOIN agg_target  t ON z.Zone_Name = t.Zone_Name
+        COALESCE(s.Curr_4W,      0) AS Curr_4W,
+        COALESCE(s.Curr_23W,     0) AS Curr_23W,
+        COALESCE(s.Sale_For_Day, 0) AS Sale_For_Day
+    FROM ALL_ZONES z
+    LEFT JOIN AGG_SALES s ON (z.Zone_Code = s.Zone_Code OR z.Zone_Name = s.Zone_Name)
+    LEFT JOIN AGG_TARGET t ON (z.Zone_Code = t.Zone_Code OR z.Zone_Name = t.Zone_Name)
     ORDER BY z.Sort_Order ASC
     """
 
-    cursor.execute(hana_sql)
+    sanitize_and_execute_hana(cursor, schema, hana_sql)
     raw_rows = cursor.fetchall()
     results = []
 
-    def _clean_zone(name):
+    def _clean_zone(name, p_zone=None):
+        pz = str(p_zone or "").strip().upper()
+        if pz == "EZ": return "East", 1
+        if pz == "NZ": return "North", 2
+        if pz == "CZ": return "Central", 3
+        if pz == "WZ": return "West", 4
+        if pz == "SZ": return "South - I", 5
+        if pz == "TZ": return "South - II", 6
+        if pz == "NP": return "Nepal", 7
+
         n = str(name or "").strip()
         u = n.upper()
-        if "EAST" in u: return "East"
-        if "NORTH" in u: return "North"
-        if "CENTRAL" in u: return "Central"
-        if "WEST" in u: return "West"
-        if "SOUTH" in u and ("II" in u or "2" in u): return "South - II"
-        if "SOUTH" in u: return "South - I"
-        if "NEPAL" in u: return "Nepal"
-        return n
+        if "EAST" in u: return "East", 1
+        if "NORTH" in u: return "North", 2
+        if "CENTRAL" in u: return "Central", 3
+        if "WEST" in u: return "West", 4
+        if "SOUTH" in u and ("II" in u or "2" in u): return "South - II", 6
+        if "SOUTH" in u: return "South - I", 5
+        if "NEPAL" in u: return "Nepal", 7
+        return n, 8
 
     tot_prev_4w = 0.0
     tot_prev_23w = 0.0
@@ -405,28 +406,31 @@ def query_sales_report_by_values_hana(cursor, schema, year_month: str, selected_
     tot_actual_23w = 0.0
     tot_sale_for_the_day = 0.0
 
+    zone_order_seen = set()
+
     for r in raw_rows:
-        z_name = _clean_zone(r[0])
-        sort_ord = int(r[1] or 99)
-        p_4w = round(float(r[2] or 0), 2)
-        p_23w = round(float(r[3] or 0), 2)
+        z_name, s_order = _clean_zone(r[0], r[1])
+        if z_name in zone_order_seen or "UNKNOWN" in z_name.upper():
+            continue
+        zone_order_seen.add(z_name)
+
+        p_4w = round(float(r[3] or 0), 2)
+        p_23w = round(float(r[4] or 0), 2)
         p_tot = round(p_4w + p_23w, 2)
 
-        t_4w = round(float(r[4] or 0), 2)
-        t_23w = round(float(r[5] or 0), 2)
+        t_4w = round(float(r[5] or 0), 2)
+        t_23w = round(float(r[6] or 0), 2)
         t_tot = round(t_4w + t_23w, 2)
 
-        a_4w = round(float(r[6] or 0), 2)
-        a_23w = round(float(r[7] or 0), 2)
+        a_4w = round(float(r[7] or 0), 2)
+        a_23w = round(float(r[8] or 0), 2)
         a_tot = round(a_4w + a_23w, 2)
 
-        achv_pct = round((a_tot / t_tot * 100), 2) if t_tot > 0 else 0.0
-        sale_day = round(float(r[8] or 0), 2)
-        asking_rate = 0.0  # Blank / 0 per user specification
+        s_day = round(float(r[9] or 0), 2)
 
-        achvt_4w = round((a_4w / t_4w * 100), 2) if t_4w > 0 else 0.0
-        achvt_23w = round((a_23w / t_23w * 100), 2) if t_23w > 0 else 0.0
-        achvt_tot = round((a_tot / t_tot * 100), 2) if t_tot > 0 else 0.0
+        achv_pct = round((a_tot * 100.0 / t_tot), 2) if t_tot > 0 else 0.0
+        achvt_4w = round((a_4w * 100.0 / t_4w), 2) if t_4w > 0 else 0.0
+        achvt_23w = round((a_23w * 100.0 / t_23w), 2) if t_23w > 0 else 0.0
 
         tot_prev_4w += p_4w
         tot_prev_23w += p_23w
@@ -434,7 +438,7 @@ def query_sales_report_by_values_hana(cursor, schema, year_month: str, selected_
         tot_target_23w += t_23w
         tot_actual_4w += a_4w
         tot_actual_23w += a_23w
-        tot_sale_for_the_day += sale_day
+        tot_sale_for_the_day += s_day
 
         results.append({
             "zone": z_name,
@@ -448,14 +452,49 @@ def query_sales_report_by_values_hana(cursor, schema, year_month: str, selected_
             "actual_23w": a_23w,
             "actual_total": a_tot,
             "achievement_pct": achv_pct,
-            "sale_for_the_day": sale_day,
-            "asking_rate": asking_rate,
+            "sale_for_the_day": s_day,
+            "asking_rate": 0.0,
             "achvt_4w": achvt_4w,
             "achvt_23w": achvt_23w,
-            "achvt_total": achvt_tot,
-            "sort_order": sort_ord,
+            "achvt_total": achv_pct,
+            "sort_order": s_order,
             "is_total": False
         })
+
+    # Ensure all 7 standard zones exist in results
+    standard_zones = [
+        ("East", 1),
+        ("North", 2),
+        ("Central", 3),
+        ("West", 4),
+        ("South - I", 5),
+        ("South - II", 6),
+        ("Nepal", 7)
+    ]
+    present_names = {x["zone"] for x in results}
+    for sz_name, sz_order in standard_zones:
+        if sz_name not in present_names:
+            results.append({
+                "zone": sz_name,
+                "prev_4w": 0.0,
+                "prev_23w": 0.0,
+                "prev_total": 0.0,
+                "target_4w": 0.0,
+                "target_23w": 0.0,
+                "target_total": 0.0,
+                "actual_4w": 0.0,
+                "actual_23w": 0.0,
+                "actual_total": 0.0,
+                "achievement_pct": 0.0,
+                "sale_for_the_day": 0.0,
+                "asking_rate": 0.0,
+                "achvt_4w": 0.0,
+                "achvt_23w": 0.0,
+                "achvt_total": 0.0,
+                "sort_order": sz_order,
+                "is_total": False
+            })
+    results.sort(key=lambda x: x["sort_order"])
 
     # Summary Total Row
     tot_prev_4w = round(tot_prev_4w, 2)
@@ -470,11 +509,11 @@ def query_sales_report_by_values_hana(cursor, schema, year_month: str, selected_
     tot_actual_23w = round(tot_actual_23w, 2)
     tot_actual_tot = round(tot_actual_4w + tot_actual_23w, 2)
 
-    tot_achv_pct = round((tot_actual_tot / tot_target_tot * 100), 2) if tot_target_tot > 0 else 0.0
+    tot_achv_pct = round((tot_actual_tot * 100.0 / tot_target_tot), 2) if tot_target_tot > 0 else 0.0
     tot_sale_for_the_day = round(tot_sale_for_the_day, 2)
-    tot_achvt_4w = round((tot_actual_4w / tot_target_4w * 100), 2) if tot_target_4w > 0 else 0.0
-    tot_achvt_23w = round((tot_actual_23w / tot_target_23w * 100), 2) if tot_target_23w > 0 else 0.0
-    tot_achvt_tot = round((tot_actual_tot / tot_target_tot * 100), 2) if tot_target_tot > 0 else 0.0
+    tot_achvt_4w = round((tot_actual_4w * 100.0 / tot_target_4w), 2) if tot_target_4w > 0 else 0.0
+    tot_achvt_23w = round((tot_actual_23w * 100.0 / tot_target_23w), 2) if tot_target_23w > 0 else 0.0
+    tot_achvt_tot = tot_achv_pct
 
     results.append({
         "zone": "Total",
@@ -764,14 +803,14 @@ def get_sales_report_by_values_controller(get_db_connection):
                 # Realistic fallback based on user's live system snapshot (media_1793885225330_d0765a44)
                 # Excluding 'Unknown' per user requirement
                 rows = [
-                    {"zone": "East",       "prev_4w": 0.0, "prev_23w": 0.0, "prev_total": 0.0, "target_4w": 0.0, "target_23w": 0.0, "target_total": 0.0, "actual_4w": 0.28, "actual_23w": 0.0,  "actual_total": 0.28, "achievement_pct": 0, "sale_for_the_day": 0.28, "asking_rate": 0.0, "achvt_4w": 0, "achvt_23w": 0, "achvt_total": 0, "sort_order": 1, "is_total": False},
-                    {"zone": "North",      "prev_4w": 0.0, "prev_23w": 0.0, "prev_total": 0.0, "target_4w": 0.0, "target_23w": 0.0, "target_total": 0.0, "actual_4w": 0.29, "actual_23w": 0.0,  "actual_total": 0.29, "achievement_pct": 0, "sale_for_the_day": 0.29, "asking_rate": 0.0, "achvt_4w": 0, "achvt_23w": 0, "achvt_total": 0, "sort_order": 2, "is_total": False},
-                    {"zone": "Central",    "prev_4w": 0.0, "prev_23w": 0.0, "prev_total": 0.0, "target_4w": 0.0, "target_23w": 0.0, "target_total": 0.0, "actual_4w": 1.23, "actual_23w": 0.01, "actual_total": 1.24, "achievement_pct": 0, "sale_for_the_day": 1.24, "asking_rate": 0.0, "achvt_4w": 0, "achvt_23w": 0, "achvt_total": 0, "sort_order": 3, "is_total": False},
-                    {"zone": "West",       "prev_4w": 0.0, "prev_23w": 0.0, "prev_total": 0.0, "target_4w": 0.0, "target_23w": 0.0, "target_total": 0.0, "actual_4w": 0.01, "actual_23w": 0.0,  "actual_total": 0.01, "achievement_pct": 0, "sale_for_the_day": 0.01, "asking_rate": 0.0, "achvt_4w": 0, "achvt_23w": 0, "achvt_total": 0, "sort_order": 4, "is_total": False},
-                    {"zone": "South - I",  "prev_4w": 0.0, "prev_23w": 0.0, "prev_total": 0.0, "target_4w": 0.0, "target_23w": 0.0, "target_total": 0.0, "actual_4w": 0.34, "actual_23w": 0.0,  "actual_total": 0.35, "achievement_pct": 0, "sale_for_the_day": 0.35, "asking_rate": 0.0, "achvt_4w": 0, "achvt_23w": 0, "achvt_total": 0, "sort_order": 5, "is_total": False},
-                    {"zone": "South - II", "prev_4w": 0.0, "prev_23w": 0.0, "prev_total": 0.0, "target_4w": 0.0, "target_23w": 0.0, "target_total": 0.0, "actual_4w": 0.64, "actual_23w": 0.0,  "actual_total": 0.64, "achievement_pct": 0, "sale_for_the_day": 0.64, "asking_rate": 0.0, "achvt_4w": 0, "achvt_23w": 0, "achvt_total": 0, "sort_order": 6, "is_total": False},
-                    {"zone": "Nepal",      "prev_4w": 0.0, "prev_23w": 0.0, "prev_total": 0.0, "target_4w": 0.0, "target_23w": 0.0, "target_total": 0.0, "actual_4w": 0.0,  "actual_23w": 0.0,  "actual_total": 0.0,  "achievement_pct": 0, "sale_for_the_day": 0.0,  "asking_rate": 0.0, "achvt_4w": 0, "achvt_23w": 0, "achvt_total": 0, "sort_order": 7, "is_total": False},
-                    {"zone": "Total",      "prev_4w": 0.0, "prev_23w": 0.0, "prev_total": 0.0, "target_4w": 0.0, "target_23w": 0.0, "target_total": 0.0, "actual_4w": 2.79, "actual_23w": 0.01, "actual_total": 2.81, "achievement_pct": 0, "sale_for_the_day": 2.81, "asking_rate": 0.0, "achvt_4w": 0, "achvt_23w": 0, "achvt_total": 0, "sort_order": 999, "is_total": True}
+                    {"zone": "East",       "prev_4w": 0.0, "prev_23w": 0.0, "prev_total": 0.0, "target_4w": 0.0, "target_23w": 0.0, "target_total": 0.0, "actual_4w": 0.0, "actual_23w": 0.0, "actual_total": 0.0, "achievement_pct": 0.0, "sale_for_the_day": 0.0, "asking_rate": 0.0, "achvt_4w": 0.0, "achvt_23w": 0.0, "achvt_total": 0.0, "sort_order": 1, "is_total": False},
+                    {"zone": "North",      "prev_4w": 0.0, "prev_23w": 0.0, "prev_total": 0.0, "target_4w": 0.0, "target_23w": 0.0, "target_total": 0.0, "actual_4w": 0.0, "actual_23w": 0.0, "actual_total": 0.0, "achievement_pct": 0.0, "sale_for_the_day": 0.0, "asking_rate": 0.0, "achvt_4w": 0.0, "achvt_23w": 0.0, "achvt_total": 0.0, "sort_order": 2, "is_total": False},
+                    {"zone": "Central",    "prev_4w": 0.0, "prev_23w": 0.0, "prev_total": 0.0, "target_4w": 0.0, "target_23w": 0.0, "target_total": 0.0, "actual_4w": 0.0, "actual_23w": 0.0, "actual_total": 0.0, "achievement_pct": 0.0, "sale_for_the_day": 0.0, "asking_rate": 0.0, "achvt_4w": 0.0, "achvt_23w": 0.0, "achvt_total": 0.0, "sort_order": 3, "is_total": False},
+                    {"zone": "West",       "prev_4w": 0.0, "prev_23w": 0.0, "prev_total": 0.0, "target_4w": 0.0, "target_23w": 0.0, "target_total": 0.0, "actual_4w": 0.0, "actual_23w": 0.0, "actual_total": 0.0, "achievement_pct": 0.0, "sale_for_the_day": 0.0, "asking_rate": 0.0, "achvt_4w": 0.0, "achvt_23w": 0.0, "achvt_total": 0.0, "sort_order": 4, "is_total": False},
+                    {"zone": "South - I",  "prev_4w": 0.0, "prev_23w": 0.0, "prev_total": 0.0, "target_4w": 0.0, "target_23w": 0.0, "target_total": 0.0, "actual_4w": 0.0, "actual_23w": 0.0, "actual_total": 0.0, "achievement_pct": 0.0, "sale_for_the_day": 0.0, "asking_rate": 0.0, "achvt_4w": 0.0, "achvt_23w": 0.0, "achvt_total": 0.0, "sort_order": 5, "is_total": False},
+                    {"zone": "South - II", "prev_4w": 0.0, "prev_23w": 0.0, "prev_total": 0.0, "target_4w": 0.0, "target_23w": 0.0, "target_total": 0.0, "actual_4w": 0.0, "actual_23w": 0.0, "actual_total": 0.0, "achievement_pct": 0.0, "sale_for_the_day": 0.0, "asking_rate": 0.0, "achvt_4w": 0.0, "achvt_23w": 0.0, "achvt_total": 0.0, "sort_order": 6, "is_total": False},
+                    {"zone": "Nepal",      "prev_4w": 0.0, "prev_23w": 0.0, "prev_total": 0.0, "target_4w": 0.0, "target_23w": 0.0, "target_total": 0.0, "actual_4w": 0.0, "actual_23w": 0.0, "actual_total": 0.0, "achievement_pct": 0.0, "sale_for_the_day": 0.0, "asking_rate": 0.0, "achvt_4w": 0.0, "achvt_23w": 0.0, "achvt_total": 0.0, "sort_order": 7, "is_total": False},
+                    {"zone": "Total",      "prev_4w": 0.0, "prev_23w": 0.0, "prev_total": 0.0, "target_4w": 0.0, "target_23w": 0.0, "target_total": 0.0, "actual_4w": 0.0, "actual_23w": 0.0, "actual_total": 0.0, "achievement_pct": 0.0, "sale_for_the_day": 0.0, "asking_rate": 0.0, "achvt_4w": 0.0, "achvt_23w": 0.0, "achvt_total": 0.0, "sort_order": 999, "is_total": True}
                 ]
 
         mo_abbr = calendar.month_abbr[selected_mo_num]
