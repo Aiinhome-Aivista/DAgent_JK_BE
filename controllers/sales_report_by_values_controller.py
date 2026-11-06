@@ -588,13 +588,13 @@ def save_data_to_table(mysql_conn, session_id: str, year_month: str, selected_da
         cur.execute(f"DELETE FROM `{TABLE_NAME}` WHERE `session_id` = %s AND `year_month` = %s", (session_id, year_month))
         insert_sql = f"""
             INSERT INTO `{TABLE_NAME}` (
-                session_id, year_month, selected_date, zone_name,
-                prev_4w, prev_23w, prev_total,
-                target_4w, target_23w, target_total,
-                actual_4w, actual_23w, actual_total,
-                achievement_pct, sale_for_the_day, asking_rate,
-                achvt_4w, achvt_23w, achvt_total,
-                sort_order, is_total, last_synced_at
+                `session_id`, `year_month`, `selected_date`, `zone_name`,
+                `prev_4w`, `prev_23w`, `prev_total`,
+                `target_4w`, `target_23w`, `target_total`,
+                `actual_4w`, `actual_23w`, `actual_total`,
+                `achievement_pct`, `sale_for_the_day`, `asking_rate`,
+                `achvt_4w`, `achvt_23w`, `achvt_total`,
+                `sort_order`, `is_total`, `last_synced_at`
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
         """
         data_tuples = []

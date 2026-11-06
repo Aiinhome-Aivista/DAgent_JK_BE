@@ -3472,7 +3472,9 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
         fuq = res.get("follow_up_questions",[])
         actual_visit = _save_history(get_connection_func, session_id, user_id,
                       question, json.dumps(res.get("datasets",[])), fuq, understanding["intent"], "graph",
-                      login_token=login_token, chat_id=active_chat_id)
+                      login_token=login_token, chat_id=active_chat_id,
+                      generated_sql=sql_query, execution_time=exec_duration,
+                      row_count=len(sql_results) if sql_results is not None else 0)
         return jsonify({
             "status":     "success",
             "statusCode": 200,
@@ -3508,7 +3510,9 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
         fuq = res.get("follow_up_questions",[])
         actual_visit = _save_history(get_connection_func, session_id, user_id,
                       question, res.get("report_title",""), fuq, understanding["intent"], "report",
-                      login_token=login_token, chat_id=active_chat_id)
+                      login_token=login_token, chat_id=active_chat_id,
+                      generated_sql=sql_query, execution_time=exec_duration,
+                      row_count=len(sql_results) if sql_results is not None else 0)
         return jsonify({
             "status":     "success",
             "statusCode": 200,
@@ -3690,7 +3694,9 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
     actual_visit = _save_history(get_connection_func, session_id, user_id,
                   question, clean_answer, fuq, understanding["intent"], "answer",
                   login_token=login_token, visualizations=visualizations,
-                  chat_id=active_chat_id)
+                  chat_id=active_chat_id,
+                  generated_sql=sql_query, execution_time=exec_duration,
+                  row_count=len(sql_results) if sql_results is not None else 0)
 
     return jsonify({
         "status":              "success",
