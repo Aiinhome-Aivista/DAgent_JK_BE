@@ -1450,13 +1450,42 @@ CANONICAL DATA MODEL & RELATIONSHIP GRAPH (OFFICIAL):
    - SUBQUERY & CTE JOIN KEY HYGIENE (LEADING ZEROS):
      Whenever comparing dealer/customer codes between CTEs, tables, or subqueries, ALWAYS wrap in LTRIM:
      ON (LTRIM(ad.dealer_code, '0') = LTRIM(rs.dealer_code, '0'))
-   - TARGET VS ACTUAL / PLAN ACHIEVEMENT RULES:
-     Target view is at monthly planning grain (TERR_CODE, REG_CODE, YMONTH) and does NOT have dealer_code or daily dates.
-     NEVER join Sales Fact directly to Target Fact with an INNER/LEFT JOIN — this causes Cartesian product and duplicates numbers!
+   - TARGET VS ACTUAL / PLAN ACHIEVEMENT RULES (STRICT CTE ARCHITECTURE):
+     Target view ("SAP_S4"."ZIVF_SD_Sales_Plan_Target_01_TR") is at monthly planning grain (TERR_CODE, REG_CODE, YMONTH, MAT_TYPE).
+     Target metrics: PLAN_VALUE = Target Revenue, ORG_PLAN = Target Quantity.
+     NEVER join Sales Fact directly to Target Fact with an INNER/LEFT JOIN — this causes catastrophic Cartesian product and duplicates numbers!
      ALWAYS use Common Table Expressions (CTEs):
-     * CTE 1: actual_sales — Aggregate SUM(fact."invoice_value") AS actual_sales, SUM(fact."Tyre_Quantity") AS actual_qty from ZPVF_SD_CurrentSales_01_TR grouped by territory / region / zone / month.
-     * CTE 2: target_plans — Aggregate SUM(tgt.PLAN_VALUE) AS target_sales, SUM(tgt.ORG_PLAN) AS target_qty from ZIVF_SD_Sales_Plan_Target_01_TR grouped by tgt.TERR_CODE / tgt.REG_CODE / tgt.YMONTH.
-     * Outer Query: Join CTEs on territory/region/month, calculate % Value ((actual_sales / target_sales) * 100) and % Qty ((actual_qty / target_qty) * 100).
+     * CTE 1: actual_sales — Aggregate actual sales from ZPVF_SD_SalesHistory_01_TR (or CurrentSales if current month).
+     * CTE 2: target_plans — Aggregate target from ZIVF_SD_Sales_Plan_Target_01_TR.
+     * Outer Query: Join CTEs and calculate % Value ((actual_sales / NULLIF(target_sales, 0)) * 100) and % Qty ((actual_qty / NULLIF(target_qty, 0)) * 100).
+
+     CRITICAL GRAIN RULES FOR TARGET VS ACTUAL:
+     1. ZONE TARGET VS ACTUAL (e.g. North Zone, West Zone):
+        - In ZIVF_ZoneMaster_01_TR, zm.NAME is 'NORTH', 'WEST', 'SOUTH', 'EAST', 'CENTRAL' (WITHOUT 'Zone'!) and zm.P_ZONE is 'NZ', 'WZ', 'SZ', 'EZ', 'CZ'.
+        - Filter: (UPPER(TRIM(zm.NAME)) = 'NORTH' OR tm.P_ZONE = 'NZ').
+        - Group CTEs ONLY by zm.NAME AS zone_name (or tm.P_ZONE). NEVER group by region when answering a Zone question!
+        - In actual_sales: JOIN CustomerMaster cm, TerritoryMaster tm ON cm.BZIRK = tm.BZIRK, ZoneMaster zm ON tm.P_ZONE = zm.P_ZONE.
+        - In target_plans: JOIN TerritoryMaster tm ON tgt.TERR_CODE = tm.BZIRK, ZoneMaster zm ON tm.P_ZONE = zm.P_ZONE.
+        - Outer Query: JOIN ON a.zone_name = t.zone_name.
+
+     2. REGION TARGET (e.g. Jaipur Region):
+        - In target_plans: JOIN TerritoryMaster tm ON tgt.TERR_CODE = tm.BZIRK, JOIN RegionMaster rm ON tm.REGIO = rm."region_code". Filter: UPPER(TRIM(rm."region_name")) LIKE '%JAIPUR%'.
+        - In actual_sales: JOIN CustomerMaster cm, TerritoryMaster tm ON cm.BZIRK = tm.BZIRK, RegionMaster rm ON tm.REGIO = rm."region_code". Filter: UPPER(TRIM(rm."region_name")) LIKE '%JAIPUR%'.
+        - Group CTEs by rm."region_name". Join ON a.region_name = t.region_name.
+
+     3. TERRITORY TARGET VS ACTUAL (e.g. Territory 1101, Territory 1102):
+        - IN ACTUAL_SALES: You MUST filter cm.BZIRK = '1101'! Territory is in cm.BZIRK on Customer Master, NOT in the fact table.
+        - IN TARGET_PLANS: Filter tgt.TERR_CODE = '1101'.
+        - Join CTEs ON a.territory_code = t.territory_code (or CROSS JOIN if aggregating a single territory).
+
+     4. PRODUCT / TYRE TYPE TARGET (e.g. TBR tyres, PCR, 4 Wheeler):
+        - In target_plans: Target view has column MAT_TYPE. Filter: UPPER(TRIM(tgt.MAT_TYPE)) LIKE '%TBR%' (or 'PCR', '4WHEELER').
+        - In actual_sales: JOIN SKUMaster sk ON fact."SKU" = sk.MATNR. Filter: (UPPER(sk.TYRE_TYPE) LIKE '%TBR%' OR UPPER(sk.TYRE_TP) LIKE '%TBR%' OR UPPER(sk.CONSTUCTION) LIKE '%TBR%').
+
+     5. TIME PERIOD FILTERING:
+        - Specific Month (e.g. July 2026): in actual_sales filter fact."invoice_date" >= '2026-07-01' AND fact."invoice_date" < '2026-08-01'. In target_plans filter tgt.YMONTH = '202607'.
+        - Full Year (e.g. 2026): in actual_sales filter fact."invoice_date" >= '2026-01-01' AND fact."invoice_date" < '2027-01-01'. In target_plans filter tgt.YMONTH LIKE '2026%'.
+        - Current Month: in actual_sales query ZPVF_SD_CurrentSales_01_TR. In target_plans filter current month YMONTH.
 
    - YMONTH & DATE FILTERING HYGIENE:
      * In "SAP_S4"."ZITR_DayAttribute_01_TR", da.YMONTH is a 6-digit string formatted as 'YYYYMM' (e.g. '202609', '202410').
@@ -2778,19 +2807,30 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                 "- For Territory/Region/Zone: SELECT tm.NAME AS territory_name, tm.BZIRK AS territory_code, rm.\"region_name\", rm.\"region_code\", zm.NAME AS zone_name.\n"
                 "ALWAYS select BOTH the human-readable Name (for UI display) AND the Code (for safe JOINs across CTEs/subqueries)!\n\n"
                 "CRITICAL RULES FOR ACTUAL VS TARGET / PLAN COMPARISONS:\n"
-                "1. Target View 'ZIVF_SD_Sales_Plan_Target_01_TR' ALREADY has 'YMONTH' directly on the view! NEVER join 'ZITR_DayAttribute_01_TR' to the target view (DayAttribute has daily rows, so joining on YMONTH creates a catastrophic 30x Cartesian duplicate explosion and takes 200+ seconds)!\n"
-                "2. When comparing Actual Sales vs Target Plans using CTEs:\n"
-                "   - In CTE 1 (actual_sales): Select and group by BOTH the display name and code (e.g. tm.NAME AS territory_name, tm.BZIRK AS territory_code, rm.\"region_name\", rm.\"region_code\", cat.CAT_DESC AS category_name, cat.CAT_CODE AS category_code, da.YMONTH AS month).\n"
-                "   - In CTE 2 (target_plans): Query directly from \"SAP_S4\".\"ZIVF_SD_Sales_Plan_Target_01_TR\" tgt (DO NOT join DayAttribute). Select tgt.TERR_CODE AS territory_code, tgt.REG_CODE AS region_code, tgt.CAT_CODE AS category_code, tgt.YMONTH AS month, SUM(tgt.PLAN_VALUE) AS target_sales_value, SUM(tgt.ORG_PLAN) AS target_qty. Group by tgt.TERR_CODE, tgt.REG_CODE, tgt.CAT_CODE, tgt.YMONTH.\n"
-                "   - In Outer Query: JOIN CTEs on CODES (e.g. a.territory_code = t.territory_code AND a.month = t.month AND a.category_code = t.category_code). NEVER join a Name column to a Code column (e.g. NEVER do a.territory_name = t.terr_code)!\n\n"
-                "CRITICAL TERRITORY TARGET FILTER RULES:\n"
-                "When the user requests target values for a specific territory:\n"
-                "- Filter directly using tgt.TERR_CODE = requested_territory_code.\n"
-                "- NEVER add tgt.REG_CODE = rm.\"region_code\" as a mandatory condition.\n"
-                "- NEVER exclude rows where tgt.REG_CODE IS NULL or TRIM(tgt.REG_CODE) = ''.\n"
-                "- Include all target rows matching the requested territory and month, regardless of REG_CODE.\n"
-                "- Do NOT use OR between territory code and region code filters.\n"
-                "- If only aggregated target values are requested, aggregate directly from the target view without unnecessary master joins.\n"
+                "1. Target View 'ZIVF_SD_Sales_Plan_Target_01_TR' ALREADY has 'YMONTH' directly on the view! NEVER join 'ZITR_DayAttribute_01_TR' to the target view (DayAttribute has daily rows, so joining on YMONTH creates a catastrophic 30x Cartesian duplicate explosion)!\n"
+                "2. TARGET VS ACTUAL GRAIN & FILTER RULES:\n"
+                "   - ZONE (North Zone, West Zone, South Zone, East Zone):\n"
+                "     * In ZIVF_ZoneMaster_01_TR, zm.NAME is 'NORTH', 'WEST', 'SOUTH', 'EAST', 'CENTRAL' (WITHOUT 'Zone'!) and zm.P_ZONE is 'NZ', 'WZ', 'SZ', 'EZ', 'CZ'.\n"
+                "     * Filter: (UPPER(TRIM(zm.NAME)) = 'NORTH' OR tm.P_ZONE = 'NZ').\n"
+                "     * Group CTEs ONLY by zm.NAME AS zone_name (or tm.P_ZONE). NEVER group by region when answering a Zone question!\n"
+                "     * In actual_sales: JOIN CustomerMaster cm, TerritoryMaster tm ON cm.BZIRK = tm.BZIRK, ZoneMaster zm ON tm.P_ZONE = zm.P_ZONE.\n"
+                "     * In target_plans: JOIN TerritoryMaster tm ON tgt.TERR_CODE = tm.BZIRK, ZoneMaster zm ON tm.P_ZONE = zm.P_ZONE.\n"
+                "     * Outer Query: JOIN ON a.zone_name = t.zone_name.\n"
+                "   - REGION (e.g. Jaipur Region):\n"
+                "     * In target_plans: JOIN TerritoryMaster tm ON tgt.TERR_CODE = tm.BZIRK, JOIN RegionMaster rm ON tm.REGIO = rm.\"region_code\". Filter: UPPER(TRIM(rm.\"region_name\")) LIKE '%JAIPUR%'.\n"
+                "     * In actual_sales: JOIN CustomerMaster cm, TerritoryMaster tm ON cm.BZIRK = tm.BZIRK, RegionMaster rm ON tm.REGIO = rm.\"region_code\". Filter: UPPER(TRIM(rm.\"region_name\")) LIKE '%JAIPUR%'.\n"
+                "     * Group CTEs by rm.\"region_name\". Join ON a.region_name = t.region_name.\n"
+                "   - TERRITORY (e.g. Territory 1101, Territory 1102):\n"
+                "     * IN ACTUAL_SALES: You MUST filter cm.BZIRK = '1101'! Territory is in cm.BZIRK on Customer Master, NOT in the fact table.\n"
+                "     * IN TARGET_PLANS: Filter tgt.TERR_CODE = '1101'.\n"
+                "     * Join CTEs ON a.territory_code = t.territory_code (or CROSS JOIN if aggregating a single territory).\n"
+                "   - PRODUCT / TYRE TYPE (e.g. TBR tyres, PCR, 4 Wheeler):\n"
+                "     * In target_plans: Filter UPPER(TRIM(tgt.MAT_TYPE)) LIKE '%TBR%' (or 'PCR', '4WHEELER').\n"
+                "     * In actual_sales: JOIN SKUMaster sk ON fact.\"SKU\" = sk.MATNR. Filter: (UPPER(sk.TYRE_TYPE) LIKE '%TBR%' OR UPPER(sk.TYRE_TP) LIKE '%TBR%' OR UPPER(sk.CONSTUCTION) LIKE '%TBR%').\n"
+                "   - TIME PERIOD FILTERING:\n"
+                "     * Specific Month (e.g. July 2026): in actual_sales filter fact.\"invoice_date\" >= '2026-07-01' AND fact.\"invoice_date\" < '2026-08-01'. In target_plans filter tgt.YMONTH = '202607'.\n"
+                "     * Full Year (e.g. 2026): in actual_sales filter fact.\"invoice_date\" >= '2026-01-01' AND fact.\"invoice_date\" < '2027-01-01'. In target_plans filter tgt.YMONTH LIKE '2026%'.\n"
+                "     * Current Month: in actual_sales query ZPVF_SD_CurrentSales_01_TR. In target_plans filter current month YMONTH.\n"
             )
         else:
             sql_user += "\n\nCRITICAL FINAL RULE: NEVER SELECT or GROUP BY `customer_master.KUNNR` or any other dimension's Primary Key! You MUST SELECT and GROUP BY the Fact Table's Foreign Key (e.g. `sales_data.customer`) instead. Selecting dimension keys causes unmatched rows to lump together as NULLs."
@@ -3135,6 +3175,54 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                         flags=re.IGNORECASE
                                     )
 
+                                # Auto-heal malformed quotes e.g. 'Unknown" or "Unknown' from LLM repair
+                                run_query = re.sub(r"\'([a-zA-Z0-9_\s-]+)\"", r"'\1'", run_query)
+                                run_query = re.sub(r"\"([a-zA-Z0-9_\s-]+)\'", r"'\1'", run_query)
+                                run_query = re.sub(r"['\"]Unknown['\"]", "'Unknown'", run_query)
+
+                                # Auto-heal Zone Names: in ZIVF_ZoneMaster_01_TR, zm.NAME is 'NORTH', 'WEST', 'SOUTH', 'EAST', 'CENTRAL'
+                                run_query = re.sub(r"'\s*North\s+Zone\s*'", "'NORTH'", run_query, flags=re.IGNORECASE)
+                                run_query = re.sub(r"'\s*West\s+Zone\s*'", "'WEST'", run_query, flags=re.IGNORECASE)
+                                run_query = re.sub(r"'\s*South\s+Zone\s*'", "'SOUTH'", run_query, flags=re.IGNORECASE)
+                                run_query = re.sub(r"'\s*East\s+Zone\s*'", "'EAST'", run_query, flags=re.IGNORECASE)
+                                run_query = re.sub(r"'\s*Central\s+Zone\s*'", "'CENTRAL'", run_query, flags=re.IGNORECASE)
+                                run_query = re.sub(r"LIKE\s+UPPER\('%\s*North\s+Zone\s*%\'\)", "LIKE '%NORTH%'", run_query, flags=re.IGNORECASE)
+                                run_query = re.sub(r"LIKE\s+UPPER\('%\s*West\s+Zone\s*%\'\)", "LIKE '%WEST%'", run_query, flags=re.IGNORECASE)
+                                run_query = re.sub(r"LIKE\s+UPPER\('%\s*South\s+Zone\s*%\'\)", "LIKE '%SOUTH%'", run_query, flags=re.IGNORECASE)
+                                run_query = re.sub(r"LIKE\s+UPPER\('%\s*East\s+Zone\s*%\'\)", "LIKE '%EAST%'", run_query, flags=re.IGNORECASE)
+                                run_query = re.sub(r"LIKE\s+UPPER\('%\s*Central\s+Zone\s*%\'\)", "LIKE '%CENTRAL%'", run_query, flags=re.IGNORECASE)
+
+                                # Auto-heal: If da.YMONTH or da.Date_ is referenced but DayAttribute view is NOT joined
+                                if is_hana and re.search(r'\bda\.(?:YMONTH|CAL_YEAR|QTR|\"Date_\"|Date_)\b', run_query, re.I) and "ZITR_DayAttribute_01_TR" not in run_query:
+                                    m_f = re.search(r'"?ZPVF_SD_(?:CurrentSales|SalesHistory)_01_TR"?\s+(?:AS\s+)?([a-zA-Z0-9_]+)', run_query, re.I)
+                                    f_alias = m_f.group(1) if (m_f and m_f.group(1).lower() not in SQL_RESERVED) else "fact"
+                                    da_join = f'\nJOIN "SAP_S4"."ZITR_DayAttribute_01_TR" da ON {f_alias}."invoice_date" = da."Date_"\n'
+                                    if re.search(r'\bWHERE\b', run_query, re.I):
+                                        run_query = re.sub(r'(\bWHERE\b)', f'{da_join}WHERE', run_query, count=1, flags=re.I)
+                                    else:
+                                        run_query += da_join
+
+                                # Auto-heal: In Target vs Actual, ensure actual_sales CTE filters on territory if target CTE does
+                                m_terr = re.search(r'tgt\.TERR_CODE\s*=\s*\'(\d+)\'', run_query, re.I)
+                                if m_terr and "actual_sales" in run_query.lower() and not re.search(r'(?:cm|tm)\.BZIRK\s*=\s*\'\d+\'', run_query, re.I):
+                                    terr_code = m_terr.group(1)
+                                    if "ZIVF_CustomerMaster_01_MD" in run_query:
+                                        run_query = re.sub(
+                                            r'(WITH\s+actual_sales\s+AS\s*\([\s\S]*?\bWHERE\s+)',
+                                            rf"\1cm.BZIRK = '{terr_code}' AND ",
+                                            run_query,
+                                            count=1,
+                                            flags=re.IGNORECASE
+                                        )
+
+                                # Auto-heal: In Zone Target vs Actual, relax outer join if joined on region_name when query is zone-only
+                                run_query = re.sub(
+                                    r'ON\s+a\.zone_name\s*=\s*t\.zone_name\s+AND\s+a\.(?:\"?region_name\"?|\"?region_code\"?)\s*=\s*t\.(?:\"?region_name\"?|\"?region_code\"?)',
+                                    'ON a.zone_name = t.zone_name',
+                                    run_query,
+                                    flags=re.IGNORECASE
+                                )
+
                                 # Strip invalid empty GROUP BY () in SAP HANA
                                 run_query = re.sub(r'\bGROUP\s+BY\s*\(\s*\)', ' ', run_query, flags=re.IGNORECASE)
                                 run_query = re.sub(r'\bGROUP\s+BY\s*;\s*$', ';', run_query, flags=re.IGNORECASE)
@@ -3162,6 +3250,22 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                             run_query = re.sub(r'(\bWHERE\s+)', f'\\1{k_filter} AND ', run_query, count=1, flags=re.I)
                                         else:
                                             run_query += f'\nWHERE {k_filter}'
+
+                                    # Guaranteed Filter 2: Cancellation filter (indicator_cancel <> 'X')
+                                    if "indicator_cancel" not in run_query.lower():
+                                        canc_filter = f'({f_alias}."indicator_cancel" IS NULL OR {f_alias}."indicator_cancel" NOT IN (\'X\', \'Y\', \'1\'))'
+                                        if re.search(r'\bWHERE\s+', run_query, re.I):
+                                            run_query = re.sub(r'(\bWHERE\s+)', f'\\1{canc_filter} AND ', run_query, count=1, flags=re.I)
+                                        else:
+                                            run_query += f'\nWHERE {canc_filter}'
+
+                                    # Guaranteed Filter 3: Default replacement distribution channel (10) unless OEM/STU/DEF explicitly requested
+                                    if "distribution_channel" not in run_query.lower() and not re.search(r'\b(oem|stu|def|export|all\s+channels)\b', question, re.I):
+                                        dc_filter = f'{f_alias}."distribution_channel" = \'10\''
+                                        if re.search(r'\bWHERE\s+', run_query, re.I):
+                                            run_query = re.sub(r'(\bWHERE\s+)', f'\\1{dc_filter} AND ', run_query, count=1, flags=re.I)
+                                        else:
+                                            run_query += f'\nWHERE {dc_filter}'
 
                                 sql_query = run_query
 
@@ -3300,7 +3404,7 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                 if not sql_results and "JOIN" in run_query:
                                     print("[SQL_EXEC] Fallback 4: Relaxing all master/dimension joins to LEFT JOIN...")
                                     left_q = re.sub(r'\bINNER\s+JOIN\b', 'LEFT JOIN', run_query, flags=re.IGNORECASE)
-                                    left_q = re.sub(r'(?<!LEFT\s)\bJOIN\s+(\"?SAP_S4\"?\.)?\"?(ZIV[FR]_[a-zA-Z0-9_]+)\"?', r'LEFT JOIN \1"\2"', left_q, flags=re.IGNORECASE)
+                                    left_q = re.sub(r'(?<!LEFT\s)\bJOIN\s+(\"?SAP_S4\"?\.)?\"?((?:ZIV[FR]|ZITR|ZPVF)_[a-zA-Z0-9_]+)\"?', r'LEFT JOIN \1"\2"', left_q, flags=re.IGNORECASE)
                                     # Also relax cm.KLABC or cm.KTOKD if dropping rows
                                     left_q = re.sub(r'(?:AND\s+)?\(?\s*(?:cm\.)?KLABC\s*IS\s*NULL\s*OR\s*(?:cm\.)?KLABC\s*<>\s*\'X\'\s*\)?\s*(?:AND\s+)?', ' ', left_q, flags=re.IGNORECASE)
                                     left_q = re.sub(r'WHERE\s+(?:AND\s+)+', 'WHERE ', left_q, flags=re.IGNORECASE)
@@ -3390,6 +3494,10 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                             
                             if fix_json and fix_json.get("sql"):
                                 sql_query = fix_json.get("sql", "").strip()
+                                # Clean malformed quotes and mismatched identifiers from repair
+                                sql_query = re.sub(r"\'([a-zA-Z0-9_\s-]+)\"", r"'\1'", sql_query)
+                                sql_query = re.sub(r"\"([a-zA-Z0-9_\s-]+)\'", r"'\1'", sql_query)
+                                sql_query = re.sub(r"['\"]Unknown['\"]", "'Unknown'", sql_query)
                                 print(f"[SQL_REPAIR] Retrying with corrected SQL:\n{sql_query}")
                             else:
                                 break
