@@ -43,6 +43,8 @@ def _execute_sync_task():
         ensure_account_category_sales_table(conn)
         from controllers.domestic_sales_value_achievement_controller import ensure_table as ensure_domestic_sales_table
         ensure_domestic_sales_table(conn)
+        from controllers.sales_report_by_values_controller import ensure_table as ensure_sales_report_by_values_table
+        ensure_sales_report_by_values_table(conn)
         cur = conn.cursor(dictionary=True) if hasattr(conn, "cursor") else conn.cursor()
         cur.execute("""
             SELECT session_id, MAX(user_id) AS user_id, MAX(workspace_name) AS workspace_name 
@@ -161,23 +163,33 @@ def _execute_sync_task():
 
             # 8. Domestic Sales Value Achievement (Dedicated table: sales_summary_domestic_sales_value_achievement - All Month Permutations)
             t_step = time.time()
-            print(f"[Scheduler] ⏳ [8/9] Syncing Domestic Sales Value Achievement (All Month Permutations)...", flush=True)
+            print(f"[Scheduler] ⏳ [8/10] Syncing Domestic Sales Value Achievement (All Month Permutations)...", flush=True)
             try:
                 from controllers.domestic_sales_value_achievement_controller import bulk_sync_domestic_sales_value_achievement
                 bulk_sync_domestic_sales_value_achievement(conn, s_id, u_id)
-                print(f"[Scheduler] ✅ [8/9] Domestic Sales Value Achievement synced in {round(time.time() - t_step, 2)}s", flush=True)
+                print(f"[Scheduler] ✅ [8/10] Domestic Sales Value Achievement synced in {round(time.time() - t_step, 2)}s", flush=True)
             except Exception as e:
-                print(f"[Scheduler] ❌ [8/9] Error syncing domestic_sales_value_achievement: {e}", flush=True)
+                print(f"[Scheduler] ❌ [8/10] Error syncing domestic_sales_value_achievement: {e}", flush=True)
+
+            # 8b. Sales Report by Values (Sheet 3 - Dedicated table: sales_summary_sales_report_by_values - All Month Permutations)
+            t_step = time.time()
+            print(f"[Scheduler] ⏳ [8b/10] Syncing Sales Report by Values (Sheet 3 - All Month Permutations)...", flush=True)
+            try:
+                from controllers.sales_report_by_values_controller import bulk_sync_sales_report_by_values
+                bulk_sync_sales_report_by_values(conn, s_id, u_id)
+                print(f"[Scheduler] ✅ [8b/10] Sales Report by Values synced in {round(time.time() - t_step, 2)}s", flush=True)
+            except Exception as e:
+                print(f"[Scheduler] ❌ [8b/10] Error syncing sales_report_by_values: {e}", flush=True)
 
             # 9. Executive Sales & Performance Analysis Summary (HANA Core KPIs + LLM Summary)
             t_step = time.time()
-            print(f"[Scheduler] ⏳ [9/9] Syncing Executive Sales & Performance Analysis Summary...", flush=True)
+            print(f"[Scheduler] ⏳ [9/10] Syncing Executive Sales & Performance Analysis Summary...", flush=True)
             try:
                 from controllers.session_analysis_controller import run_daily_session_analysis_scheduler
                 run_daily_session_analysis_scheduler(_get_db_conn_func, session_id=s_id)
-                print(f"[Scheduler] ✅ [9/9] Executive Analysis Summary synced in {round(time.time() - t_step, 2)}s", flush=True)
+                print(f"[Scheduler] ✅ [9/10] Executive Analysis Summary synced in {round(time.time() - t_step, 2)}s", flush=True)
             except Exception as e:
-                print(f"[Scheduler] ❌ [9/9] Error syncing executive_analysis_summary: {e}", flush=True)
+                print(f"[Scheduler] ❌ [9/10] Error syncing executive_analysis_summary: {e}", flush=True)
 
             # Filter Metadata Cache
             try:
@@ -188,7 +200,7 @@ def _execute_sync_task():
             except Exception as e:
                 print(f"[Scheduler] Note on filters cache: {e}", flush=True)
 
-            print(f"[Scheduler] 🎉 Completed all 9 dashboard components (including Executive Analysis Summary) for '{ws_name}' in {round(time.time() - ws_start_t, 2)}s!", flush=True)
+            print(f"[Scheduler] 🎉 Completed all 10 dashboard components (including Sheet 3 & Executive Analysis Summary) for '{ws_name}' in {round(time.time() - ws_start_t, 2)}s!", flush=True)
             print(f"[Scheduler] ====================================================================\n", flush=True)
 
         duration = round(time.time() - start_t, 2)

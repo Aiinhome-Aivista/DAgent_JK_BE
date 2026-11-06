@@ -145,258 +145,212 @@ def fetch_master_months(cursor, schema):
 
 def query_sales_report_by_values_hana(cursor, schema, year_month: str, selected_date: str):
     """
-    Executes HANA query for Sales Report by Values (Sheet 3)
-    Filtered strictly for distribution_channel = '10' (Replacement)
-    Categorized into 4 Wheelers & 2/3 Wheelers
-    Aggregated by Zones from ZIVF_ZoneMaster_01_TR, ignoring 'Unknown'.
+    Executes memory-optimized HANA query for Sales Report by Values (Sheet 3).
+    - Strictly filtered for distribution_channel = '10' (Replacement).
+    - Date filters pushed down directly inside inner subqueries to avoid HANA memory limits.
+    - Categorized into 4 Wheelers & 2/3 Wheelers using complete master mappings (TYRE_TYPE, CAT_DESC, CAT_CODE).
+    - Targets aggregated from ZIVF_SD_Sales_Plan_Target_01_TR for YMONTH.
+    - Aggregated by Zones from ZIVF_ZoneMaster_01_TR, ignoring 'Unknown'.
     """
+    curr_yr = int(year_month[:4])
+    curr_mo = int(year_month[4:6])
+    prev_yr = curr_yr - 1
+
+    last_day_curr = calendar.monthrange(curr_yr, curr_mo)[1]
+    try:
+        sel_d = int(str(selected_date).split("-")[2])
+    except Exception:
+        sel_d = last_day_curr
+
+    day_clamped = min(sel_d, last_day_curr)
+    curr_from = f"{curr_yr}-{str(curr_mo).zfill(2)}-01"
+    curr_to = f"{curr_yr}-{str(curr_mo).zfill(2)}-{str(day_clamped).zfill(2)}"
+    curr_month_end = f"{curr_yr}-{str(curr_mo).zfill(2)}-{str(last_day_curr).zfill(2)}"
+
+    last_day_prev = calendar.monthrange(prev_yr, curr_mo)[1]
+    prev_from = f"{prev_yr}-{str(curr_mo).zfill(2)}-01"
+    prev_to = f"{prev_yr}-{str(curr_mo).zfill(2)}-{str(min(day_clamped, last_day_prev)).zfill(2)}"
+    prev_month_end = f"{prev_yr}-{str(curr_mo).zfill(2)}-{str(last_day_prev).zfill(2)}"
+
     hana_sql = f"""
-    WITH INPUT_PARAMS AS
-    (
+    WITH
+    fact_history AS (
         SELECT
-            '{year_month}' AS P_YEAR_MONTH,
-            TO_DATE('{selected_date}') AS P_SELECTED_DATE
-        FROM DUMMY
-    ),
-
-    DATE_PARAMS AS
-    (
-        SELECT
-            P_YEAR_MONTH,
-            P_SELECTED_DATE,
-            TO_DATE(P_YEAR_MONTH || '01', 'YYYYMMDD') AS CURRENT_MONTH_START,
-            ADD_DAYS(P_SELECTED_DATE, 1) AS CURRENT_MTD_END,
-            ADD_MONTHS(TO_DATE(P_YEAR_MONTH || '01', 'YYYYMMDD'), -12) AS PREVIOUS_MONTH_START,
-            ADD_MONTHS(TO_DATE(P_YEAR_MONTH || '01', 'YYYYMMDD'), -11) AS PREVIOUS_MONTH_END,
-            ADD_MONTHS(TO_DATE(P_YEAR_MONTH || '01', 'YYYYMMDD'), 1) AS CURRENT_MONTH_END,
-            ADD_MONTHS(P_SELECTED_DATE, -12) AS PREVIOUS_SELECTED_DATE
-        FROM INPUT_PARAMS
-    ),
-
-    SALES_DATA AS
-    (
-        SELECT
-            "invoice_date",
-            "invoice_value",
-            "distribution_channel",
-            "dealer_code",
-            "SKU",
-            "invoice_number",
-            "plant",
-            "FKART",
-            "indicator_cancel"
-        FROM "{schema}"."ZPVF_SD_SalesHistory_01_TR"
-        WHERE "distribution_channel" IN ('10', 10)
-
-        UNION ALL
-
-        SELECT
-            "invoice_date",
-            "invoice_value",
-            "distribution_channel",
-            "dealer_code",
-            "SKU",
-            "invoice_number",
-            "plant",
-            "FKART",
-            "indicator_cancel"
-        FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR"
-        WHERE "distribution_channel" IN ('10', 10)
-    ),
-
-    CUSTOMER_MAP AS
-    (
-        SELECT
-            LTRIM(TRIM("KUNNR"), '0') AS CUSTOMER_CODE,
-            MAX(CASE WHEN "KLABC" = 'X' THEN 1 ELSE 0 END) AS EXCLUDED_FLAG,
-            MAX("BZIRK") AS BZIRK,
-            MAX("REGIO") AS REGIO
-        FROM "{schema}"."ZIVF_CustomerMaster_01_MD"
-        GROUP BY LTRIM(TRIM("KUNNR"), '0')
-    ),
-
-    VALID_SALES AS
-    (
-        SELECT
-            S."invoice_date",
-            S."invoice_value",
-            S."distribution_channel",
-            S."dealer_code",
-            S."SKU",
-            S."plant",
-            C.BZIRK,
-            C.REGIO
-        FROM SALES_DATA S
-        LEFT JOIN CUSTOMER_MAP C
-            ON LTRIM(TRIM(S."dealer_code"), '0') = C.CUSTOMER_CODE
-        CROSS JOIN DATE_PARAMS D
-        WHERE
-            S."invoice_date" >= D.PREVIOUS_MONTH_START
-            AND S."invoice_date" < D.CURRENT_MTD_END
-            AND COALESCE(S."indicator_cancel", '') <> 'X'
-            AND COALESCE(C.EXCLUDED_FLAG, 0) = 0
-            AND NOT EXISTS
-            (
-                SELECT 1
-                FROM "{schema}"."ZPVF_SD_CancelledSalesInvoice_01_TR" X
-                WHERE
-                    X."invoice_number" = S."invoice_number"
-                    AND X."plant" = S."plant"
-                    AND X."FKART" = S."FKART"
-                    AND X."indicator_cancel" = 'X'
-            )
-    ),
-
-    CLASSIFIED_SALES AS
-    (
-        SELECT
-            S."invoice_date",
-            S."invoice_value",
+            zm.NAME AS Zone_Name,
             CASE
-                WHEN UPPER(TRIM(C."CAT_DESC")) IN ('MOTOR', '3WH', 'SCOOTER')
-                  OR UPPER(TRIM(C."CAT_DESC")) LIKE '%SCOOTER%'
-                  OR UPPER(TRIM(C."CAT_DESC")) LIKE '%MOTOR%'
-                  OR UPPER(TRIM(C."CAT_DESC")) LIKE '%3%WH%'
+                WHEN UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) IN ('SCOOTER', 'MOTOR CYCLE', 'MOTORCYCLE', 'MOTOR', '3W', '3 WHEELER', '3WH')
+                  OR UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) LIKE '%SCOOTER%'
+                  OR UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) LIKE '%MOTOR CYCLE%'
+                  OR UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) LIKE '%MOTORCYCLE%'
+                  OR UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) LIKE '%3%WH%'
+                  OR UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) LIKE '%3%WHEEL%'
+                  OR UPPER(TRIM(COALESCE(sm.TYRE_TYPE, ''))) IN ('SCOOTER', 'MOTOR CYCLE', 'MOTORCYCLE', '3W', '3 WHEELER', '3WH')
                 THEN '2_3_Whlrs'
                 ELSE '4_Whlrs'
-            END AS SEGMENT,
-            zm."NAME" AS ZONE_NAME
-        FROM VALID_SALES S
-        LEFT JOIN "{schema}"."ZIVR_SKUMaster_01_TR" M
-            ON TRIM(S."SKU") = TRIM(M."MATNR")
-        LEFT JOIN "{schema}"."ZIVF_CategoryMaster_01_TR" C
-            ON M."CAT_CODE" = C."CAT_CODE"
-        LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm_plant
-            ON S."plant" = tm_plant."WERKS"
-        LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm_bzirk
-            ON S.BZIRK = tm_bzirk."BZIRK"
-        LEFT JOIN "{schema}"."ZIVF_RegionMaster_MD_01" rm
-            ON rm."region_code" = COALESCE(NULLIF(TRIM(tm_plant."REGIO"), ''), NULLIF(TRIM(tm_bzirk."REGIO"), ''), NULLIF(TRIM(TO_VARCHAR(S.REGIO)), ''))
-        LEFT JOIN "{schema}"."ZIVF_ZoneMaster_01_TR" zm
-            ON zm."P_ZONE" = COALESCE(
-                NULLIF(TRIM(tm_plant."P_ZONE"), ''),
-                NULLIF(TRIM(tm_bzirk."P_ZONE"), ''),
-                NULLIF(TRIM(rm."zone_code"), ''),
-                CASE 
-                    WHEN SUBSTRING(TO_VARCHAR(S."plant"), 1, 2) IN ('36', '71', '72') THEN 'CZ'
-                    WHEN SUBSTRING(TO_VARCHAR(S."plant"), 1, 1) = '3' THEN 'NZ'
-                    WHEN SUBSTRING(TO_VARCHAR(S."plant"), 1, 1) = '1' THEN 'EZ'
-                    WHEN SUBSTRING(TO_VARCHAR(S."plant"), 1, 1) = '8' THEN 'NP'
-                    WHEN SUBSTRING(TO_VARCHAR(S."plant"), 1, 2) IN ('51', '52') THEN 'TZ'
-                    WHEN SUBSTRING(TO_VARCHAR(S."plant"), 1, 1) = '5' THEN 'SZ'
-                    WHEN SUBSTRING(TO_VARCHAR(S."plant"), 1, 1) = '7' THEN 'WZ'
-                    ELSE NULL
-                END
-            )
-        WHERE
-            (C."CAT_CODE" IS NULL OR C."CAT_CODE" NOT IN ('TR', 'NT', 'AL', 'IE'))
-            AND zm."NAME" IS NOT NULL
-            AND TRIM(zm."NAME") != ''
-            AND TRIM(zm."NAME") != 'Unknown'
+            END AS Segment,
+            COALESCE(NULLIF(sh.INVOICE_VALUE, 0), NULLIF(sh.NDP_VALUE, 0), NULLIF(sh.TAXABLE_VALUE, 0), 0) AS val
+        FROM (
+            SELECT s.DEALER_CODE, s.PLANT, s.SKU, s.INVOICE_DATE, s.INDICATOR_CANCEL, s.NDP_VALUE, s.TAXABLE_VALUE, s.INVOICE_VALUE, s.DISTRIBUTION_CHANNEL 
+            FROM "{schema}"."ZPVF_SD_SalesHistory_01_TR" s
+            WHERE (s.INDICATOR_CANCEL IS NULL OR s.INDICATOR_CANCEL NOT IN ('X', 'Y', '1'))
+              AND (s.DISTRIBUTION_CHANNEL = 10 OR s.DISTRIBUTION_CHANNEL = '10')
+              AND s.INVOICE_DATE BETWEEN '{prev_from}' AND '{prev_month_end}'
+            UNION ALL
+            SELECT s.DEALER_CODE, s.PLANT, s.SKU, s.INVOICE_DATE, s.INDICATOR_CANCEL, s.NDP_VALUE, s.TAXABLE_VALUE, s.INVOICE_VALUE, s.DISTRIBUTION_CHANNEL 
+            FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR" s
+            WHERE (s.INDICATOR_CANCEL IS NULL OR s.INDICATOR_CANCEL NOT IN ('X', 'Y', '1'))
+              AND (s.DISTRIBUTION_CHANNEL = 10 OR s.DISTRIBUTION_CHANNEL = '10')
+              AND s.INVOICE_DATE BETWEEN '{prev_from}' AND '{prev_month_end}'
+        ) sh
+        LEFT JOIN "{schema}"."ZIVR_SKUMaster_01_TR" sm ON (sh.SKU = sm.MATNR)
+        LEFT JOIN "{schema}"."ZIVF_CategoryMaster_01_TR" cat ON (sm.CAT_CODE = cat.CAT_CODE)
+        LEFT JOIN "{schema}"."ZIVF_CustomerMaster_01_MD" cm ON (LPAD(TRIM(TO_VARCHAR(sh.DEALER_CODE)), 10, '0') = LPAD(TRIM(TO_VARCHAR(cm.KUNNR)), 10, '0') OR LTRIM(TO_VARCHAR(sh.DEALER_CODE), '0') = LTRIM(TO_VARCHAR(cm.KUNNR), '0'))
+        LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm_plant ON (sh.PLANT = tm_plant.WERKS)
+        LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm_bzirk ON (cm.BZIRK = tm_bzirk.BZIRK)
+        LEFT JOIN "{schema}"."ZIVF_RegionMaster_MD_01" rm ON (rm.REGION_CODE = COALESCE(NULLIF(TRIM(tm_plant.REGIO), ''), NULLIF(TRIM(tm_bzirk.REGIO), ''), NULLIF(TRIM(TO_VARCHAR(cm.REGIO)), '')))
+        LEFT JOIN "{schema}"."ZIVF_ZoneMaster_01_TR" zm ON (zm.P_ZONE = COALESCE(
+            NULLIF(TRIM(tm_plant.P_ZONE), ''),
+            NULLIF(TRIM(tm_bzirk.P_ZONE), ''),
+            NULLIF(TRIM(rm.ZONE_CODE), ''),
+            CASE 
+                WHEN SUBSTRING(TO_VARCHAR(sh.PLANT), 1, 2) IN ('36', '71', '72') THEN 'CZ'
+                WHEN SUBSTRING(TO_VARCHAR(sh.PLANT), 1, 1) = '3' THEN 'NZ'
+                WHEN SUBSTRING(TO_VARCHAR(sh.PLANT), 1, 1) = '1' THEN 'EZ'
+                WHEN SUBSTRING(TO_VARCHAR(sh.PLANT), 1, 1) = '8' THEN 'NP'
+                WHEN SUBSTRING(TO_VARCHAR(sh.PLANT), 1, 2) IN ('51', '52') THEN 'TZ'
+                WHEN SUBSTRING(TO_VARCHAR(sh.PLANT), 1, 1) = '5' THEN 'SZ'
+                WHEN SUBSTRING(TO_VARCHAR(sh.PLANT), 1, 1) = '7' THEN 'WZ'
+                ELSE NULL
+            END
+        ))
+        WHERE (cm.KLABC IS NULL OR UPPER(TRIM(cm.KLABC)) <> 'X')
+          AND zm.NAME IS NOT NULL AND TRIM(zm.NAME) != '' AND TRIM(zm.NAME) != 'Unknown'
     ),
 
-    AGG_SALES AS
-    (
+    fact_current AS (
         SELECT
-            S.ZONE_NAME,
-            SUM(
-                CASE
-                    WHEN S."invoice_date" >= D.PREVIOUS_MONTH_START
-                     AND S."invoice_date" < D.PREVIOUS_MONTH_END
-                     AND S.SEGMENT = '4_Whlrs'
-                    THEN S."invoice_value"
-                    ELSE 0
-                END
-            ) / 10000000.0 AS PREV_4W,
-            SUM(
-                CASE
-                    WHEN S."invoice_date" >= D.PREVIOUS_MONTH_START
-                     AND S."invoice_date" < D.PREVIOUS_MONTH_END
-                     AND S.SEGMENT = '2_3_Whlrs'
-                    THEN S."invoice_value"
-                    ELSE 0
-                END
-            ) / 10000000.0 AS PREV_23W,
-            SUM(
-                CASE
-                    WHEN S."invoice_date" >= D.CURRENT_MONTH_START
-                     AND S."invoice_date" < D.CURRENT_MTD_END
-                     AND S.SEGMENT = '4_Whlrs'
-                    THEN S."invoice_value"
-                    ELSE 0
-                END
-            ) / 10000000.0 AS ACTUAL_4W,
-            SUM(
-                CASE
-                    WHEN S."invoice_date" >= D.CURRENT_MONTH_START
-                     AND S."invoice_date" < D.CURRENT_MTD_END
-                     AND S.SEGMENT = '2_3_Whlrs'
-                    THEN S."invoice_value"
-                    ELSE 0
-                END
-            ) / 10000000.0 AS ACTUAL_23W,
-            SUM(
-                CASE
-                    WHEN S."invoice_date" >= D.P_SELECTED_DATE
-                     AND S."invoice_date" < D.CURRENT_MTD_END
-                    THEN S."invoice_value"
-                    ELSE 0
-                END
-            ) / 10000000.0 AS SALE_FOR_THE_DAY
-        FROM CLASSIFIED_SALES S
-        CROSS JOIN DATE_PARAMS D
-        GROUP BY S.ZONE_NAME
+            zm.NAME AS Zone_Name,
+            CASE
+                WHEN UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) IN ('SCOOTER', 'MOTOR CYCLE', 'MOTORCYCLE', 'MOTOR', '3W', '3 WHEELER', '3WH')
+                  OR UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) LIKE '%SCOOTER%'
+                  OR UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) LIKE '%MOTOR CYCLE%'
+                  OR UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) LIKE '%MOTORCYCLE%'
+                  OR UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) LIKE '%3%WH%'
+                  OR UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) LIKE '%3%WHEEL%'
+                  OR UPPER(TRIM(COALESCE(sm.TYRE_TYPE, ''))) IN ('SCOOTER', 'MOTOR CYCLE', 'MOTORCYCLE', '3W', '3 WHEELER', '3WH')
+                THEN '2_3_Whlrs'
+                ELSE '4_Whlrs'
+            END AS Segment,
+            cs.INVOICE_DATE,
+            COALESCE(NULLIF(cs.INVOICE_VALUE, 0), NULLIF(cs.NDP_VALUE, 0), NULLIF(cs.TAXABLE_VALUE, 0), 0) AS val
+        FROM (
+            SELECT s.DEALER_CODE, s.PLANT, s.SKU, s.INVOICE_DATE, s.INDICATOR_CANCEL, s.NDP_VALUE, s.TAXABLE_VALUE, s.INVOICE_VALUE, s.DISTRIBUTION_CHANNEL 
+            FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR" s
+            WHERE (s.INDICATOR_CANCEL IS NULL OR s.INDICATOR_CANCEL NOT IN ('X', 'Y', '1'))
+              AND (s.DISTRIBUTION_CHANNEL = 10 OR s.DISTRIBUTION_CHANNEL = '10')
+              AND s.INVOICE_DATE BETWEEN '{curr_from}' AND '{curr_to}'
+            UNION ALL
+            SELECT s.DEALER_CODE, s.PLANT, s.SKU, s.INVOICE_DATE, s.INDICATOR_CANCEL, s.NDP_VALUE, s.TAXABLE_VALUE, s.INVOICE_VALUE, s.DISTRIBUTION_CHANNEL 
+            FROM "{schema}"."ZPVF_SD_SalesHistory_01_TR" s
+            WHERE (s.INDICATOR_CANCEL IS NULL OR s.INDICATOR_CANCEL NOT IN ('X', 'Y', '1'))
+              AND (s.DISTRIBUTION_CHANNEL = 10 OR s.DISTRIBUTION_CHANNEL = '10')
+              AND s.INVOICE_DATE BETWEEN '{curr_from}' AND '{curr_to}'
+        ) cs
+        LEFT JOIN "{schema}"."ZIVR_SKUMaster_01_TR" sm ON (cs.SKU = sm.MATNR)
+        LEFT JOIN "{schema}"."ZIVF_CategoryMaster_01_TR" cat ON (sm.CAT_CODE = cat.CAT_CODE)
+        LEFT JOIN "{schema}"."ZIVF_CustomerMaster_01_MD" cm ON (LPAD(TRIM(TO_VARCHAR(cs.DEALER_CODE)), 10, '0') = LPAD(TRIM(TO_VARCHAR(cm.KUNNR)), 10, '0') OR LTRIM(TO_VARCHAR(cs.DEALER_CODE), '0') = LTRIM(TO_VARCHAR(cm.KUNNR), '0'))
+        LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm_plant ON (cs.PLANT = tm_plant.WERKS)
+        LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm_bzirk ON (cm.BZIRK = tm_bzirk.BZIRK)
+        LEFT JOIN "{schema}"."ZIVF_RegionMaster_MD_01" rm ON (rm.REGION_CODE = COALESCE(NULLIF(TRIM(tm_plant.REGIO), ''), NULLIF(TRIM(tm_bzirk.REGIO), ''), NULLIF(TRIM(TO_VARCHAR(cm.REGIO)), '')))
+        LEFT JOIN "{schema}"."ZIVF_ZoneMaster_01_TR" zm ON (zm.P_ZONE = COALESCE(
+            NULLIF(TRIM(tm_plant.P_ZONE), ''),
+            NULLIF(TRIM(tm_bzirk.P_ZONE), ''),
+            NULLIF(TRIM(rm.ZONE_CODE), ''),
+            CASE 
+                WHEN SUBSTRING(TO_VARCHAR(cs.PLANT), 1, 2) IN ('36', '71', '72') THEN 'CZ'
+                WHEN SUBSTRING(TO_VARCHAR(cs.PLANT), 1, 1) = '3' THEN 'NZ'
+                WHEN SUBSTRING(TO_VARCHAR(cs.PLANT), 1, 1) = '1' THEN 'EZ'
+                WHEN SUBSTRING(TO_VARCHAR(cs.PLANT), 1, 1) = '8' THEN 'NP'
+                WHEN SUBSTRING(TO_VARCHAR(cs.PLANT), 1, 2) IN ('51', '52') THEN 'TZ'
+                WHEN SUBSTRING(TO_VARCHAR(cs.PLANT), 1, 1) = '5' THEN 'SZ'
+                WHEN SUBSTRING(TO_VARCHAR(cs.PLANT), 1, 1) = '7' THEN 'WZ'
+                ELSE NULL
+            END
+        ))
+        WHERE (cm.KLABC IS NULL OR UPPER(TRIM(cm.KLABC)) <> 'X')
+          AND zm.NAME IS NOT NULL AND TRIM(zm.NAME) != '' AND TRIM(zm.NAME) != 'Unknown'
     ),
 
-    AGG_TARGET AS
-    (
+    agg_history AS (
         SELECT 
-            zm."NAME" AS ZONE_NAME,
-            SUM(
-                CASE
-                    WHEN NOT (
-                        UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) IN ('MOTOR', '3WH', 'SCOOTER')
-                        OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%SCOOTER%'
-                        OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%MOTOR%'
-                        OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%3%WH%'
-                        OR UPPER(TRIM(COALESCE(tgt."T_TYPE", ''))) IN ('SCOOTER','MOTOR CYCLE','3W','BIKE','3 WHEELER','MOTORCYCLE','2/3 WHEELERS')
-                    )
-                    THEN COALESCE(NULLIF(tgt."REV_PLAN_VAL", 0), NULLIF(tgt."PLAN_VALUE", 0), 0)
-                    ELSE 0
-                END
-            ) / 10000000.0 AS TARGET_4W,
-            SUM(
-                CASE
-                    WHEN (
-                        UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) IN ('MOTOR', '3WH', 'SCOOTER')
-                        OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%SCOOTER%'
-                        OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%MOTOR%'
-                        OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%3%WH%'
-                        OR UPPER(TRIM(COALESCE(tgt."T_TYPE", ''))) IN ('SCOOTER','MOTOR CYCLE','3W','BIKE','3 WHEELER','MOTORCYCLE','2/3 WHEELERS')
-                    )
-                    THEN COALESCE(NULLIF(tgt."REV_PLAN_VAL", 0), NULLIF(tgt."PLAN_VALUE", 0), 0)
-                    ELSE 0
-                END
-            ) / 10000000.0 AS TARGET_23W
-        FROM "{schema}"."ZIVF_SD_Sales_Plan_Target_01_TR" tgt
-        LEFT JOIN "{schema}"."ZIVF_CategoryMaster_01_TR" cat ON (tgt."CAT_CODE" = cat."CAT_CODE")
-        LEFT JOIN "{schema}"."ZIVF_RegionMaster_MD_01" rm ON (tgt."REG_CODE" = rm."region_code")
-        LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm ON (tgt."TERR_CODE" = tm."BZIRK")
-        LEFT JOIN "{schema}"."ZIVF_ZoneMaster_01_TR" zm ON (zm."P_ZONE" = COALESCE(NULLIF(TRIM(rm."zone_code"), ''), NULLIF(TRIM(tm."P_ZONE"), '')))
-        CROSS JOIN DATE_PARAMS D
-        WHERE tgt."YMONTH" = D.P_YEAR_MONTH
-          AND tgt."CAT_CODE" NOT IN ('TR', 'NT', 'AL', 'IE')
-          AND zm."NAME" IS NOT NULL
-          AND TRIM(zm."NAME") != ''
-          AND TRIM(zm."NAME") != 'Unknown'
-        GROUP BY zm."NAME"
+            Zone_Name,
+            SUM(CASE WHEN Segment = '4_Whlrs' THEN val ELSE 0 END) / 10000000.0 AS Prev_4W,
+            SUM(CASE WHEN Segment = '2_3_Whlrs' THEN val ELSE 0 END) / 10000000.0 AS Prev_23W
+        FROM fact_history
+        GROUP BY Zone_Name
     ),
 
-    ALL_ZONES AS
-    (
+    agg_current AS (
+        SELECT 
+            Zone_Name,
+            SUM(CASE WHEN Segment = '4_Whlrs' THEN val ELSE 0 END) / 10000000.0 AS Curr_4W,
+            SUM(CASE WHEN Segment = '2_3_Whlrs' THEN val ELSE 0 END) / 10000000.0 AS Curr_23W,
+            SUM(CASE WHEN INVOICE_DATE = TO_DATE('{curr_to}', 'YYYY-MM-DD') THEN val ELSE 0 END) / 10000000.0 AS Sale_For_Day
+        FROM fact_current
+        GROUP BY Zone_Name
+    ),
+
+    agg_target AS (
+        SELECT 
+            zm.NAME AS Zone_Name,
+            SUM(CASE WHEN NOT (
+                UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) IN ('SCOOTER', 'MOTOR CYCLE', 'MOTORCYCLE', 'MOTOR', '3W', '3 WHEELER', '3WH')
+                OR UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) LIKE '%SCOOTER%'
+                OR UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) LIKE '%MOTOR CYCLE%'
+                OR UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) LIKE '%MOTORCYCLE%'
+                OR UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) LIKE '%3%WH%'
+                OR UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) LIKE '%3%WHEEL%'
+                OR UPPER(TRIM(COALESCE(tgt.T_TYPE, ''))) IN ('SCOOTER', 'MOTOR CYCLE', 'MOTORCYCLE', '3W', '3 WHEELER', '3WH', '2/3 WHEELERS')
+                OR UPPER(TRIM(COALESCE(tgt.T_TYPE, ''))) LIKE '%SCOOTER%'
+                OR UPPER(TRIM(COALESCE(tgt.T_TYPE, ''))) LIKE '%MOTOR CYCLE%'
+                OR UPPER(TRIM(COALESCE(tgt.T_TYPE, ''))) LIKE '%MOTORCYCLE%'
+                OR UPPER(TRIM(COALESCE(tgt.T_TYPE, ''))) LIKE '%3%WH%'
+                OR UPPER(TRIM(COALESCE(tgt.T_TYPE, ''))) LIKE '%3%WHEEL%'
+                OR UPPER(TRIM(COALESCE(tgt.T_TYPE, ''))) LIKE '%2/3%'
+            )
+            THEN COALESCE(NULLIF(tgt.REV_PLAN_VAL, 0), NULLIF(tgt.PLAN_VALUE, 0), 0)
+            ELSE 0 END) / 10000000.0 AS Tgt_4W,
+            SUM(CASE WHEN (
+                UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) IN ('SCOOTER', 'MOTOR CYCLE', 'MOTORCYCLE', 'MOTOR', '3W', '3 WHEELER', '3WH')
+                OR UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) LIKE '%SCOOTER%'
+                OR UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) LIKE '%MOTOR CYCLE%'
+                OR UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) LIKE '%MOTORCYCLE%'
+                OR UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) LIKE '%3%WH%'
+                OR UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) LIKE '%3%WHEEL%'
+                OR UPPER(TRIM(COALESCE(tgt.T_TYPE, ''))) IN ('SCOOTER', 'MOTOR CYCLE', 'MOTORCYCLE', '3W', '3 WHEELER', '3WH', '2/3 WHEELERS')
+                OR UPPER(TRIM(COALESCE(tgt.T_TYPE, ''))) LIKE '%SCOOTER%'
+                OR UPPER(TRIM(COALESCE(tgt.T_TYPE, ''))) LIKE '%MOTOR CYCLE%'
+                OR UPPER(TRIM(COALESCE(tgt.T_TYPE, ''))) LIKE '%MOTORCYCLE%'
+                OR UPPER(TRIM(COALESCE(tgt.T_TYPE, ''))) LIKE '%3%WH%'
+                OR UPPER(TRIM(COALESCE(tgt.T_TYPE, ''))) LIKE '%3%WHEEL%'
+                OR UPPER(TRIM(COALESCE(tgt.T_TYPE, ''))) LIKE '%2/3%'
+            )
+            THEN COALESCE(NULLIF(tgt.REV_PLAN_VAL, 0), NULLIF(tgt.PLAN_VALUE, 0), 0)
+            ELSE 0 END) / 10000000.0 AS Tgt_23W
+        FROM "{schema}"."ZIVF_SD_Sales_Plan_Target_01_TR" tgt
+        LEFT JOIN "{schema}"."ZIVF_CategoryMaster_01_TR" cat ON (tgt.CAT_CODE = cat.CAT_CODE OR tgt.MATNR = cat.MATNR)
+        LEFT JOIN "{schema}"."ZIVF_RegionMaster_MD_01" rm ON (tgt.REG_CODE = rm.REGION_CODE)
+        LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm ON (tgt.TERR_CODE = tm.BZIRK)
+        LEFT JOIN "{schema}"."ZIVF_ZoneMaster_01_TR" zm ON (zm.P_ZONE = COALESCE(NULLIF(TRIM(rm.ZONE_CODE), ''), NULLIF(TRIM(tm.P_ZONE), '')))
+        WHERE tgt.YMONTH = '{year_month}'
+          AND zm.NAME IS NOT NULL AND TRIM(zm.NAME) != '' AND TRIM(zm.NAME) != 'Unknown'
+        GROUP BY zm.NAME
+    ),
+
+    all_zones AS (
         SELECT DISTINCT
-            "NAME" AS ZONE_NAME,
-            CASE "P_ZONE"
+            NAME AS Zone_Name,
+            CASE P_ZONE
                 WHEN 'EZ' THEN 1
                 WHEN 'NZ' THEN 2
                 WHEN 'CZ' THEN 3
@@ -405,25 +359,26 @@ def query_sales_report_by_values_hana(cursor, schema, year_month: str, selected_
                 WHEN 'TZ' THEN 6
                 WHEN 'NP' THEN 7
                 ELSE 8
-            END AS SORT_ORDER
+            END AS Sort_Order
         FROM "{schema}"."ZIVF_ZoneMaster_01_TR"
-        WHERE "NAME" IS NOT NULL AND TRIM("NAME") != '' AND TRIM("NAME") != 'Unknown'
+        WHERE NAME IS NOT NULL AND TRIM(NAME) != '' AND TRIM(NAME) != 'Unknown'
     )
 
     SELECT
-        Z.ZONE_NAME,
-        Z.SORT_ORDER,
-        COALESCE(S.PREV_4W, 0) AS PREV_4W,
-        COALESCE(S.PREV_23W, 0) AS PREV_23W,
-        COALESCE(T.TARGET_4W, 0) AS TARGET_4W,
-        COALESCE(T.TARGET_23W, 0) AS TARGET_23W,
-        COALESCE(S.ACTUAL_4W, 0) AS ACTUAL_4W,
-        COALESCE(S.ACTUAL_23W, 0) AS ACTUAL_23W,
-        COALESCE(S.SALE_FOR_THE_DAY, 0) AS SALE_FOR_THE_DAY
-    FROM ALL_ZONES Z
-    LEFT JOIN AGG_SALES S ON Z.ZONE_NAME = S.ZONE_NAME
-    LEFT JOIN AGG_TARGET T ON Z.ZONE_NAME = T.ZONE_NAME
-    ORDER BY Z.SORT_ORDER ASC
+        z.Zone_Name,
+        z.Sort_Order,
+        COALESCE(h.Prev_4W,      0) AS Prev_4W,
+        COALESCE(h.Prev_23W,     0) AS Prev_23W,
+        COALESCE(t.Tgt_4W,       0) AS Tgt_4W,
+        COALESCE(t.Tgt_23W,      0) AS Tgt_23W,
+        COALESCE(c.Curr_4W,      0) AS Curr_4W,
+        COALESCE(c.Curr_23W,     0) AS Curr_23W,
+        COALESCE(c.Sale_For_Day, 0) AS Sale_For_Day
+    FROM all_zones z
+    LEFT JOIN agg_history h ON z.Zone_Name = h.Zone_Name
+    LEFT JOIN agg_current c ON z.Zone_Name = c.Zone_Name
+    LEFT JOIN agg_target  t ON z.Zone_Name = t.Zone_Name
+    ORDER BY z.Sort_Order ASC
     """
 
     cursor.execute(hana_sql)
@@ -635,6 +590,64 @@ def save_data_to_table(mysql_conn, session_id: str, year_month: str, selected_da
         print(f"[{TABLE_NAME}] Cache write note: {e}", flush=True)
 
 
+def bulk_sync_sales_report_by_values(mysql_conn, session_id: str, user_id=None):
+    """
+    Pre-calculates and caches all available months permutations for Sales Report by Values (Sheet 3)
+    into MySQL table `sales_summary_sales_report_by_values`.
+    """
+    if not mysql_conn or not session_id:
+        return False
+
+    ensure_table(mysql_conn)
+    hana_conn = None
+    tunnel = None
+    try:
+        hana_conn, tunnel, schema = get_sap_connection_for_session(mysql_conn, session_id, user_id=user_id)
+        if not hana_conn:
+            print(f"[{TABLE_NAME}] No HANA connection for bulk sync.", flush=True)
+            return False
+
+        h_cur = hana_conn.cursor()
+        det_year, det_month, det_day = detect_sales_dates(h_cur, schema)
+        master_months = fetch_master_months(h_cur, schema)
+        if not master_months:
+            master_months = [{"month_no": m, "month_name": calendar.month_abbr[m].upper()} for m in range(1, 13)]
+
+        curr_yr = int(det_year)
+        years_to_sync = [curr_yr, curr_yr - 1]
+        print(f"[{TABLE_NAME}] Bulk syncing {len(master_months)} months for years {years_to_sync}...", flush=True)
+
+        for yr in years_to_sync:
+            for m_item in master_months:
+                mo_num = m_item["month_no"]
+                ym = f"{yr}{str(mo_num).zfill(2)}"
+                try:
+                    if yr == curr_yr and mo_num == det_month:
+                        sel_date = f"{yr}-{str(mo_num).zfill(2)}-{str(det_day).zfill(2)}"
+                    else:
+                        last_d = calendar.monthrange(yr, mo_num)[1]
+                        sel_date = f"{yr}-{str(mo_num).zfill(2)}-{str(last_d).zfill(2)}"
+
+                    rows = query_sales_report_by_values_hana(h_cur, schema, ym, sel_date)
+                    if rows:
+                        save_data_to_table(mysql_conn, session_id, ym, sel_date, rows)
+                except Exception as e_m:
+                    print(f"[{TABLE_NAME}] Error syncing month {ym}: {e_m}", flush=True)
+
+        h_cur.close()
+        return True
+    except Exception as e:
+        print(f"[{TABLE_NAME}] Bulk sync error: {e}", flush=True)
+        return False
+    finally:
+        if hana_conn:
+            try: hana_conn.close()
+            except Exception: pass
+        if tunnel:
+            try: tunnel.stop()
+            except Exception: pass
+
+
 def get_sales_report_by_values_controller(get_db_connection):
     """
     HTTP Controller for Sales Report by Values (Sheet 3).
@@ -764,7 +777,6 @@ def get_sales_report_by_values_controller(get_db_connection):
         mo_abbr = calendar.month_abbr[selected_mo_num]
         prev_yr_short = str(previous_year)[-2:]
         curr_yr_short = str(current_year)[-2:]
-        day_num = int(selected_date.split("-")[2])
 
         meta_info = {
             "month_abbr": mo_abbr,
@@ -783,4 +795,3 @@ def get_sales_report_by_values_controller(get_db_connection):
 
     finally:
         _close_connections(mysql_conn, hana_conn, tunnel)
-
