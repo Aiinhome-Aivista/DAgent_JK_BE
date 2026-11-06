@@ -97,11 +97,11 @@ BEGIN
                 WHEN dm.distribution_name = 'STU' THEN 'STU'
             END
     ),
-    /* Distribution এর টার্গেট (যেহেতু sales_target-এ Channel নেই, তাই 0 ধরা হলো) */
+    /* Distribution Target (set to 0 since sales_target has no channel breakdown) */
     final_dist AS (
         SELECT report_name, Month, MTD, 0 AS Target, Actual, Sale_For_Day FROM actual_dist
     ),
-    /* Market এবং Distribution একসাথে করা হলো */
+    /* Combine Market and Distribution */
     all_combined AS (
         SELECT * FROM final_market
         UNION ALL

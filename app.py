@@ -2087,6 +2087,11 @@ def sales_numbers_report():
     from controllers.sales_numbers_report_controller import get_sales_numbers_report_controller
     return get_sales_numbers_report_controller(get_db_connection)
 
+@app.route("/sales-summary-no-values", methods=["GET", "POST"])
+def sales_summary_no_values():
+    from controllers.sales_summary_no_values_controller import get_sales_summary_no_values_controller
+    return get_sales_summary_no_values_controller(get_db_connection)
+
 
 
 @app.route("/non-billed-accounts-pct", methods=["GET", "POST"])

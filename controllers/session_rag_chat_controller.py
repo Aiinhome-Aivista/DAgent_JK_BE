@@ -980,11 +980,11 @@ def _retrieve(all_chunks, bm25_idx, col, question, understanding):
 # AUTO CHAT HISTORY SAVE
 # ══════════════════════════════════════════════════════
 
-# One-time flag — server startup এ একবার UNIQUE drop করবে
+# One-time flag — drop UNIQUE constraint on server startup if present
 _UNIQUE_FIXED = False
 
 def _ensure_no_unique_on_chat_id(get_fn):
-    """chat_id column এ UNIQUE constraint থাকলে drop করো (once per server start)."""
+    """Drop UNIQUE constraint on chat_id column if present (once per server start)."""
     global _UNIQUE_FIXED
     if _UNIQUE_FIXED:
         return
@@ -1049,12 +1049,12 @@ DROP INDEX chat_id
 # CHAT_ID MANAGER
 # ══════════════════════════════════════════════════
 
-def _resolve_chat_id(get_fn, session_id, user_id, source_chat_id, force_new=False, visit_number=None):
+def _resolve_chat_id(get_fn, session_id, user_id, source_chat_id, force_new=False, visit_number=None, client_chat_id=None):
     """
-    CASE A — source_chat_id আছে + same day → same chat_id continue
-    CASE B — source_chat_id আছে + different day → new chat_id + copy source history
-    CASE C — source_chat_id নেই + today's chat exists → continue today's chat (unless force_new=True)
-    CASE C — source_chat_id নেই + no today's chat → brand new chat_id
+    CASE A — source_chat_id exists + same day -> continue same chat_id
+    CASE B — source_chat_id exists + different day -> new chat_id + copy source history
+    CASE C — no source_chat_id + today's chat exists -> continue today's chat (unless force_new=True)
+    CASE C — no source_chat_id + no today's chat -> brand new chat_id
     """
     import uuid
     from datetime import date
@@ -1071,6 +1071,19 @@ def _resolve_chat_id(get_fn, session_id, user_id, source_chat_id, force_new=Fals
             print(f"[ChatID] force_new=True → brand new {new_id[:8]}...")
             return new_id, True
 
+        # 1. If client provided explicit chat_id, check and prioritize it
+        if client_chat_id:
+            cur.execute("""
+                SELECT chat_id FROM session_chat_history
+                WHERE chat_id = %s AND user_id = %s
+                ORDER BY id DESC LIMIT 1
+            """, (client_chat_id, int(user_id)))
+            c_row = cur.fetchone()
+            if c_row and c_row["chat_id"]:
+                print(f"[ChatID] Found by client_chat_id {client_chat_id[:8]}...")
+                return c_row["chat_id"], False
+
+        # 2. If visit_number provided, find its active chat_id
         if visit_number:
             cur.execute("""
                 SELECT chat_id FROM session_chat_history
@@ -1081,6 +1094,17 @@ def _resolve_chat_id(get_fn, session_id, user_id, source_chat_id, force_new=Fals
             if v_row and v_row["chat_id"]:
                 print(f"[ChatID] Found by visit_number {visit_number} → {v_row['chat_id'][:8]}...")
                 return v_row["chat_id"], False
+
+            # Fallback search without strict session_id format
+            cur.execute("""
+                SELECT chat_id FROM session_chat_history
+                WHERE user_id = %s AND visit_number = %s
+                ORDER BY id DESC LIMIT 1
+            """, (int(user_id), int(visit_number)))
+            v_row2 = cur.fetchone()
+            if v_row2 and v_row2["chat_id"]:
+                print(f"[ChatID] Found by fallback user_id & visit_number {visit_number} → {v_row2['chat_id'][:8]}...")
+                return v_row2["chat_id"], False
 
         if source_chat_id:
             cur.execute("""
@@ -1152,40 +1176,50 @@ def _resolve_chat_id(get_fn, session_id, user_id, source_chat_id, force_new=Fals
 def _save_history(get_fn, session_id, user_id, question, answer,
                   follow_ups, intent, mode,
                   login_token=None, visualizations=None, chat_id=None,
-                  generated_sql=None, execution_time=None, row_count=None):
-    if not user_id: return
+                  generated_sql=None, execution_time=None, row_count=None,
+                  visit_number=None, force_new=False):
+    if not user_id: return None
+    import json
     from datetime import datetime
     _ensure_no_unique_on_chat_id(get_fn)  # drop UNIQUE once if needed
     conn = cur = None
+    visit = 1
     try:
         conn = get_fn()
         cur  = _dict_cursor(conn)
 
         eid  = chat_id or session_id
 
-        cur.execute("""
-            SELECT turn_index, visit_number, local_turn_index, created_at, login_token
-            FROM session_chat_history
-            WHERE chat_id = %s AND user_id = %s
-            ORDER BY id DESC LIMIT 1
-        """, (eid, int(user_id)))
-        last = cur.fetchone()
+        last = None
+        if eid and not force_new:
+            cur.execute("""
+                SELECT turn_index, visit_number, local_turn_index, created_at, login_token
+                FROM session_chat_history
+                WHERE chat_id = %s AND user_id = %s
+                ORDER BY id DESC LIMIT 1
+            """, (eid, int(user_id)))
+            last = cur.fetchone()
 
         if last:
-            turn   = last["turn_index"] + 1
-            diff   = datetime.now() - last["created_at"]
-            new_v  = (login_token is not None and last["login_token"] != login_token) or diff.total_seconds() > 3600
-            visit  = last["visit_number"] + (1 if new_v else 0)
-            local  = 0 if new_v else last["local_turn_index"] + 1
+            turn  = (last["turn_index"] or 0) + 1
+            visit = last["visit_number"]  # Keep same visit_number for the same chat conversation
+            local = (last["local_turn_index"] or 0) + 1
         else:
             turn = local = 0
-            cur.execute("""
-                SELECT COALESCE(MAX(visit_number), 0) AS max_v
-                FROM session_chat_history
-                WHERE session_id = %s
-            """, (session_id,))
-            max_v_row = cur.fetchone()
-            visit = (max_v_row["max_v"] + 1) if max_v_row else 1
+            if visit_number and not force_new:
+                try:
+                    visit = int(visit_number)
+                except (ValueError, TypeError):
+                    visit = None
+
+            if not visit:
+                cur.execute("""
+                    SELECT COALESCE(MAX(visit_number), 0) AS max_v
+                    FROM session_chat_history
+                    WHERE session_id = %s
+                """, (session_id,))
+                max_v_row = cur.fetchone()
+                visit = (max_v_row["max_v"] + 1) if max_v_row else 1
 
         cur.execute("""
             INSERT INTO session_chat_history
@@ -2522,6 +2556,7 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
     history        = data.get("chat_history", [])
     user_id        = data.get("user_id")
     visit_number   = data.get("visit_number")
+    client_chat_id = (data.get("chat_id") or "").strip() or None
     login_token    = data.get("login_token")
     source_chat_id = (data.get("source_chat_id") or "").strip() or None
 
@@ -2567,7 +2602,7 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
     force_new = str(data.get("is_new_query")).lower() == "true"
     if user_id:
         active_chat_id, _ = _resolve_chat_id(
-            get_connection_func, session_id, user_id, source_chat_id, force_new, visit_number
+            get_connection_func, session_id, user_id, source_chat_id, force_new, visit_number, client_chat_id
         )
 
     workspace_id = None
@@ -2739,7 +2774,8 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
             actual_visit = _save_history(
                 get_connection_func, session_id, user_id,
                 question, _heavy_msg, fuq, understanding.get("intent", "AGGREGATION"), "answer",
-                login_token=login_token, visualizations=[], chat_id=active_chat_id
+                login_token=login_token, visualizations=[], chat_id=active_chat_id,
+                visit_number=visit_number, force_new=force_new
             )
             return jsonify({
                 "status":              "success",
@@ -3714,7 +3750,8 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                       question, json.dumps(res.get("datasets",[])), fuq, understanding["intent"], "graph",
                       login_token=login_token, chat_id=active_chat_id,
                       generated_sql=sql_query, execution_time=exec_duration,
-                      row_count=len(sql_results) if sql_results is not None else 0)
+                      row_count=len(sql_results) if sql_results is not None else 0,
+                      visit_number=visit_number, force_new=force_new)
         return jsonify({
             "status":     "success",
             "statusCode": 200,
@@ -3752,7 +3789,8 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                       question, res.get("report_title",""), fuq, understanding["intent"], "report",
                       login_token=login_token, chat_id=active_chat_id,
                       generated_sql=sql_query, execution_time=exec_duration,
-                      row_count=len(sql_results) if sql_results is not None else 0)
+                      row_count=len(sql_results) if sql_results is not None else 0,
+                      visit_number=visit_number, force_new=force_new)
         return jsonify({
             "status":     "success",
             "statusCode": 200,
@@ -3965,7 +4003,8 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                   login_token=login_token, visualizations=visualizations,
                   chat_id=active_chat_id,
                   generated_sql=sql_query, execution_time=exec_duration,
-                  row_count=len(sql_results) if sql_results is not None else 0)
+                  row_count=len(sql_results) if sql_results is not None else 0,
+                  visit_number=visit_number, force_new=force_new)
 
     return jsonify({
         "status":              "success",

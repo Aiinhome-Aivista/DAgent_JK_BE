@@ -45,6 +45,8 @@ def _execute_sync_task():
         ensure_domestic_sales_table(conn)
         from controllers.sales_report_by_values_controller import ensure_table as ensure_sales_report_by_values_table
         ensure_sales_report_by_values_table(conn)
+        from controllers.sales_summary_no_values_controller import ensure_table as ensure_sales_summary_no_values_table
+        ensure_sales_summary_no_values_table(conn)
         cur = conn.cursor(dictionary=True) if hasattr(conn, "cursor") else conn.cursor()
         cur.execute("""
             SELECT session_id, MAX(user_id) AS user_id, MAX(workspace_name) AS workspace_name 
@@ -190,6 +192,16 @@ def _execute_sync_task():
                 print(f"[Scheduler] ✅ [8c/11] Sales Number's synced in {round(time.time() - t_step, 2)}s", flush=True)
             except Exception as e:
                 print(f"[Scheduler] ❌ [8c/11] Error syncing sales_numbers_report: {e}", flush=True)
+
+            # 8d. Sales Summary in No's & Values (Sheet 4 - Dedicated table: sales_summary_no_values - All Month Permutations)
+            t_step = time.time()
+            print(f"[Scheduler] ⏳ [8d/11] Syncing Sales Summary in No's & Values (Sheet 4 - All Month Permutations)...", flush=True)
+            try:
+                from controllers.sales_summary_no_values_controller import bulk_sync_sales_summary_no_values
+                bulk_sync_sales_summary_no_values(conn, s_id, u_id)
+                print(f"[Scheduler] ✅ [8d/11] Sales Summary in No's & Values synced in {round(time.time() - t_step, 2)}s", flush=True)
+            except Exception as e:
+                print(f"[Scheduler] ❌ [8d/11] Error syncing sales_summary_no_values: {e}", flush=True)
 
             # 9. Executive Sales & Performance Analysis Summary (HANA Core KPIs + LLM Summary)
             t_step = time.time()

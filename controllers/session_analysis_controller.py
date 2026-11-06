@@ -2897,7 +2897,7 @@ def session_analysis_controller(get_connection_func):
             return jsonify({
                 "status":     "no_data",
                 "statusCode": 200,
-                "message":    "আপনার ডাটাবেসে কোনো টেবিল বা ডেটা নেই, দয়া করে আগে ডেটা আপলোড করুন।"
+                "message":    "No tables or data found in your database. Please connect or upload data first."
             }), 200
 
 

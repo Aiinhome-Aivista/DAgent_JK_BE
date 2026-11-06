@@ -2285,6 +2285,55 @@ def query_sales_summary_in_no_and_values_hana(cursor, schema, year, month, day):
 
     ),
 
+    agg_targets AS (
+
+        SELECT
+
+            zm.NAME AS Zone_Name,
+
+            SUM(CASE WHEN (TRIM(tgt.CAT_CODE) IN ('B1', 'H1', 'S1') 
+                       OR UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) IN ('MOTOR', 'SCOOTER', '3WH', '3W', 'MOTORCYCLE') 
+                       OR UPPER(TRIM(COALESCE(tgt.T_TYPE, ''))) IN ('SCOOTER', 'MOTOR CYCLE', '3W', '2/3 WHEELERS')) 
+                     THEN 0 
+                     ELSE COALESCE(NULLIF(tgt.REV_PLAN_VAL, 0), NULLIF(tgt.PLAN_VALUE, 0), 0) 
+                END) / 10000000.0 AS Tgt_Val_4W,
+
+            SUM(CASE WHEN (TRIM(tgt.CAT_CODE) IN ('B1', 'H1', 'S1') 
+                       OR UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) IN ('MOTOR', 'SCOOTER', '3WH', '3W', 'MOTORCYCLE') 
+                       OR UPPER(TRIM(COALESCE(tgt.T_TYPE, ''))) IN ('SCOOTER', 'MOTOR CYCLE', '3W', '2/3 WHEELERS')) 
+                     THEN COALESCE(NULLIF(tgt.REV_PLAN_VAL, 0), NULLIF(tgt.PLAN_VALUE, 0), 0) 
+                     ELSE 0 
+                END) / 10000000.0 AS Tgt_Val_23W,
+
+            SUM(CASE WHEN TRIM(tgt.CAT_CODE) = '11' OR UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) = 'TBB' THEN COALESCE(NULLIF(tgt.REV_PLAN, 0), tgt.ORG_PLAN, 0) ELSE 0 END) AS Tgt_TBB,
+            SUM(CASE WHEN TRIM(tgt.CAT_CODE) = '12' OR UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) = 'TBR' THEN COALESCE(NULLIF(tgt.REV_PLAN, 0), tgt.ORG_PLAN, 0) ELSE 0 END) AS Tgt_TBR,
+            SUM(CASE WHEN TRIM(tgt.CAT_CODE) = '21' OR UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) = 'LCB' THEN COALESCE(NULLIF(tgt.REV_PLAN, 0), tgt.ORG_PLAN, 0) ELSE 0 END) AS Tgt_LCV_B,
+            SUM(CASE WHEN TRIM(tgt.CAT_CODE) IN ('22', '25') OR UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) IN ('LCR(S)', 'LCR(N)') THEN COALESCE(NULLIF(tgt.REV_PLAN, 0), tgt.ORG_PLAN, 0) ELSE 0 END) AS Tgt_LCV_R,
+            SUM(CASE WHEN TRIM(tgt.CAT_CODE) = 'D1' OR UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) = 'SCB' THEN COALESCE(NULLIF(tgt.REV_PLAN, 0), tgt.ORG_PLAN, 0) ELSE 0 END) AS Tgt_SCV_B,
+            SUM(CASE WHEN TRIM(tgt.CAT_CODE) = 'D2' OR UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) = 'SCR' THEN COALESCE(NULLIF(tgt.REV_PLAN, 0), tgt.ORG_PLAN, 0) ELSE 0 END) AS Tgt_SCV_R,
+            SUM(CASE WHEN TRIM(tgt.CAT_CODE) = '31' OR UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) = 'CB' THEN COALESCE(NULLIF(tgt.REV_PLAN, 0), tgt.ORG_PLAN, 0) ELSE 0 END) AS Tgt_Car_B,
+            SUM(CASE WHEN TRIM(tgt.CAT_CODE) = '32' OR UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) = 'CR' THEN COALESCE(NULLIF(tgt.REV_PLAN, 0), tgt.ORG_PLAN, 0) ELSE 0 END) AS Tgt_Car_R,
+            SUM(CASE WHEN TRIM(tgt.CAT_CODE) = '41' OR UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) = 'JB' THEN COALESCE(NULLIF(tgt.REV_PLAN, 0), tgt.ORG_PLAN, 0) ELSE 0 END) AS Tgt_Jeep_B,
+            SUM(CASE WHEN TRIM(tgt.CAT_CODE) = '42' OR UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) = 'JR' THEN COALESCE(NULLIF(tgt.REV_PLAN, 0), tgt.ORG_PLAN, 0) ELSE 0 END) AS Tgt_Jeep_R,
+            SUM(CASE WHEN TRIM(tgt.CAT_CODE) = '61' OR UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) = 'TR.FRONT' THEN COALESCE(NULLIF(tgt.REV_PLAN, 0), tgt.ORG_PLAN, 0) ELSE 0 END) AS Tgt_TrF,
+            SUM(CASE WHEN TRIM(tgt.CAT_CODE) = '51' OR UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) = 'TR.REAR' THEN COALESCE(NULLIF(tgt.REV_PLAN, 0), tgt.ORG_PLAN, 0) ELSE 0 END) AS Tgt_TrR,
+            SUM(CASE WHEN TRIM(tgt.CAT_CODE) = '71' OR UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) = 'TR.TRAILER' THEN COALESCE(NULLIF(tgt.REV_PLAN, 0), tgt.ORG_PLAN, 0) ELSE 0 END) AS Tgt_TrT,
+            SUM(CASE WHEN TRIM(tgt.CAT_CODE) = '91' OR UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) = 'ADV' THEN COALESCE(NULLIF(tgt.REV_PLAN, 0), tgt.ORG_PLAN, 0) ELSE 0 END) AS Tgt_ADV,
+            SUM(CASE WHEN TRIM(tgt.CAT_CODE) = 'H1' OR UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) = '3WH' THEN COALESCE(NULLIF(tgt.REV_PLAN, 0), tgt.ORG_PLAN, 0) ELSE 0 END) AS Tgt_3W,
+            SUM(CASE WHEN TRIM(tgt.CAT_CODE) = 'S1' OR UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) = 'SCOOTER' THEN COALESCE(NULLIF(tgt.REV_PLAN, 0), tgt.ORG_PLAN, 0) ELSE 0 END) AS Tgt_Scoot,
+            SUM(CASE WHEN TRIM(tgt.CAT_CODE) = 'B1' OR UPPER(TRIM(COALESCE(cat.CAT_DESC, ''))) = 'MOTOR' THEN COALESCE(NULLIF(tgt.REV_PLAN, 0), tgt.ORG_PLAN, 0) ELSE 0 END) AS Tgt_Motor
+
+        FROM "{schema}"."ZIVF_SD_Sales_Plan_Target_01_TR" tgt
+        LEFT JOIN "{schema}"."ZIVF_CategoryMaster_01_TR" cat ON (TRIM(tgt.CAT_CODE) = TRIM(cat.CAT_CODE))
+        LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm ON (TRIM(tgt.TERR_CODE) = TRIM(tm.BZIRK))
+        LEFT JOIN "{schema}"."ZIVF_RegionMaster_MD_01" rm ON (TRIM(COALESCE(NULLIF(TRIM(tgt.REG_CODE), ''), NULLIF(TRIM(tm.REGIO), ''))) = TRIM(rm.REGION_CODE))
+        LEFT JOIN "{schema}"."ZIVF_ZoneMaster_01_TR" zm ON (zm.P_ZONE = COALESCE(NULLIF(TRIM(rm.ZONE_CODE), ''), NULLIF(TRIM(tm.P_ZONE), '')))
+        WHERE tgt.YMONTH = '{year}{str(month).zfill(2)}'
+          AND zm.NAME IS NOT NULL AND TRIM(zm.NAME) != ''
+        GROUP BY zm.NAME
+
+    ),
+
     all_zones AS (
 
         SELECT DISTINCT NAME AS Zone_Name,
@@ -2305,47 +2354,48 @@ def query_sales_summary_in_no_and_values_hana(cursor, schema, year, month, day):
 
             z.Zone_Name,
 
-            COALESCE(a."Val_4_Whlrs", 0) AS Act_Val_4W, 0 AS Tgt_Val_4W,
+            COALESCE(a."Val_4_Whlrs", 0) AS Act_Val_4W, COALESCE(t.Tgt_Val_4W, 0) AS Tgt_Val_4W,
 
-            COALESCE(a."Val_2_3_Whlrs", 0) AS Act_Val_23W, 0 AS Tgt_Val_23W,
+            COALESCE(a."Val_2_3_Whlrs", 0) AS Act_Val_23W, COALESCE(t.Tgt_Val_23W, 0) AS Tgt_Val_23W,
 
-            COALESCE(a."TBB_Total", 0) AS Act_TBB, 0 AS Tgt_TBB,
+            ROUND(COALESCE(a."TBB_Total", 0), 0) AS Act_TBB, ROUND(COALESCE(t.Tgt_TBB, 0), 0) AS Tgt_TBB,
 
-            COALESCE(a."TBR_Total", 0) AS Act_TBR, 0 AS Tgt_TBR,
+            ROUND(COALESCE(a."TBR_Total", 0), 0) AS Act_TBR, ROUND(COALESCE(t.Tgt_TBR, 0), 0) AS Tgt_TBR,
 
-            COALESCE(a."LCV_Bias", 0) AS Act_LCV_B, 0 AS Tgt_LCV_B,
+            ROUND(COALESCE(a."LCV_Bias", 0), 0) AS Act_LCV_B, ROUND(COALESCE(t.Tgt_LCV_B, 0), 0) AS Tgt_LCV_B,
 
-            COALESCE(a."LCV_Radial", 0) AS Act_LCV_R, 0 AS Tgt_LCV_R,
+            ROUND(COALESCE(a."LCV_Radial", 0), 0) AS Act_LCV_R, ROUND(COALESCE(t.Tgt_LCV_R, 0), 0) AS Tgt_LCV_R,
 
-            COALESCE(a."SCV_Bias", 0) AS Act_SCV_B, 0 AS Tgt_SCV_B,
+            ROUND(COALESCE(a."SCV_Bias", 0), 0) AS Act_SCV_B, ROUND(COALESCE(t.Tgt_SCV_B, 0), 0) AS Tgt_SCV_B,
 
-            COALESCE(a."SCV_Radial", 0) AS Act_SCV_R, 0 AS Tgt_SCV_R,
+            ROUND(COALESCE(a."SCV_Radial", 0), 0) AS Act_SCV_R, ROUND(COALESCE(t.Tgt_SCV_R, 0), 0) AS Tgt_SCV_R,
 
-            COALESCE(a."Car_Bias", 0) AS Act_Car_B, 0 AS Tgt_Car_B,
+            ROUND(COALESCE(a."Car_Bias", 0), 0) AS Act_Car_B, ROUND(COALESCE(t.Tgt_Car_B, 0), 0) AS Tgt_Car_B,
 
-            COALESCE(a."Car_Radial", 0) AS Act_Car_R, 0 AS Tgt_Car_R,
+            ROUND(COALESCE(a."Car_Radial", 0), 0) AS Act_Car_R, ROUND(COALESCE(t.Tgt_Car_R, 0), 0) AS Tgt_Car_R,
 
-            COALESCE(a."Jeep_Bias", 0) AS Act_Jeep_B, 0 AS Tgt_Jeep_B,
+            ROUND(COALESCE(a."Jeep_Bias", 0), 0) AS Act_Jeep_B, ROUND(COALESCE(t.Tgt_Jeep_B, 0), 0) AS Tgt_Jeep_B,
 
-            COALESCE(a."Jeep_Radial", 0) AS Act_Jeep_R, 0 AS Tgt_Jeep_R,
+            ROUND(COALESCE(a."Jeep_Radial", 0), 0) AS Act_Jeep_R, ROUND(COALESCE(t.Tgt_Jeep_R, 0), 0) AS Tgt_Jeep_R,
 
-            COALESCE(a."Tr_Front", 0) AS Act_TrF, 0 AS Tgt_TrF,
+            ROUND(COALESCE(a."Tr_Front", 0), 0) AS Act_TrF, ROUND(COALESCE(t.Tgt_TrF, 0), 0) AS Tgt_TrF,
 
-            COALESCE(a."Tr_Rear", 0) AS Act_TrR, 0 AS Tgt_TrR,
+            ROUND(COALESCE(a."Tr_Rear", 0), 0) AS Act_TrR, ROUND(COALESCE(t.Tgt_TrR, 0), 0) AS Tgt_TrR,
 
-            COALESCE(a."Tr_Trail", 0) AS Act_TrT, 0 AS Tgt_TrT,
+            ROUND(COALESCE(a."Tr_Trail", 0), 0) AS Act_TrT, ROUND(COALESCE(t.Tgt_TrT, 0), 0) AS Tgt_TrT,
 
-            COALESCE(a."ADV", 0) AS Act_ADV, 0 AS Tgt_ADV,
+            ROUND(COALESCE(a."ADV", 0), 0) AS Act_ADV, ROUND(COALESCE(t.Tgt_ADV, 0), 0) AS Tgt_ADV,
 
-            COALESCE(a."3_Whlrs", 0) AS Act_3W, 0 AS Tgt_3W,
+            ROUND(COALESCE(a."3_Whlrs", 0), 0) AS Act_3W, ROUND(COALESCE(t.Tgt_3W, 0), 0) AS Tgt_3W,
 
-            COALESCE(a."Scooter", 0) AS Act_Scoot, 0 AS Tgt_Scoot,
+            ROUND(COALESCE(a."Scooter", 0), 0) AS Act_Scoot, ROUND(COALESCE(t.Tgt_Scoot, 0), 0) AS Tgt_Scoot,
 
-            COALESCE(a."Motor", 0) AS Act_Motor, 0 AS Tgt_Motor
+            ROUND(COALESCE(a."Motor", 0), 0) AS Act_Motor, ROUND(COALESCE(t.Tgt_Motor, 0), 0) AS Tgt_Motor
 
         FROM all_zones z
 
         LEFT JOIN agg_actuals a ON z.Zone_Name = a.Zone_Name
+        LEFT JOIN agg_targets t ON z.Zone_Name = t.Zone_Name
 
     )
 
@@ -2355,19 +2405,19 @@ def query_sales_summary_in_no_and_values_hana(cursor, schema, year, month, day):
 
         TO_VARCHAR(ROUND(Act_Val_4W, 2)) AS "4 Whlrs.", TO_VARCHAR(ROUND(Act_Val_23W, 2)) AS "Whlrs", TO_VARCHAR(ROUND(Act_Val_4W + Act_Val_23W, 2)) AS "Total",
 
-        TO_VARCHAR(Act_TBB) AS "TBB Total", TO_VARCHAR(Act_TBR) AS "TBR Total",
+        TO_VARCHAR(TO_INTEGER(Act_TBB)) AS "TBB Total", TO_VARCHAR(TO_INTEGER(Act_TBR)) AS "TBR Total",
 
-        TO_VARCHAR(Act_LCV_B) AS "LCV Bias", TO_VARCHAR(Act_LCV_R) AS "LCV Rdl",
+        TO_VARCHAR(TO_INTEGER(Act_LCV_B)) AS "LCV Bias", TO_VARCHAR(TO_INTEGER(Act_LCV_R)) AS "LCV Rdl",
 
-        TO_VARCHAR(Act_SCV_B) AS "SCV Bias", TO_VARCHAR(Act_SCV_R) AS "SCV Rdl.",
+        TO_VARCHAR(TO_INTEGER(Act_SCV_B)) AS "SCV Bias", TO_VARCHAR(TO_INTEGER(Act_SCV_R)) AS "SCV Rdl.",
 
-        TO_VARCHAR(Act_Car_B) AS "Car Bias", TO_VARCHAR(Act_Car_R) AS "Car Radial",
+        TO_VARCHAR(TO_INTEGER(Act_Car_B)) AS "Car Bias", TO_VARCHAR(TO_INTEGER(Act_Car_R)) AS "Car Radial",
 
-        TO_VARCHAR(Act_Jeep_B) AS "Jeep Bias", TO_VARCHAR(Act_Jeep_R) AS "Jeep Radial",
+        TO_VARCHAR(TO_INTEGER(Act_Jeep_B)) AS "Jeep Bias", TO_VARCHAR(TO_INTEGER(Act_Jeep_R)) AS "Jeep Radial",
 
-        TO_VARCHAR(Act_TrF) AS "Tr. Fro", TO_VARCHAR(Act_TrR) AS "Tr. Rear", TO_VARCHAR(Act_TrT) AS "Tr. Trail",
+        TO_VARCHAR(TO_INTEGER(Act_TrF)) AS "Tr. Fro", TO_VARCHAR(TO_INTEGER(Act_TrR)) AS "Tr. Rear", TO_VARCHAR(TO_INTEGER(Act_TrT)) AS "Tr. Trail",
 
-        TO_VARCHAR(Act_ADV) AS "ADV", TO_VARCHAR(Act_3W) AS "3 Whlrs", TO_VARCHAR(Act_Scoot) AS "Scooter", TO_VARCHAR(Act_Motor) AS "Motor"
+        TO_VARCHAR(TO_INTEGER(Act_ADV)) AS "ADV", TO_VARCHAR(TO_INTEGER(Act_3W)) AS "3 Whlrs", TO_VARCHAR(TO_INTEGER(Act_Scoot)) AS "Scooter", TO_VARCHAR(TO_INTEGER(Act_Motor)) AS "Motor"
 
     FROM final_data
 
@@ -2379,19 +2429,19 @@ def query_sales_summary_in_no_and_values_hana(cursor, schema, year, month, day):
 
         TO_VARCHAR(ROUND(Tgt_Val_4W, 2)), TO_VARCHAR(ROUND(Tgt_Val_23W, 2)), TO_VARCHAR(ROUND(Tgt_Val_4W + Tgt_Val_23W, 2)),
 
-        TO_VARCHAR(Tgt_TBB), TO_VARCHAR(Tgt_TBR),
+        TO_VARCHAR(TO_INTEGER(Tgt_TBB)), TO_VARCHAR(TO_INTEGER(Tgt_TBR)),
 
-        TO_VARCHAR(Tgt_LCV_B), TO_VARCHAR(Tgt_LCV_R),
+        TO_VARCHAR(TO_INTEGER(Tgt_LCV_B)), TO_VARCHAR(TO_INTEGER(Tgt_LCV_R)),
 
-        TO_VARCHAR(Tgt_SCV_B), TO_VARCHAR(Tgt_SCV_R),
+        TO_VARCHAR(TO_INTEGER(Tgt_SCV_B)), TO_VARCHAR(TO_INTEGER(Tgt_SCV_R)),
 
-        TO_VARCHAR(Tgt_Car_B), TO_VARCHAR(Tgt_Car_R),
+        TO_VARCHAR(TO_INTEGER(Tgt_Car_B)), TO_VARCHAR(TO_INTEGER(Tgt_Car_R)),
 
-        TO_VARCHAR(Tgt_Jeep_B), TO_VARCHAR(Tgt_Jeep_R),
+        TO_VARCHAR(TO_INTEGER(Tgt_Jeep_B)), TO_VARCHAR(TO_INTEGER(Tgt_Jeep_R)),
 
-        TO_VARCHAR(Tgt_TrF), TO_VARCHAR(Tgt_TrR), TO_VARCHAR(Tgt_TrT),
+        TO_VARCHAR(TO_INTEGER(Tgt_TrF)), TO_VARCHAR(TO_INTEGER(Tgt_TrR)), TO_VARCHAR(TO_INTEGER(Tgt_TrT)),
 
-        TO_VARCHAR(Tgt_ADV), TO_VARCHAR(Tgt_3W), TO_VARCHAR(Tgt_Scoot), TO_VARCHAR(Tgt_Motor)
+        TO_VARCHAR(TO_INTEGER(Tgt_ADV)), TO_VARCHAR(TO_INTEGER(Tgt_3W)), TO_VARCHAR(TO_INTEGER(Tgt_Scoot)), TO_VARCHAR(TO_INTEGER(Tgt_Motor))
 
     FROM final_data
 
@@ -2451,23 +2501,23 @@ def query_sales_summary_in_no_and_values_hana(cursor, schema, year, month, day):
 
         TO_VARCHAR(ROUND(SUM(Act_Val_4W), 2)), TO_VARCHAR(ROUND(SUM(Act_Val_23W), 2)), TO_VARCHAR(ROUND(SUM(Act_Val_4W + Act_Val_23W), 2)),
 
-        TO_VARCHAR(SUM(Act_TBB)), TO_VARCHAR(SUM(Act_TBR)),
+        TO_VARCHAR(TO_INTEGER(SUM(Act_TBB))), TO_VARCHAR(TO_INTEGER(SUM(Act_TBR))),
 
-        TO_VARCHAR(SUM(Act_LCV_B)), TO_VARCHAR(SUM(Act_LCV_R)),
+        TO_VARCHAR(TO_INTEGER(SUM(Act_LCV_B))), TO_VARCHAR(TO_INTEGER(SUM(Act_LCV_R))),
 
-        TO_VARCHAR(SUM(Act_SCV_B)), TO_VARCHAR(SUM(Act_SCV_R)),
+        TO_VARCHAR(TO_INTEGER(SUM(Act_SCV_B))), TO_VARCHAR(TO_INTEGER(SUM(Act_SCV_R))),
 
-        TO_VARCHAR(SUM(Act_Car_B)), TO_VARCHAR(SUM(Act_Car_R)),
+        TO_VARCHAR(TO_INTEGER(SUM(Act_Car_B))), TO_VARCHAR(TO_INTEGER(SUM(Act_Car_R))),
 
-        TO_VARCHAR(SUM(Act_Jeep_B)), TO_VARCHAR(SUM(Act_Jeep_R)),
+        TO_VARCHAR(TO_INTEGER(SUM(Act_Jeep_B))), TO_VARCHAR(TO_INTEGER(SUM(Act_Jeep_R))),
 
-        TO_VARCHAR(SUM(Act_TrF)), TO_VARCHAR(SUM(Act_TrR)),
+        TO_VARCHAR(TO_INTEGER(SUM(Act_TrF))), TO_VARCHAR(TO_INTEGER(SUM(Act_TrR))),
 
-        TO_VARCHAR(SUM(Act_TrT)), TO_VARCHAR(SUM(Act_ADV)),
+        TO_VARCHAR(TO_INTEGER(SUM(Act_TrT))), TO_VARCHAR(TO_INTEGER(SUM(Act_ADV))),
 
-        TO_VARCHAR(SUM(Act_3W)), TO_VARCHAR(SUM(Act_Scoot)),
+        TO_VARCHAR(TO_INTEGER(SUM(Act_3W))), TO_VARCHAR(TO_INTEGER(SUM(Act_Scoot))),
 
-        TO_VARCHAR(SUM(Act_Motor))
+        TO_VARCHAR(TO_INTEGER(SUM(Act_Motor)))
 
     FROM final_data
 
@@ -2479,23 +2529,23 @@ def query_sales_summary_in_no_and_values_hana(cursor, schema, year, month, day):
 
         TO_VARCHAR(ROUND(SUM(Tgt_Val_4W), 2)), TO_VARCHAR(ROUND(SUM(Tgt_Val_23W), 2)), TO_VARCHAR(ROUND(SUM(Tgt_Val_4W + Tgt_Val_23W), 2)),
 
-        TO_VARCHAR(SUM(Tgt_TBB)), TO_VARCHAR(SUM(Tgt_TBR)),
+        TO_VARCHAR(TO_INTEGER(SUM(Tgt_TBB))), TO_VARCHAR(TO_INTEGER(SUM(Tgt_TBR))),
 
-        TO_VARCHAR(SUM(Tgt_LCV_B)), TO_VARCHAR(SUM(Tgt_LCV_R)),
+        TO_VARCHAR(TO_INTEGER(SUM(Tgt_LCV_B))), TO_VARCHAR(TO_INTEGER(SUM(Tgt_LCV_R))),
 
-        TO_VARCHAR(SUM(Tgt_SCV_B)), TO_VARCHAR(SUM(Tgt_SCV_R)),
+        TO_VARCHAR(TO_INTEGER(SUM(Tgt_SCV_B))), TO_VARCHAR(TO_INTEGER(SUM(Tgt_SCV_R))),
 
-        TO_VARCHAR(SUM(Tgt_Car_B)), TO_VARCHAR(SUM(Tgt_Car_R)),
+        TO_VARCHAR(TO_INTEGER(SUM(Tgt_Car_B))), TO_VARCHAR(TO_INTEGER(SUM(Tgt_Car_R))),
 
-        TO_VARCHAR(SUM(Tgt_Jeep_B)), TO_VARCHAR(SUM(Tgt_Jeep_R)),
+        TO_VARCHAR(TO_INTEGER(SUM(Tgt_Jeep_B))), TO_VARCHAR(TO_INTEGER(SUM(Tgt_Jeep_R))),
 
-        TO_VARCHAR(SUM(Tgt_TrF)), TO_VARCHAR(SUM(Tgt_TrR)),
+        TO_VARCHAR(TO_INTEGER(SUM(Tgt_TrF))), TO_VARCHAR(TO_INTEGER(SUM(Tgt_TrR))),
 
-        TO_VARCHAR(SUM(Tgt_TrT)), TO_VARCHAR(SUM(Tgt_ADV)),
+        TO_VARCHAR(TO_INTEGER(SUM(Tgt_TrT))), TO_VARCHAR(TO_INTEGER(SUM(Tgt_ADV))),
 
-        TO_VARCHAR(SUM(Tgt_3W)), TO_VARCHAR(SUM(Tgt_Scoot)),
+        TO_VARCHAR(TO_INTEGER(SUM(Tgt_3W))), TO_VARCHAR(TO_INTEGER(SUM(Tgt_Scoot))),
 
-        TO_VARCHAR(SUM(Tgt_Motor))
+        TO_VARCHAR(TO_INTEGER(SUM(Tgt_Motor)))
 
     FROM final_data
 
