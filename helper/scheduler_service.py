@@ -173,13 +173,23 @@ def _execute_sync_task():
 
             # 8b. Sales Report by Values (Sheet 3 - Dedicated table: sales_summary_sales_report_by_values - All Month Permutations)
             t_step = time.time()
-            print(f"[Scheduler] ⏳ [8b/10] Syncing Sales Report by Values (Sheet 3 - All Month Permutations)...", flush=True)
+            print(f"[Scheduler] ⏳ [8b/11] Syncing Sales Report by Values (Sheet 3 - All Month Permutations)...", flush=True)
             try:
                 from controllers.sales_report_by_values_controller import bulk_sync_sales_report_by_values
                 bulk_sync_sales_report_by_values(conn, s_id, u_id)
-                print(f"[Scheduler] ✅ [8b/10] Sales Report by Values synced in {round(time.time() - t_step, 2)}s", flush=True)
+                print(f"[Scheduler] ✅ [8b/11] Sales Report by Values synced in {round(time.time() - t_step, 2)}s", flush=True)
             except Exception as e:
-                print(f"[Scheduler] ❌ [8b/10] Error syncing sales_report_by_values: {e}", flush=True)
+                print(f"[Scheduler] ❌ [8b/11] Error syncing sales_report_by_values: {e}", flush=True)
+
+            # 8c. Sales Number's (Sheet 2 - Dedicated table: sales_summary_sales_numbers - All Month Permutations)
+            t_step = time.time()
+            print(f"[Scheduler] ⏳ [8c/11] Syncing Sales Number's (Sheet 2 - All Month Permutations)...", flush=True)
+            try:
+                from controllers.sales_numbers_report_controller import bulk_sync_sales_numbers_report
+                bulk_sync_sales_numbers_report(conn, s_id, u_id)
+                print(f"[Scheduler] ✅ [8c/11] Sales Number's synced in {round(time.time() - t_step, 2)}s", flush=True)
+            except Exception as e:
+                print(f"[Scheduler] ❌ [8c/11] Error syncing sales_numbers_report: {e}", flush=True)
 
             # 9. Executive Sales & Performance Analysis Summary (HANA Core KPIs + LLM Summary)
             t_step = time.time()

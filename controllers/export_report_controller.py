@@ -103,6 +103,38 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day, return_wor
 
                     tunnel.stop()
 
+        # Fallback to dedicated MySQL cache tables if empty
+        ym_str = f"{year}{str(month).zfill(2)}"
+        if not rows and cursor:
+            try:
+                cursor.execute("SELECT * FROM sales_summary_domestic_sales_value_achievement WHERE session_id=%s AND year_month=%s ORDER BY id ASC", (session_id, ym_str))
+                c_rows = cursor.fetchall()
+                if c_rows:
+                    rows = c_rows
+                    print(f"[Excel Export] Sheet 1 loaded {len(rows)} rows from cache table.", flush=True)
+            except Exception as e:
+                print(f"[Excel Export] Note on cache fallback for sheet 1: {e}", flush=True)
+
+        if not rows_ws1 and cursor:
+            try:
+                cursor.execute("SELECT * FROM sales_summary_sales_numbers WHERE session_id=%s AND year_month=%s ORDER BY is_total ASC, sort_order ASC, category ASC", (session_id, ym_str))
+                c_rows1 = cursor.fetchall()
+                if c_rows1:
+                    rows_ws1 = c_rows1
+                    print(f"[Excel Export] Sheet 2 loaded {len(rows_ws1)} rows from cache table.", flush=True)
+            except Exception as e:
+                print(f"[Excel Export] Note on cache fallback for sheet 2: {e}", flush=True)
+
+        if not rows_ws2 and cursor:
+            try:
+                cursor.execute("SELECT * FROM sales_summary_sales_report_by_values WHERE session_id=%s AND year_month=%s ORDER BY is_total ASC, sort_order ASC", (session_id, ym_str))
+                c_rows2 = cursor.fetchall()
+                if c_rows2:
+                    rows_ws2 = c_rows2
+                    print(f"[Excel Export] Sheet 3 loaded {len(rows_ws2)} rows from cache table.", flush=True)
+            except Exception as e:
+                print(f"[Excel Export] Note on cache fallback for sheet 3: {e}", flush=True)
+
 
 
         sync_row = None
@@ -445,27 +477,25 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day, return_wor
 
             # Use '0%' or '%' based on image
 
-            achv = row.get('Achievement', '0%')
+            achv = row.get('Achievement') if row.get('Achievement') is not None else row.get('achievement_pct')
+            grth = row.get('Growth_Over_LYSMTD') if row.get('Growth_Over_LYSMTD') is not None else row.get('growth_over_lysmt')
+            if isinstance(achv, (int, float)):
+                achv = f"{round(achv)}%" if achv else "0%"
+            elif achv is None:
+                achv = '0%'
 
-            grth = row.get('Growth_Over_LYSMTD', '0%')
-
-            if achv is None: achv = '0%'
-
-            if grth is None: grth = '0%'
-
-            # Sometimes values are raw floats from the DB, if so, we format it.
-
-            # But the SP might already be returning strings with '%'.
-
-            
+            if isinstance(grth, (int, float)):
+                grth = f"{round(grth)}%" if grth else "0%"
+            elif grth is None:
+                grth = '0%'
 
             c1 = ws.cell(row=row_num, column=1, value=label)
 
-            val_month = row.get('Month') if row.get('Month') is not None else row.get('month', 0)
-            val_mtd = row.get('MTD') if row.get('MTD') is not None else row.get('mtd', 0)
+            val_month = row.get('Month') if row.get('Month') is not None else row.get('prev_year_actual_month', row.get('month', 0))
+            val_mtd = row.get('MTD') if row.get('MTD') is not None else row.get('prev_year_actual_mtd', row.get('mtd', 0))
             val_target = row.get('Target') if row.get('Target') is not None else row.get('target', 0)
             val_actual = row.get('Actual') if row.get('Actual') is not None else row.get('actual', 0)
-            val_day = row.get('Sale_For_Day') if row.get('Sale_For_Day') is not None else (row.get('sale_for_day') or 0)
+            val_day = row.get('Sale_For_Day') if row.get('Sale_For_Day') is not None else (row.get('sale_for_the_day') if row.get('sale_for_the_day') is not None else row.get('sale_for_day', 0))
 
             c2 = ws.cell(row=row_num, column=2, value=val_month)
 
@@ -826,38 +856,27 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day, return_wor
                 # Compute % Achv row-by-row since SP doesn't provide them
 
                 tgt = float(r.get('target') or 0)
-
                 tot = float(r.get('total') or 0)
-
-                achv1 = round((tot / tgt * 100), 2) if tgt > 0 else 0
-
-                
+                if r.get('achievement_pct') is not None:
+                    achv1 = float(r.get('achievement_pct') or 0)
+                else:
+                    achv1 = round((tot / tgt * 100), 2) if tgt > 0 else 0
 
                 dom_tgt = float(r.get('domestic_target') or 0)
-
                 dom_act = float(r.get('domestic_actual') or 0)
-
-                achv2 = round((dom_act / dom_tgt * 100), 2) if dom_tgt > 0 else 0
-
-                
+                if r.get('domestic_achv_pct') is not None:
+                    achv2 = float(r.get('domestic_achv_pct') or 0)
+                else:
+                    achv2 = round((dom_act / dom_tgt * 100), 2) if dom_tgt > 0 else 0
 
                 achv1_str = f"{achv1}%" if tgt > 0 else "%"
-
                 achv2_str = f"{achv2}%" if dom_tgt > 0 else "%"
 
-                
-
-                # Note: 'mobility_grn', 'fm_actual', 'fleet_total', 'institution', 'government' 
-
-                # are NOT in the new SP. We map SP 'fleet' to fleet_total (col 11) or fleet (col 9).
-
-                # Binding to match columns as closely as possible.
+                prev_val = r.get('prev_year_act') if r.get('prev_year_act') is not None else r.get('jul_act')
 
                 c_cells = [
-
                     ws1.cell(row=r_idx, column=1, value=cat),
-
-                    ws1.cell(row=r_idx, column=2, value=sv(r.get('jul_act'))),
+                    ws1.cell(row=r_idx, column=2, value=sv(prev_val)),
 
                     ws1.cell(row=r_idx, column=3, value=sv(r.get('target'))),
 
@@ -1301,42 +1320,39 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day, return_wor
 
                 row_fill = fill_yellow if is_total else None
 
-
+                p_4w = r.get('prev_4w') if 'prev_4w' in r else _v(1)
+                p_23w = r.get('prev_23w') if 'prev_23w' in r else _v(2)
+                p_tot = r.get('prev_total') if 'prev_total' in r else _v(3)
+                t_4w = r.get('target_4w') if 'target_4w' in r else _v(4)
+                t_23w = r.get('target_23w') if 'target_23w' in r else _v(5)
+                t_tot = r.get('target_total') if 'target_total' in r else _v(6)
+                a_4w = r.get('actual_4w') if 'actual_4w' in r else _v(7)
+                a_23w = r.get('actual_23w') if 'actual_23w' in r else _v(8)
+                a_tot = r.get('actual_total') if 'actual_total' in r else _v(9)
+                achv = r.get('achievement_pct') if 'achievement_pct' in r else _v(10)
+                s_day = r.get('sale_for_the_day') if 'sale_for_the_day' in r else _v(11)
+                ask = r.get('asking_rate') if 'asking_rate' in r else _v(12)
+                ac_4w = r.get('achvt_4w') if 'achvt_4w' in r else _v(13)
+                ac_23w = r.get('achvt_23w') if 'achvt_23w' in r else _v(14)
+                ac_tot = r.get('achvt_total') if 'achvt_total' in r else _v(15)
 
                 cells_data = [
-
                     (1,  zone),
-
-                    (2,  _v(1)),   # LY 4 Whlrs
-
-                    (3,  _v(2)),   # LY 2/3 Whlrs
-
-                    (4,  _v(3)),   # LY Total
-
-                    (5,  _v(4)),   # Target 4 Whlrs
-
-                    (6,  _v(5)),   # Target 2/3 Whlrs
-
-                    (7,  _v(6)),   # Target Total
-
-                    (8,  _v(7)),   # Actual 4 Whlrs
-
-                    (9,  _v(8)),   # Actual 2/3 Whlrs
-
-                    (10, _v(9)),   # Actual Total
-
-                    (11, _v(10)),  # % Achvd
-
-                    (12, _v(11)),  # Sale for the Day
-
-                    (13, _v(12)),  # Asking Rate
-
-                    (14, _v(13)),  # % Achvt 4 Whlrs
-
-                    (15, _v(14)),  # % Achvt 2/3 Whlrs
-
-                    (16, _v(15)),  # % Achvt Total
-
+                    (2,  sv(p_4w)),
+                    (3,  sv(p_23w)),
+                    (4,  sv(p_tot)),
+                    (5,  sv(t_4w)),
+                    (6,  sv(t_23w)),
+                    (7,  sv(t_tot)),
+                    (8,  sv(a_4w)),
+                    (9,  sv(a_23w)),
+                    (10, sv(a_tot)),
+                    (11, _fmt_pct(achv)),
+                    (12, sv(s_day)),
+                    (13, sv(ask)),
+                    (14, _fmt_pct(ac_4w)),
+                    (15, _fmt_pct(ac_23w)),
+                    (16, _fmt_pct(ac_tot)),
                 ]
 
                 for col_num, val in cells_data:
