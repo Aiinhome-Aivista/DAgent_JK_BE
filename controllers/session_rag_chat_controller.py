@@ -1381,11 +1381,16 @@ CANONICAL DATA MODEL & RELATIONSHIP GRAPH (OFFICIAL):
    LEFT JOIN "SAP_S4"."ZIVF_ZoneMaster_01_TR" Z
        ON TRIM(Z."P_ZONE") = TRIM(R."zone_code")
 
-3. MASTER FILTER & JOIN RULES:
-   - Customer Master: ALWAYS filter (cm.KLABC IS NULL OR cm.KLABC <> 'X') when Customer Master is joined.
-   - PURE METRIC TOTALS (e.g. "Total Sales Revenue for 2020 to 2026", "Total Tyre Quantity"):
-     DO NOT join Customer Master, Territory, Region, Zone, or SKU Master unless customer, geographic, or product dimensions/breakdowns are explicitly requested by the user!
-     Direct columnar aggregation on fact tables without joins is 100x faster, uses minimal memory, and avoids memory limit errors.
+3. MANDATORY FILTERS & JOIN RULES (OFFICIAL DATASPHERE SPECIFICATION):
+   - Customer Master Filter (ZIVF_CustomerMaster_01_MD):
+     ALWAYS JOIN: LEFT JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm ON TRIM(LEADING '0' FROM cm."KUNNR") = TRIM(LEADING '0' FROM fact."dealer_code")
+     MANDATORY FILTER: (cm."KLABC" IS NULL OR cm."KLABC" <> 'X')
+     CRITICAL: Official SAP Analytics (Zsales_test) requires excluding scrap/test accounts (KLABC = 'X') from all sales metrics (NDP value, volume, quantity, invoice value).
+   - Sales Data Filters:
+     * Distribution Channel: fact."distribution_channel" = '10' (Default replacement/domestic sales, unless OEM/20, STU/30, DEF/40 or other channels requested).
+     * Cancellation Filter: (fact."indicator_cancel" IS NULL OR fact."indicator_cancel" NOT IN ('X', 'Y', '1')).
+   - Other Master Tables (Territory, Region, Zone, SKU, Category):
+     Join them ONLY when territory, region, zone, SKU, or category names/dimensions/breakdowns are requested.
    - Customer Name: COALESCE(NULLIF(TRIM(cm.NAME1), ''), NULLIF(TRIM(cm.BNAME), ''), fact."dealer_code") AS customer_name
    - Product Name: COALESCE(sk.MAKTX, sk.PROD_TITLE, fact."SKU") AS product_name
    - Category Name: cat.CAT_DESC
@@ -2747,16 +2752,18 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                 f"\n\nCRITICAL DYNAMIC TABLE ROUTING MANDATE (Active System Month: {current_month_name} / YMONTH: {current_ymonth}):\n"
                 f"1. \"SAP_S4\".\"ZPVF_SD_CurrentSales_01_TR\": Contains ONLY the CURRENT active rolling month ({current_month_name}) MTD sales transactions.\n"
                 f"2. \"SAP_S4\".\"ZPVF_SD_SalesHistory_01_TR\": Contains ALL HISTORICAL transactions for ALL months and years prior to the current rolling month.\n"
-                f"3. OFFICIAL CONNECTING KEYS & JOIN RULES (Datasphere Architecture Specification):\n"
-                f"   - 1. Sales Data -> SKU Master: fact.\"SKU\" = sk.MATNR\n"
-                f"   - 2. SKU Master -> Category Master: sk.CAT_CODE = cat.CAT_CODE\n"
-                f"   - 3. Sales Data -> Customer Master: fact.\"dealer_code\" = cm.KUNNR (Filter: cm.KLABC IS NULL OR cm.KLABC <> 'X')\n"
-                f"   - 4. Customer Master -> Territory Master: cm.BZIRK = tm.BZIRK\n"
-                f"   - 5. Territory Master -> Region Master: tm.REGIO = rm.\"region_code\"\n"
-                f"   - 6. Region Master -> Zone Master: rm.\"zone_code\" = zm.P_ZONE\n"
-                f"   - 7. Sales Data -> Day Date: fact.\"invoice_date\" = da.\"Date_\"\n"
-                f"   - For Pure Aggregate Queries (e.g. Total Sales, Total Revenue, Overall Quantity across years/months without customer/product breakdown): Aggregate DIRECTLY from the fact view (SELECT SUM(fact.\"invoice_value\")) WITHOUT joining Customer Master or other master tables. Do NOT perform unnecessary Cartesian joins across 30M rows!\n"
-                f"   - When Customer/Dealer breakdown or ranking (Top N / Worst N) is requested: JOIN \"SAP_S4\".\"ZIVF_CustomerMaster_01_MD\" cm ON (fact.\"dealer_code\" = cm.KUNNR OR LTRIM(fact.\"dealer_code\", '0') = LTRIM(cm.KUNNR, '0')) and filter (cm.KLABC IS NULL OR cm.KLABC <> 'X').\n"
+                f"3. MANDATORY CUSTOMER MASTER FILTER (KLABC <> 'X'):\n"
+                f"   - Official SAP Analytics (Zsales_test) requires excluding scrap/test accounts (KLABC = 'X').\n"
+                f"   - For ALL queries on Sales Data, ALWAYS JOIN \"SAP_S4\".\"ZIVF_CustomerMaster_01_MD\" cm ON TRIM(LEADING '0' FROM cm.\"KUNNR\") = TRIM(LEADING '0' FROM fact.\"dealer_code\")\n"
+                f"   - ALWAYS filter: AND (cm.\"KLABC\" IS NULL OR cm.\"KLABC\" <> 'X')\n"
+                f"   - Official Connecting Keys Hierarchy:\n"
+                f"     1. Sales Data -> SKU Master: TRIM(sk.MATNR) = TRIM(fact.\"SKU\")\n"
+                f"     2. SKU Master -> Category Master: TRIM(cat.CAT_CODE) = TRIM(sk.CAT_CODE)\n"
+                f"     3. Sales Data -> Customer Master: TRIM(LEADING '0' FROM cm.KUNNR) = TRIM(LEADING '0' FROM fact.\"dealer_code\") [Filter: (cm.KLABC IS NULL OR cm.KLABC <> 'X')]\n"
+                f"     4. Customer Master -> Territory Master: TRIM(tm.BZIRK) = TRIM(cm.BZIRK)\n"
+                f"     5. Territory Master -> Region Master: TRIM(rm.\"region_code\") = TRIM(tm.REGIO)\n"
+                f"     6. Region Master -> Zone Master: TRIM(zm.P_ZONE) = TRIM(rm.\"zone_code\")\n"
+                f"     7. Sales Data -> Day Date: fact.\"invoice_date\" = da.\"Date_\"\n"
                 f"4. DYNAMIC ROUTING RULE:\n"
                 f"   - If the user asks for ANY month, quarter, or year PRIOR to the current rolling month (i.e. any period before {current_month_name}, including past months of this year or previous years), you MUST query \"SAP_S4\".\"ZPVF_SD_SalesHistory_01_TR\"!\n"
                 f"   - NEVER query CurrentSales for past months; CurrentSales only holds the active rolling current month and will return NULL for past dates.\n"
@@ -3133,25 +3140,24 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                 run_query = re.sub(r'\bGROUP\s+BY\s*;\s*$', ';', run_query, flags=re.IGNORECASE)
                                 run_query = re.sub(r'\bGROUP\s+BY\s*$', '', run_query, flags=re.IGNORECASE)
 
-                                # Mandate Customer Master join and KLABC <> 'X' filter ONLY when customer/dealer dimension is requested
-                                SQL_RESERVED = {'where', 'group', 'order', 'inner', 'left', 'right', 'join', 'on', 'union', 'having', 'limit', 'as', 'from', 'select'}
-                                is_customer_query = any(k in question.lower() for k in ['customer', 'dealer', 'client', 'account', 'party']) or ("cm." in run_query) or ("kunnr" in run_query.lower())
+                                # Mandate Customer Master join and KLABC <> 'X' filter for all Sales Fact queries (excludes scrap/test accounts)
+                                SQL_RESERVED = {'where', 'group', 'order', 'inner', 'left', 'right', 'join', 'on', 'union', 'having', 'limit', 'as', 'from', 'select', 'set', 'by'}
 
-                                if is_hana and ("ZPVF_SD_CurrentSales_01_TR" in run_query or "ZPVF_SD_SalesHistory_01_TR" in run_query) and is_customer_query:
+                                if is_hana and ("ZPVF_SD_CurrentSales_01_TR" in run_query or "ZPVF_SD_SalesHistory_01_TR" in run_query):
                                     if "ZIVF_CustomerMaster_01_MD" not in run_query:
-                                        m_f = re.search(r'\"?ZPVF_SD_(?:CurrentSales|SalesHistory)_01_TR\"?\s+(?:AS\s+)?([a-zA-Z0-9_]+)', run_query, re.I)
+                                        m_f = re.search(r'"?ZPVF_SD_(?:CurrentSales|SalesHistory)_01_TR"?\s+(?:AS\s+)?([a-zA-Z0-9_]+)', run_query, re.I)
                                         f_alias = m_f.group(1) if (m_f and m_f.group(1).lower() not in SQL_RESERVED) else "fact"
                                         if not m_f or m_f.group(1).lower() in SQL_RESERVED:
-                                            run_query = re.sub(r'(\"?ZPVF_SD_(?:CurrentSales|SalesHistory)_01_TR\"?)(?!\s+AS\b|\s+[a-zA-Z0-9_]+)', r'\1 AS fact', run_query, flags=re.I)
+                                            run_query = re.sub(r'("?ZPVF_SD_(?:CurrentSales|SalesHistory)_01_TR"?)(?!\s+AS|\s+[a-zA-Z0-9_]+)', r' AS fact', run_query, flags=re.I)
                                             f_alias = "fact"
-                                        cm_join = f'\nLEFT JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm ON ({f_alias}."dealer_code" = cm.KUNNR OR LTRIM({f_alias}."dealer_code", \'0\') = LTRIM(cm.KUNNR, \'0\'))\n'
+                                        cm_join = f'\nLEFT JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm ON TRIM(LEADING \'0\' FROM cm."KUNNR") = TRIM(LEADING \'0\' FROM {f_alias}."dealer_code")\n'
                                         if re.search(r'\bWHERE\b', run_query, re.I):
                                             run_query = re.sub(r'(\bWHERE\b)', f'{cm_join}WHERE', run_query, count=1, flags=re.I)
                                         else:
                                             run_query += cm_join
 
                                     if "KLABC" not in run_query:
-                                        k_filter = "(cm.KLABC IS NULL OR cm.KLABC <> 'X')"
+                                        k_filter = "(cm.\"KLABC\" IS NULL OR cm.\"KLABC\" <> 'X')"
                                         if re.search(r'\bWHERE\s+', run_query, re.I):
                                             run_query = re.sub(r'(\bWHERE\s+)', f'\\1{k_filter} AND ', run_query, count=1, flags=re.I)
                                         else:
