@@ -3680,6 +3680,23 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
     clean_answer = re.sub(r'\s*\(source:[^)]*\)', '', clean_answer).strip()
     clean_answer = re.sub(r'\s*\[source:[^\]]*\]', '', clean_answer).strip()
 
+    # Clean raw vertical HTML tables (e.g. <th>Field</th> <th>Value</th>) when UI Table is available
+    if sql_results and re.search(r'<table>[\s\S]*?<th>\s*Field\s*</th>[\s\S]*?<th>\s*Value\s*</th>[\s\S]*?</table>', clean_answer, re.I):
+        if len(sql_results) == 1:
+            r0 = sql_results[0]
+            inv = r0.get("invoice_number", "")
+            cust = r0.get("Customer_name", r0.get("dealer_code", ""))
+            val = r0.get("invoice_value", 0)
+            qty = r0.get("Tyre_Quantity", 0)
+            dt = r0.get("invoice_date", "")
+            sku = r0.get("SKU", "")
+            desc = r0.get("Material_Description", "")
+            val_fmt = f"₹{val:,.2f}" if isinstance(val, (int, float)) else str(val)
+            qty_fmt = f"{qty:,}" if isinstance(qty, (int, float)) else str(qty)
+            clean_answer = f"**Invoice Details for #{inv}**\n\n• **Customer:** {cust}\n• **Invoice Date:** {dt}\n• **Invoice Value:** {val_fmt}\n• **Tyre Quantity:** {qty_fmt} units\n• **SKU:** {sku} ({desc})\n\n*The complete record details are displayed in the structured table below:*"
+        else:
+            clean_answer = f"Found {len(sql_results)} records matching your query. The complete details are displayed in the structured table below:"
+
     raw_fuq = res.get("follow_up_questions", [])
     fuq = []
     if isinstance(raw_fuq, list):
@@ -3695,7 +3712,7 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
     if status_callback and visualizations:
         status_callback("visualizing")
 
-    if understanding.get("intent") == "AGGREGATION":
+    if understanding.get("intent") == "AGGREGATION" or sql_results:
         if not sql_results:
             # Zero rows: Drop all hallucinated charts/tables so frontend never renders blank widgets
             visualizations = []
@@ -3720,9 +3737,10 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
             table_vis = None
             if total_rows <= csv_threshold:
                 # If row count <= threshold: show ALL rows in chat table
+                table_title = f"Data Table ({total_rows:,} records)" if total_rows > 1 else "Invoice & Record Details"
                 table_vis = {
                     "type": "table",
-                    "title": f"Data Table ({total_rows:,} records)",
+                    "title": table_title,
                     "columns": columns,
                     "data": sql_results,
                     "total_records": total_rows,
