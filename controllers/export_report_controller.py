@@ -45,95 +45,98 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day, return_wor
 
         rows_ws3 = []
 
-
-
-        # Check if session is connected to SAP HANA
-
-        from helper.sap_analytics_service import (
-
-            get_sap_connection_for_session,
-
-            query_domestic_sales_value_achievements_hana,
-
-            query_sales_numbers_hana,
-
-            query_sales_report_by_values_hana,
-
-            query_sales_summary_in_no_and_values_hana,
-
-            detect_sales_dates,
-
-        )
-
-
-
-        hana_conn, tunnel, schema = get_sap_connection_for_session(conn, session_id)
-
-        is_sap_session = bool(hana_conn)
-
-        if hana_conn:
-
-            print(f"[Excel Export] Detected SAP HANA connection for session {session_id}. Querying SAP views in schema '{schema}'...", flush=True)
-
-            try:
-
-                h_cur = hana_conn.cursor()
-
-                year, month, day = detect_sales_dates(h_cur, schema, year, month, day)
-
-                rows = query_domestic_sales_value_achievements_hana(h_cur, schema, year, month, day)
-
-                rows_ws1 = query_sales_numbers_hana(h_cur, schema, year, month, day)
-
-                rows_ws2 = query_sales_report_by_values_hana(h_cur, schema, year, month, day)
-
-                rows_ws3 = query_sales_summary_in_no_and_values_hana(h_cur, schema, year, month, day)
-
-                h_cur.close()
-
-            except Exception as e:
-
-                print(f"[Excel Export] Error executing SAP HANA queries: {e}", flush=True)
-
-            finally:
-
-                hana_conn.close()
-
-                if tunnel:
-
-                    tunnel.stop()
-
-        # Fallback to dedicated MySQL cache tables if empty
+        # Load directly from synced MySQL tables first (fast, reliable, no slow HANA query)
         ym_str = f"{year}{str(month).zfill(2)}"
-        if not rows and cursor:
+        if cursor:
             try:
                 cursor.execute("SELECT * FROM sales_summary_domestic_sales_value_achievement WHERE session_id=%s AND year_month=%s ORDER BY id ASC", (session_id, ym_str))
                 c_rows = cursor.fetchall()
                 if c_rows:
                     rows = c_rows
-                    print(f"[Excel Export] Sheet 1 loaded {len(rows)} rows from cache table.", flush=True)
+                    print(f"[Excel Export] Sheet 1 loaded {len(rows)} rows from synced table.", flush=True)
             except Exception as e:
-                print(f"[Excel Export] Note on cache fallback for sheet 1: {e}", flush=True)
+                print(f"[Excel Export] Note on table fetch for sheet 1: {e}", flush=True)
 
-        if not rows_ws1 and cursor:
             try:
                 cursor.execute("SELECT * FROM sales_summary_sales_numbers WHERE session_id=%s AND year_month=%s ORDER BY is_total ASC, sort_order ASC, category ASC", (session_id, ym_str))
                 c_rows1 = cursor.fetchall()
                 if c_rows1:
                     rows_ws1 = c_rows1
-                    print(f"[Excel Export] Sheet 2 loaded {len(rows_ws1)} rows from cache table.", flush=True)
+                    print(f"[Excel Export] Sheet 2 loaded {len(rows_ws1)} rows from synced table.", flush=True)
             except Exception as e:
-                print(f"[Excel Export] Note on cache fallback for sheet 2: {e}", flush=True)
+                print(f"[Excel Export] Note on table fetch for sheet 2: {e}", flush=True)
 
-        if not rows_ws2 and cursor:
             try:
-                cursor.execute("SELECT * FROM sales_summary_sales_report_by_values WHERE session_id=%s AND year_month=%s ORDER BY is_total ASC, sort_order ASC", (session_id, ym_str))
+                cursor.execute("""
+                    SELECT 
+                        `zone_name`,
+                        `prev_4w`, `prev_23w`, `prev_total`,
+                        `target_4w`, `target_23w`, `target_total`,
+                        `actual_4w`, `actual_23w`, `actual_total`,
+                        `achievement_pct`, `sale_for_the_day`, `asking_rate`,
+                        `achvt_4w`, `achvt_23w`, `achvt_total`
+                    FROM sales_summary_sales_report_by_values 
+                    WHERE session_id=%s AND year_month=%s 
+                    ORDER BY is_total ASC, sort_order ASC
+                """, (session_id, ym_str))
                 c_rows2 = cursor.fetchall()
                 if c_rows2:
                     rows_ws2 = c_rows2
-                    print(f"[Excel Export] Sheet 3 loaded {len(rows_ws2)} rows from cache table.", flush=True)
+                    print(f"[Excel Export] Sheet 3 loaded {len(rows_ws2)} rows from synced table.", flush=True)
             except Exception as e:
-                print(f"[Excel Export] Note on cache fallback for sheet 3: {e}", flush=True)
+                print(f"[Excel Export] Note on table fetch for sheet 3: {e}", flush=True)
+
+            try:
+                cursor.execute("""
+                    SELECT 
+                        `zone_name`, `row_type`, `val_4w`, `val_23w`, `val_total`,
+                        `tbb`, `tbr`, `lcv_b`, `lcv_r`, `scv_b`, `scv_r`,
+                        `car_b`, `car_r`, `jeep_b`, `jeep_r`, `tr_fro`, `tr_rear`,
+                        `tr_trail`, `adv`, `three_whlrs`, `scooter`, `motor`
+                    FROM sales_summary_no_values 
+                    WHERE session_id=%s AND year_month=%s 
+                    ORDER BY sort_order ASC
+                """, (session_id, ym_str))
+                c_rows3 = cursor.fetchall()
+                if c_rows3:
+                    rows_ws3 = c_rows3
+                    print(f"[Excel Export] Sheet 4 loaded {len(rows_ws3)} rows from synced table.", flush=True)
+            except Exception as e:
+                print(f"[Excel Export] Note on table fetch for sheet 4: {e}", flush=True)
+
+        is_sap_session = False
+        # Optional fallback to SAP HANA only if tables are completely empty
+        if not rows and not rows_ws1 and not rows_ws2 and not rows_ws3:
+            from helper.sap_analytics_service import (
+                get_sap_connection_for_session,
+                query_domestic_sales_value_achievements_hana,
+                query_sales_numbers_hana,
+                query_sales_report_by_values_hana,
+                query_sales_summary_in_no_and_values_hana,
+                detect_sales_dates,
+            )
+            hana_conn, tunnel, schema = get_sap_connection_for_session(conn, session_id)
+            is_sap_session = bool(hana_conn)
+            if hana_conn:
+                print(f"[Excel Export] Fallback to SAP HANA for session {session_id}...", flush=True)
+                try:
+                    h_cur = hana_conn.cursor()
+                    year, month, day = detect_sales_dates(h_cur, schema, year, month, day)
+                    if not rows:
+                        rows = query_domestic_sales_value_achievements_hana(h_cur, schema, year, month, day)
+                    if not rows_ws1:
+                        rows_ws1 = query_sales_numbers_hana(h_cur, schema, year, month, day)
+                    if not rows_ws2:
+                        rows_ws2 = query_sales_report_by_values_hana(h_cur, schema, year, month, day)
+                    if not rows_ws3:
+                        rows_ws3 = query_sales_summary_in_no_and_values_hana(h_cur, schema, year, month, day)
+                    h_cur.close()
+                except Exception as e:
+                    print(f"[Excel Export] Error executing SAP HANA fallback queries: {e}", flush=True)
+                finally:
+                    hana_conn.close()
+                    if tunnel:
+                        tunnel.stop()
 
 
 

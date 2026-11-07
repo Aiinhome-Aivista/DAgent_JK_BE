@@ -241,7 +241,7 @@ def query_sales_numbers_hana(cursor, schema, year_month: str, selected_date: str
 
     FACT_CLASSIFIED AS (
         SELECT
-            CONCAT(
+            (
                 COALESCE(
                     NULLIF(TRIM(sk."TYRE_TYPE"), ''),
                     NULLIF(TRIM(sk."TYRE_TP"), ''),
@@ -256,17 +256,17 @@ def query_sales_numbers_hana(cursor, schema, year_month: str, selected_date: str
                         ELSE NULLIF(TRIM(cat."CAT_DESC"), '')
                     END,
                     'OTHERS'
-                ),
-                ' - ',
+                )
+                || ' - ' ||
                 CASE
-                    WHEN sk."CONSTUCTION" IN (1, '1')
+                    WHEN CAST(sk."CONSTUCTION" AS VARCHAR) IN ('1', 'BIAS')
                          OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%BIAS%'
                          OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%B'
-                         OR UPPER(TRIM(COALESCE(sk."CONSTUCTION", ''))) = 'BIAS' THEN 'BIAS'
-                    WHEN sk."CONSTUCTION" IN (2, 5, '2', '5')
+                         OR UPPER(TRIM(CAST(COALESCE(sk."CONSTUCTION", '') AS VARCHAR))) = 'BIAS' THEN 'BIAS'
+                    WHEN CAST(sk."CONSTUCTION" AS VARCHAR) IN ('2', '5', 'RADIAL')
                          OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%RADIAL%'
                          OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%R%'
-                         OR UPPER(TRIM(COALESCE(sk."CONSTUCTION", ''))) = 'RADIAL' THEN 'RADIAL'
+                         OR UPPER(TRIM(CAST(COALESCE(sk."CONSTUCTION", '') AS VARCHAR))) = 'RADIAL' THEN 'RADIAL'
                     ELSE 'BIAS'
                 END
             ) AS Category,
@@ -316,7 +316,7 @@ def query_sales_numbers_hana(cursor, schema, year_month: str, selected_date: str
 
     AGG_TARGET AS (
         SELECT
-            CONCAT(
+            (
                 COALESCE(
                     NULLIF(TRIM(sk."TYRE_TYPE"), ''),
                     NULLIF(TRIM(sk."TYRE_TP"), ''),
@@ -332,17 +332,17 @@ def query_sales_numbers_hana(cursor, schema, year_month: str, selected_date: str
                         ELSE NULLIF(TRIM(cat."CAT_DESC"), '')
                     END,
                     'OTHERS'
-                ),
-                ' - ',
+                )
+                || ' - ' ||
                 CASE
-                    WHEN sk."CONSTUCTION" IN (1, '1')
+                    WHEN CAST(sk."CONSTUCTION" AS VARCHAR) IN ('1', 'BIAS')
                          OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%BIAS%'
                          OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%B'
-                         OR UPPER(TRIM(COALESCE(sk."CONSTUCTION", ''))) = 'BIAS' THEN 'BIAS'
-                    WHEN sk."CONSTUCTION" IN (2, 5, '2', '5')
+                         OR UPPER(TRIM(CAST(COALESCE(sk."CONSTUCTION", '') AS VARCHAR))) = 'BIAS' THEN 'BIAS'
+                    WHEN CAST(sk."CONSTUCTION" AS VARCHAR) IN ('2', '5', 'RADIAL')
                          OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%RADIAL%'
                          OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%R%'
-                         OR UPPER(TRIM(COALESCE(sk."CONSTUCTION", ''))) = 'RADIAL' THEN 'RADIAL'
+                         OR UPPER(TRIM(CAST(COALESCE(sk."CONSTUCTION", '') AS VARCHAR))) = 'RADIAL' THEN 'RADIAL'
                     ELSE 'BIAS'
                 END
             ) AS Category,
@@ -354,7 +354,7 @@ def query_sales_numbers_hana(cursor, schema, year_month: str, selected_date: str
             ON (COALESCE(NULLIF(TRIM(tgt."CAT_CODE"), ''), NULLIF(TRIM(sk."CAT_CODE"), '')) = TRIM(cat."CAT_CODE"))
         WHERE (CAST(tgt."YMONTH" AS VARCHAR) = '{year_month}' OR tgt."YMONTH" = '{year_month}')
         GROUP BY
-            CONCAT(
+            (
                 COALESCE(
                     NULLIF(TRIM(sk."TYRE_TYPE"), ''),
                     NULLIF(TRIM(sk."TYRE_TP"), ''),
@@ -370,17 +370,17 @@ def query_sales_numbers_hana(cursor, schema, year_month: str, selected_date: str
                         ELSE NULLIF(TRIM(cat."CAT_DESC"), '')
                     END,
                     'OTHERS'
-                ),
-                ' - ',
+                )
+                || ' - ' ||
                 CASE
-                    WHEN sk."CONSTUCTION" IN (1, '1')
+                    WHEN CAST(sk."CONSTUCTION" AS VARCHAR) IN ('1', 'BIAS')
                          OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%BIAS%'
                          OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%B'
-                         OR UPPER(TRIM(COALESCE(sk."CONSTUCTION", ''))) = 'BIAS' THEN 'BIAS'
-                    WHEN sk."CONSTUCTION" IN (2, 5, '2', '5')
+                         OR UPPER(TRIM(CAST(COALESCE(sk."CONSTUCTION", '') AS VARCHAR))) = 'BIAS' THEN 'BIAS'
+                    WHEN CAST(sk."CONSTUCTION" AS VARCHAR) IN ('2', '5', 'RADIAL')
                          OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%RADIAL%'
                          OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%R%'
-                         OR UPPER(TRIM(COALESCE(sk."CONSTUCTION", ''))) = 'RADIAL' THEN 'RADIAL'
+                         OR UPPER(TRIM(CAST(COALESCE(sk."CONSTUCTION", '') AS VARCHAR))) = 'RADIAL' THEN 'RADIAL'
                     ELSE 'BIAS'
                 END
             )

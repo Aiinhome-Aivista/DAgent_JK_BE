@@ -3376,18 +3376,18 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                             f_alias = "fact"
 
                                         if "ZIVF_CustomerMaster_01_MD" not in run_query:
-                                            cm_join = f'\nLEFT JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm ON TRIM(LEADING \'0\' FROM cm."KUNNR") = TRIM(LEADING \'0\' FROM {f_alias}."dealer_code")\n'
+                                            cm_join = f' LEFT JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm ON TRIM(LEADING \'0\' FROM cm."KUNNR") = TRIM(LEADING \'0\' FROM {f_alias}."dealer_code") '
                                             if re.search(r'\bWHERE\b', run_query, re.I):
                                                 run_query = re.sub(r'(\bWHERE\b)', f'{cm_join}WHERE', run_query, count=1, flags=re.I)
                                             else:
-                                                run_query += cm_join
+                                                run_query += f'{cm_join}'
 
                                             if "KLABC" not in run_query:
                                                 k_filter = "(cm.\"KLABC\" IS NULL OR cm.\"KLABC\" <> 'X')"
                                                 if re.search(r'\bWHERE\s+', run_query, re.I):
                                                     run_query = re.sub(r'(\bWHERE\s+)', f'\\1{k_filter} AND ', run_query, count=1, flags=re.I)
                                                 else:
-                                                    run_query += f'\nWHERE {k_filter}'
+                                                    run_query += f' WHERE {k_filter}'
                                         elif "KLABC" not in run_query:
                                             cm_m = re.search(r'"?ZIVF_CustomerMaster_01_MD"?\s+(?:AS\s+)?([a-zA-Z0-9_]+)', run_query, re.I)
                                             cm_alias = cm_m.group(1) if cm_m and cm_m.group(1).lower() not in SQL_RESERVED else "cm"
@@ -3395,22 +3395,23 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                             if re.search(r'\bWHERE\s+', run_query, re.I):
                                                 run_query = re.sub(r'(\bWHERE\s+)', f'\\1{k_filter} AND ', run_query, count=1, flags=re.I)
                                             else:
-                                                run_query += f'\nWHERE {k_filter}'
+                                                run_query += f' WHERE {k_filter}'
 
                                         if "indicator_cancel" not in run_query.lower():
                                             canc_filter = f'({f_alias}."indicator_cancel" IS NULL OR {f_alias}."indicator_cancel" NOT IN (\'X\', \'Y\', \'1\'))'
                                             if re.search(r'\bWHERE\s+', run_query, re.I):
                                                 run_query = re.sub(r'(\bWHERE\s+)', f'\\1{canc_filter} AND ', run_query, count=1, flags=re.I)
                                             else:
-                                                run_query += f'\nWHERE {canc_filter}'
+                                                run_query += f' WHERE {canc_filter}'
 
                                         if "distribution_channel" not in run_query.lower() and not re.search(r'\b(oem|stu|def|export|all\s+channels)\b', question, re.I):
                                             dc_filter = f'{f_alias}."distribution_channel" = \'10\''
                                             if re.search(r'\bWHERE\s+', run_query, re.I):
                                                 run_query = re.sub(r'(\bWHERE\s+)', f'\\1{dc_filter} AND ', run_query, count=1, flags=re.I)
                                             else:
-                                                run_query += f'\nWHERE {dc_filter}'
+                                                run_query += f' WHERE {dc_filter}'
 
+                                run_query = re.sub(r'\n{3,}', '\n\n', run_query).strip()
                                 sql_query = run_query
 
                                 print(f"[SQL_EXEC] Executing on SAP HANA:\n{run_query}")
