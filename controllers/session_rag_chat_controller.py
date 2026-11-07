@@ -3229,8 +3229,6 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                     )
 
                                 # Auto-heal malformed quotes e.g. 'Unknown" or "Unknown' from LLM repair
-                                run_query = re.sub(r"\'([a-zA-Z0-9_\s-]+)\"", r"'\1'", run_query)
-                                run_query = re.sub(r"\"([a-zA-Z0-9_\s-]+)\'", r"'\1'", run_query)
                                 run_query = re.sub(r"['\"]Unknown['\"]", "'Unknown'", run_query)
 
                                 # Auto-heal Zone Names: in ZIVF_ZoneMaster_01_TR, zm.NAME is 'NORTH', 'WEST', 'SOUTH', 'EAST', 'CENTRAL'
@@ -3377,7 +3375,7 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                             run_query = re.sub(r'("?ZPVF_SD_(?:CurrentSales|SalesHistory)_01_TR"?)(?!\s+AS |\s+[a-zA-Z0-9_]+)', r'\1 AS fact', run_query, count=1, flags=re.I)
                                             f_alias = "fact"
 
-                                        if "ZIVF_CustomerMaster_01_MD" not in run_query and ("dealer_code" in run_query or "customer" in question.lower() or "dealer" in question.lower()):
+                                        if "ZIVF_CustomerMaster_01_MD" not in run_query:
                                             cm_join = f'\nLEFT JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm ON TRIM(LEADING \'0\' FROM cm."KUNNR") = TRIM(LEADING \'0\' FROM {f_alias}."dealer_code")\n'
                                             if re.search(r'\bWHERE\b', run_query, re.I):
                                                 run_query = re.sub(r'(\bWHERE\b)', f'{cm_join}WHERE', run_query, count=1, flags=re.I)
@@ -3390,6 +3388,14 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                                     run_query = re.sub(r'(\bWHERE\s+)', f'\\1{k_filter} AND ', run_query, count=1, flags=re.I)
                                                 else:
                                                     run_query += f'\nWHERE {k_filter}'
+                                        elif "KLABC" not in run_query:
+                                            cm_m = re.search(r'"?ZIVF_CustomerMaster_01_MD"?\s+(?:AS\s+)?([a-zA-Z0-9_]+)', run_query, re.I)
+                                            cm_alias = cm_m.group(1) if cm_m and cm_m.group(1).lower() not in SQL_RESERVED else "cm"
+                                            k_filter = f'({cm_alias}."KLABC" IS NULL OR {cm_alias}."KLABC" <> \'X\')'
+                                            if re.search(r'\bWHERE\s+', run_query, re.I):
+                                                run_query = re.sub(r'(\bWHERE\s+)', f'\\1{k_filter} AND ', run_query, count=1, flags=re.I)
+                                            else:
+                                                run_query += f'\nWHERE {k_filter}'
 
                                         if "indicator_cancel" not in run_query.lower():
                                             canc_filter = f'({f_alias}."indicator_cancel" IS NULL OR {f_alias}."indicator_cancel" NOT IN (\'X\', \'Y\', \'1\'))'
@@ -3665,8 +3671,6 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                             if fix_json and fix_json.get("sql"):
                                 sql_query = fix_json.get("sql", "").strip()
                                 # Clean malformed quotes and mismatched identifiers from repair
-                                sql_query = re.sub(r"\'([a-zA-Z0-9_\s-]+)\"", r"'\1'", sql_query)
-                                sql_query = re.sub(r"\"([a-zA-Z0-9_\s-]+)\'", r"'\1'", sql_query)
                                 sql_query = re.sub(r"['\"]Unknown['\"]", "'Unknown'", sql_query)
                                 print(f"[SQL_REPAIR] Retrying with corrected SQL:\n{sql_query}")
                             else:
