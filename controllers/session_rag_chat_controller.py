@@ -3367,8 +3367,8 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                 SQL_RESERVED = {'where', 'group', 'order', 'inner', 'left', 'right', 'join', 'on', 'union', 'having', 'limit', 'as', 'from', 'select', 'set', 'by'}
 
                                 if is_hana and ("ZPVF_SD_CurrentSales_01_TR" in run_query or "ZPVF_SD_SalesHistory_01_TR" in run_query):
-                                    # Never inject joins or corrupt tables if query is a UNION ALL or subquery aggregate
-                                    is_subquery_union = "UNION" in run_query.upper() or ") AS " in run_query.upper()
+                                    # Avoid injecting into complex UNION queries
+                                    is_subquery_union = bool(re.search(r'\bUNION\b', run_query, re.I))
 
                                     if not is_subquery_union:
                                         m_f = re.search(r'("?ZPVF_SD_(?:CurrentSales|SalesHistory)_01_TR"?)\s+(?:AS\s+)?([a-zA-Z0-9_]+)', run_query, re.I)
