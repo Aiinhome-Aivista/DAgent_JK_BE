@@ -3358,44 +3358,52 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                 run_query = re.sub(r'\bGROUP\s+BY\s*;\s*$', ';', run_query, flags=re.IGNORECASE)
                                 run_query = re.sub(r'\bGROUP\s+BY\s*$', '', run_query, flags=re.IGNORECASE)
 
-                                # Mandate Customer Master join and KLABC <> 'X' filter for all Sales Fact queries (excludes scrap/test accounts)
+                                # Normalize SAP HANA Target Plan YMONTH comparisons to string to prevent (339, "invalid number")
+                                run_query = re.sub(r'([a-zA-Z0-9_."]*YMONTH"?\s*=\s*)(\d{6})\b', r"\1'\2'", run_query)
+                                run_query = re.sub(r'\bOR\s+[a-zA-Z0-9_."]*YMONTH"?\s*=\s*\d{6}\b', '', run_query)
+
+                                # Apply customer/cancel filters safely without corrupting subqueries or UNION statements
                                 SQL_RESERVED = {'where', 'group', 'order', 'inner', 'left', 'right', 'join', 'on', 'union', 'having', 'limit', 'as', 'from', 'select', 'set', 'by'}
 
                                 if is_hana and ("ZPVF_SD_CurrentSales_01_TR" in run_query or "ZPVF_SD_SalesHistory_01_TR" in run_query):
-                                    if "ZIVF_CustomerMaster_01_MD" not in run_query:
-                                        m_f = re.search(r'"?ZPVF_SD_(?:CurrentSales|SalesHistory)_01_TR"?\s+(?:AS\s+)?([a-zA-Z0-9_]+)', run_query, re.I)
-                                        f_alias = m_f.group(1) if (m_f and m_f.group(1).lower() not in SQL_RESERVED) else "fact"
-                                        if not m_f or m_f.group(1).lower() in SQL_RESERVED:
-                                            run_query = re.sub(r'("?ZPVF_SD_(?:CurrentSales|SalesHistory)_01_TR"?)(?!\s+AS|\s+[a-zA-Z0-9_]+)', r' AS fact', run_query, flags=re.I)
+                                    # Never inject joins or corrupt tables if query is a UNION ALL or subquery aggregate
+                                    is_subquery_union = "UNION" in run_query.upper() or ") AS " in run_query.upper()
+
+                                    if not is_subquery_union:
+                                        m_f = re.search(r'("?ZPVF_SD_(?:CurrentSales|SalesHistory)_01_TR"?)\s+(?:AS\s+)?([a-zA-Z0-9_]+)', run_query, re.I)
+                                        if m_f and m_f.group(2).lower() not in SQL_RESERVED:
+                                            f_alias = m_f.group(2)
+                                        else:
+                                            run_query = re.sub(r'("?ZPVF_SD_(?:CurrentSales|SalesHistory)_01_TR"?)(?!\s+AS |\s+[a-zA-Z0-9_]+)', r'\1 AS fact', run_query, count=1, flags=re.I)
                                             f_alias = "fact"
-                                        cm_join = f'\nLEFT JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm ON TRIM(LEADING \'0\' FROM cm."KUNNR") = TRIM(LEADING \'0\' FROM {f_alias}."dealer_code")\n'
-                                        if re.search(r'\bWHERE\b', run_query, re.I):
-                                            run_query = re.sub(r'(\bWHERE\b)', f'{cm_join}WHERE', run_query, count=1, flags=re.I)
-                                        else:
-                                            run_query += cm_join
 
-                                    if "KLABC" not in run_query:
-                                        k_filter = "(cm.\"KLABC\" IS NULL OR cm.\"KLABC\" <> 'X')"
-                                        if re.search(r'\bWHERE\s+', run_query, re.I):
-                                            run_query = re.sub(r'(\bWHERE\s+)', f'\\1{k_filter} AND ', run_query, count=1, flags=re.I)
-                                        else:
-                                            run_query += f'\nWHERE {k_filter}'
+                                        if "ZIVF_CustomerMaster_01_MD" not in run_query and ("dealer_code" in run_query or "customer" in question.lower() or "dealer" in question.lower()):
+                                            cm_join = f'\nLEFT JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm ON TRIM(LEADING \'0\' FROM cm."KUNNR") = TRIM(LEADING \'0\' FROM {f_alias}."dealer_code")\n'
+                                            if re.search(r'\bWHERE\b', run_query, re.I):
+                                                run_query = re.sub(r'(\bWHERE\b)', f'{cm_join}WHERE', run_query, count=1, flags=re.I)
+                                            else:
+                                                run_query += cm_join
 
-                                    # Guaranteed Filter 2: Cancellation filter (indicator_cancel <> 'X')
-                                    if "indicator_cancel" not in run_query.lower():
-                                        canc_filter = f'({f_alias}."indicator_cancel" IS NULL OR {f_alias}."indicator_cancel" NOT IN (\'X\', \'Y\', \'1\'))'
-                                        if re.search(r'\bWHERE\s+', run_query, re.I):
-                                            run_query = re.sub(r'(\bWHERE\s+)', f'\\1{canc_filter} AND ', run_query, count=1, flags=re.I)
-                                        else:
-                                            run_query += f'\nWHERE {canc_filter}'
+                                            if "KLABC" not in run_query:
+                                                k_filter = "(cm.\"KLABC\" IS NULL OR cm.\"KLABC\" <> 'X')"
+                                                if re.search(r'\bWHERE\s+', run_query, re.I):
+                                                    run_query = re.sub(r'(\bWHERE\s+)', f'\\1{k_filter} AND ', run_query, count=1, flags=re.I)
+                                                else:
+                                                    run_query += f'\nWHERE {k_filter}'
 
-                                    # Guaranteed Filter 3: Default replacement distribution channel (10) unless OEM/STU/DEF explicitly requested
-                                    if "distribution_channel" not in run_query.lower() and not re.search(r'\b(oem|stu|def|export|all\s+channels)\b', question, re.I):
-                                        dc_filter = f'{f_alias}."distribution_channel" = \'10\''
-                                        if re.search(r'\bWHERE\s+', run_query, re.I):
-                                            run_query = re.sub(r'(\bWHERE\s+)', f'\\1{dc_filter} AND ', run_query, count=1, flags=re.I)
-                                        else:
-                                            run_query += f'\nWHERE {dc_filter}'
+                                        if "indicator_cancel" not in run_query.lower():
+                                            canc_filter = f'({f_alias}."indicator_cancel" IS NULL OR {f_alias}."indicator_cancel" NOT IN (\'X\', \'Y\', \'1\'))'
+                                            if re.search(r'\bWHERE\s+', run_query, re.I):
+                                                run_query = re.sub(r'(\bWHERE\s+)', f'\\1{canc_filter} AND ', run_query, count=1, flags=re.I)
+                                            else:
+                                                run_query += f'\nWHERE {canc_filter}'
+
+                                        if "distribution_channel" not in run_query.lower() and not re.search(r'\b(oem|stu|def|export|all\s+channels)\b', question, re.I):
+                                            dc_filter = f'{f_alias}."distribution_channel" = \'10\''
+                                            if re.search(r'\bWHERE\s+', run_query, re.I):
+                                                run_query = re.sub(r'(\bWHERE\s+)', f'\\1{dc_filter} AND ', run_query, count=1, flags=re.I)
+                                            else:
+                                                run_query += f'\nWHERE {dc_filter}'
 
                                 sql_query = run_query
 
