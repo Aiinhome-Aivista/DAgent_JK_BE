@@ -1183,7 +1183,7 @@ def _save_history(get_fn, session_id, user_id, question, answer,
     from datetime import datetime
     _ensure_no_unique_on_chat_id(get_fn)  # drop UNIQUE once if needed
     conn = cur = None
-    visit = 1
+    visit = None
     try:
         conn = get_fn()
         cur  = _dict_cursor(conn)
@@ -1200,26 +1200,27 @@ def _save_history(get_fn, session_id, user_id, question, answer,
             """, (eid, int(user_id)))
             last = cur.fetchone()
 
-        if last:
+        if last and not force_new:
             turn  = (last["turn_index"] or 0) + 1
             visit = last["visit_number"]  # Keep same visit_number for the same chat conversation
             local = (last["local_turn_index"] or 0) + 1
         else:
             turn = local = 0
-            if visit_number and not force_new:
+            if visit_number and not force_new and str(visit_number) != "1":
                 try:
                     visit = int(visit_number)
                 except (ValueError, TypeError):
                     visit = None
 
-            if not visit:
+            if not visit or visit == 1:
                 cur.execute("""
-                    SELECT COALESCE(MAX(visit_number), 0) AS max_v
+                    SELECT COALESCE(MAX(visit_number), 1) AS max_v
                     FROM session_chat_history
                     WHERE session_id = %s
                 """, (session_id,))
                 max_v_row = cur.fetchone()
-                visit = (max_v_row["max_v"] + 1) if max_v_row else 1
+                max_v = max_v_row["max_v"] if max_v_row else 1
+                visit = max(int(max_v) + 1, 2)
 
         cur.execute("""
             INSERT INTO session_chat_history
@@ -2598,11 +2599,13 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
 
     # ── Resolve active chat_id ──────────────────────────────────
     active_chat_id = None
-    # Support both bool and string representations
-    force_new = str(data.get("is_new_query")).lower() == "true"
+    # User questions should never be appended to default system report (visit 1)
+    force_new = str(data.get("is_new_query")).lower() == "true" or not visit_number or str(visit_number) == "1"
+    effective_visit = None if force_new else visit_number
+    effective_client_chat = None if force_new else client_chat_id
     if user_id:
         active_chat_id, _ = _resolve_chat_id(
-            get_connection_func, session_id, user_id, source_chat_id, force_new, visit_number, client_chat_id
+            get_connection_func, session_id, user_id, source_chat_id, force_new, effective_visit, effective_client_chat
         )
 
     workspace_id = None

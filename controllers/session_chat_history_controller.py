@@ -680,6 +680,20 @@ def get_chat_history(get_connection_func):
         user_role_row = cur.fetchone()
         user_role = user_role_row['role_id'] if user_role_row else 2
 
+        # Auto-migrate: decouple user queries accidentally saved under visit_number = 1
+        try:
+            cur.execute("""
+                UPDATE session_chat_history
+                SET visit_number = id + 100
+                WHERE session_id = %s
+                  AND visit_number = 1
+                  AND question NOT LIKE 'default_%'
+                  AND question NOT IN ('Generated Session Analysis Report', 'Updated Analysis from newly uploaded files', 'Context Update')
+            """, (session_id,))
+            conn.commit()
+        except Exception as e:
+            print(f"[History Migration] Note: {e}", flush=True)
+
         if user_role in (1, 3, 4):
             # Admin, Super Admin, and Support User can see all chats for this session
             cur.execute("""
