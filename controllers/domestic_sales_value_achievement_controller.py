@@ -269,22 +269,6 @@ def query_domestic_sales_value_achievement_hana(cursor, schema, year_month: str,
             AND COALESCE(S."indicator_cancel", '') <> 'X'
 
             AND COALESCE(C.EXCLUDED_FLAG, 0) = 0
-
-            AND NOT EXISTS
-            (
-                SELECT 1
-
-                FROM "{schema}"."ZPVF_SD_CancelledSalesInvoice_01_TR" X
-
-                WHERE
-                    X."invoice_number" = S."invoice_number"
-
-                    AND X."plant" = S."plant"
-
-                    AND X."FKART" = S."FKART"
-
-                    AND X."indicator_cancel" = 'X'
-            )
     ),
 
     CLASSIFIED_SALES AS

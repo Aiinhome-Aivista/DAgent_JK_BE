@@ -246,14 +246,6 @@ def query_sales_summary_no_values_hana(cursor, schema, year_month: str, selected
             s."dealer_code",
             s."SKU"
         FROM SALES_BASE s
-        WHERE NOT EXISTS (
-            SELECT 1
-            FROM "{schema}"."ZPVF_SD_CancelledSalesInvoice_01_TR" x
-            WHERE x."invoice_number" = s."invoice_number"
-              AND x."plant" = s."plant"
-              AND x."FKART" = s."FKART"
-              AND x."indicator_cancel" = 'X'
-        )
     ),
 
     FACT_CLASSIFIED AS (
