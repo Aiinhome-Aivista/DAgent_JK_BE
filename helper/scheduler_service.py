@@ -25,6 +25,10 @@ def _execute_sync_task():
 
     start_t = time.time()
     try:
+        try:
+            record_scheduler_run(conn, "sync_dashboard_metrics", "running", 0.0)
+        except Exception as r_err:
+            print(f"[Scheduler] Could not set running status: {r_err}", flush=True)
         from helper.dashboard_cache_service import (
             ensure_key_metrics_table,
             ensure_sales_by_zone_table,

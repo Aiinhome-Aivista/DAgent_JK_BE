@@ -587,12 +587,12 @@ def save_data_to_table(mysql_conn, session_id: str, year_month: str, selected_da
 
         insert_sql = f"""
             INSERT INTO `{TABLE_NAME}` (
-                session_id, year_month, selected_date, category,
-                prev_year_act, target, total, achievement_pct, today,
-                dealer, distributor, fleet, others,
-                oem_target, oem_actual, stu_target, stu_actual,
-                def_target, def_actual, domestic_target, domestic_actual, domestic_achv_pct,
-                sort_order, is_total, last_synced_at
+                `session_id`, `year_month`, `selected_date`, `category`,
+                `prev_year_act`, `target`, `total`, `achievement_pct`, `today`,
+                `dealer`, `distributor`, `fleet`, `others`,
+                `oem_target`, `oem_actual`, `stu_target`, `stu_actual`,
+                `def_target`, `def_actual`, `domestic_target`, `domestic_actual`, `domestic_achv_pct`,
+                `sort_order`, `is_total`, `last_synced_at`
             ) VALUES (
                 %s, %s, %s, %s,
                 %s, %s, %s, %s, %s,
