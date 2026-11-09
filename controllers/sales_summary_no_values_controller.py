@@ -264,7 +264,7 @@ def query_sales_summary_no_values_hana(cursor, schema, year_month: str, selected
         LEFT JOIN "{schema}"."ZIVF_CategoryMaster_01_TR" cat 
             ON TRIM(sk."CAT_CODE") = TRIM(cat."CAT_CODE")
         LEFT JOIN "{schema}"."ZIVF_CustomerMaster_01_MD" cm 
-            ON (LTRIM(TRIM(s."dealer_code"), '0') = LTRIM(TRIM(cm."KUNNR"), '0') OR LPAD(TRIM(s."dealer_code"), 10, '0') = LPAD(TRIM(cm."KUNNR"), 10, '0'))
+            ON LTRIM(TRIM(s."dealer_code"), '0') = LTRIM(TRIM(cm."KUNNR"), '0')
         LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm 
             ON TRIM(cm."BZIRK") = TRIM(tm."BZIRK")
         LEFT JOIN "{schema}"."ZIVF_RegionMaster_MD_01" rm 

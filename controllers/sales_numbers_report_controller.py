@@ -270,11 +270,11 @@ def query_sales_numbers_hana(cursor, schema, year_month: str, selected_date: str
             COALESCE(cm."KLABC", '') AS klabc
         FROM SALES_FILTERED s
         LEFT JOIN "{schema}"."ZIVR_SKUMaster_01_TR" sk
-            ON (s."SKU" = sk."MATNR" OR TRIM(s."SKU") = TRIM(sk."MATNR") OR LTRIM(s."SKU", '0') = LTRIM(sk."MATNR", '0'))
+            ON LTRIM(TRIM(s."SKU"), '0') = LTRIM(TRIM(sk."MATNR"), '0')
         LEFT JOIN "{schema}"."ZIVF_CategoryMaster_01_TR" cat
             ON TRIM(sk."CAT_CODE") = TRIM(cat."CAT_CODE")
         LEFT JOIN "{schema}"."ZIVF_CustomerMaster_01_MD" cm
-            ON (LTRIM(TRIM(s."dealer_code"), '0') = LTRIM(TRIM(cm."KUNNR"), '0') OR LPAD(TRIM(s."dealer_code"), 10, '0') = LPAD(TRIM(cm."KUNNR"), 10, '0'))
+            ON LTRIM(TRIM(s."dealer_code"), '0') = LTRIM(TRIM(cm."KUNNR"), '0')
         WHERE (cm."KLABC" IS NULL OR UPPER(TRIM(cm."KLABC")) <> 'X')
     ),
 
@@ -341,7 +341,7 @@ def query_sales_numbers_hana(cursor, schema, year_month: str, selected_date: str
             SUM(COALESCE(NULLIF(tgt."ORG_PLAN", 0), NULLIF(tgt."REV_PLAN", 0), NULLIF(tgt."HO_PLAN", 0), NULLIF(tgt."REG_PLAN", 0), NULLIF(tgt."AREA_PLAN", 0), 0)) AS Target_Qty
         FROM "{schema}"."ZIVF_SD_Sales_Plan_Target_01_TR" tgt
         LEFT JOIN "{schema}"."ZIVR_SKUMaster_01_TR" sk
-            ON (tgt."MATNR" = sk."MATNR" OR TRIM(tgt."MATNR") = TRIM(sk."MATNR") OR LTRIM(tgt."MATNR", '0') = LTRIM(sk."MATNR", '0'))
+            ON LTRIM(TRIM(tgt."MATNR"), '0') = LTRIM(TRIM(sk."MATNR"), '0')
         LEFT JOIN "{schema}"."ZIVF_CategoryMaster_01_TR" cat
             ON (COALESCE(NULLIF(TRIM(tgt."CAT_CODE"), ''), NULLIF(TRIM(sk."CAT_CODE"), '')) = TRIM(cat."CAT_CODE"))
         WHERE (CAST(tgt."YMONTH" AS VARCHAR) = '{year_month}' OR tgt."YMONTH" = '{year_month}')
