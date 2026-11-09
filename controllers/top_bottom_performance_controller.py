@@ -257,7 +257,7 @@ def _compute_top_bottom_slice_mysql(cursor, user_db: str, dimension: str, days: 
 # Bulk Sync Function (Called by Scheduler & On-Demand)
 # ─────────────────────────────────────────────────────────────────────────────
 
-SUPPORTED_DIMENSIONS = ["Customers", "Dealers", "Territories", "Regions", "Materials"]
+SUPPORTED_DIMENSIONS = ["Customers", "Territories", "Regions", "Materials"]
 SUPPORTED_DAYS = [2, 3, 4, 5, 6]
 
 
