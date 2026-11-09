@@ -34,7 +34,7 @@ def get_scheduler_config_controller(get_db_connection):
         live_next_run = None
         if bool(cfg.get("is_active", True)):
             from helper.scheduler_service import get_next_run_time
-            live_next_run = get_next_run_time(cfg.get("schedule_time") or "19:00")
+            live_next_run = get_next_run_time(cfg.get("schedule_time") or "19:00", cfg.get("frequency") or "daily")
         
         display_next_run = live_next_run or (str(cfg["next_run_at"]) if cfg.get("next_run_at") else None)
 
@@ -80,7 +80,7 @@ def update_scheduler_config_controller(get_db_connection):
         next_run = reschedule_job(schedule_time, frequency, is_active)
         if not next_run and is_active:
             from helper.scheduler_service import get_next_run_time
-            next_run = get_next_run_time(schedule_time)
+            next_run = get_next_run_time(schedule_time, frequency)
 
         success = save_or_update_scheduler_config(
             conn,

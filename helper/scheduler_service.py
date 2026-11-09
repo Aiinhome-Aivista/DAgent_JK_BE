@@ -209,13 +209,23 @@ def _execute_sync_task():
 
             # 12. Executive Sales & Performance Analysis Summary (HANA Core KPIs + LLM Summary)
             t_step = time.time()
-            print(f"[Scheduler] ⏳ [12/12] Syncing Executive Sales & Performance Analysis Summary...", flush=True)
+            print(f"[Scheduler] ⏳ [12/13] Syncing Executive Sales & Performance Analysis Summary...", flush=True)
             try:
                 from controllers.session_analysis_controller import run_daily_session_analysis_scheduler
                 run_daily_session_analysis_scheduler(_get_db_conn_func, session_id=s_id)
-                print(f"[Scheduler] ✅ [12/12] Executive Analysis Summary synced in {round(time.time() - t_step, 2)}s", flush=True)
+                print(f"[Scheduler] ✅ [12/13] Executive Analysis Summary synced in {round(time.time() - t_step, 2)}s", flush=True)
             except Exception as e:
-                print(f"[Scheduler] ❌ [12/12] Error syncing executive_analysis_summary: {e}", flush=True)
+                print(f"[Scheduler] ❌ [12/13] Error syncing executive_analysis_summary: {e}", flush=True)
+
+            # 13. Top 10 & Bottom 10 Sales Performance (Dedicated table: dashboard_top_bottom_performance)
+            t_step = time.time()
+            print(f"[Scheduler] ⏳ [13/13] Syncing Top 10 & Bottom 10 Sales Performance (All Days & Dimensions)...", flush=True)
+            try:
+                from controllers.top_bottom_performance_controller import bulk_sync_top_bottom_performance
+                bulk_sync_top_bottom_performance(conn, s_id, u_id)
+                print(f"[Scheduler] ✅ [13/13] Top 10 & Bottom 10 Performance synced in {round(time.time() - t_step, 2)}s", flush=True)
+            except Exception as e:
+                print(f"[Scheduler] ❌ [13/13] Error syncing top_bottom_performance: {e}", flush=True)
 
             # Filter Metadata Cache
             try:
@@ -226,7 +236,7 @@ def _execute_sync_task():
             except Exception as e:
                 print(f"[Scheduler] Note on filters cache: {e}", flush=True)
 
-            print(f"[Scheduler] 🎉 Completed all 12 dashboard components (Key Metrics, 6 Charts, 4 Sales Summary Sheets & Executive Analysis) for '{ws_name}' in {round(time.time() - ws_start_t, 2)}s!", flush=True)
+            print(f"[Scheduler] 🎉 Completed all 13 dashboard components (Key Metrics, 7 Charts, 4 Sales Summary Sheets & Executive Analysis) for '{ws_name}' in {round(time.time() - ws_start_t, 2)}s!", flush=True)
             print(f"[Scheduler] ====================================================================\n", flush=True)
 
         duration = round(time.time() - start_t, 2)
@@ -276,6 +286,12 @@ def parse_schedule_trigger(schedule_time: str, frequency: str = "daily"):
         return CronTrigger(hour=hour_str, minute=minute)
     elif freq in ("thrice_daily", "3_times_daily"):
         hour_str = f"{hour},{(hour + 8) % 24},{(hour + 16) % 24}"
+        return CronTrigger(hour=hour_str, minute=minute)
+    elif freq in ("every_2_hours", "2_hours", "every_2_hour", "every_two_hours"):
+        # Run every 2 hours starting from the given schedule_time hour & minute
+        # e.g., if schedule_time is 11:45, runs at 11:45, 13:45 (1:45 PM), 15:45 (3:45 PM), 17:45 (5:45 PM), 19:45 (7:45 PM)...
+        hours = sorted(list(set((hour + 2 * i) % 24 for i in range(12))))
+        hour_str = ",".join(str(h) for h in hours)
         return CronTrigger(hour=hour_str, minute=minute)
     elif freq == "hourly":
         return CronTrigger(minute=minute)
@@ -361,7 +377,7 @@ def reschedule_job(schedule_time: str, frequency: str = "daily", is_active: bool
     return next_run_str
 
 
-def get_next_run_time(schedule_time: str = None):
+def get_next_run_time(schedule_time: str = None, frequency: str = "daily"):
     """Returns next run time string '%Y-%m-%d %H:%M:%S' from active APScheduler or computes it."""
     global _scheduler
     if _scheduler:
@@ -375,10 +391,34 @@ def get_next_run_time(schedule_time: str = None):
             now = datetime.now(ist)
             parts = str(schedule_time).strip().split(":")
             h, m = int(parts[0]), int(parts[1]) if len(parts) > 1 else 0
-            candidate = now.replace(hour=h, minute=m, second=0, microsecond=0)
-            if candidate <= now:
-                candidate += timedelta(days=1)
-            return candidate.strftime("%Y-%m-%d %H:%M:%S")
+
+            freq = (frequency or "daily").lower().strip()
+            if freq in ("every_2_hours", "2_hours", "every_2_hour", "every_two_hours"):
+                hours = sorted(list(set((h + 2 * i) % 24 for i in range(12))))
+                for day_offset in range(2):
+                    for hr in hours:
+                        cand = (now + timedelta(days=day_offset)).replace(hour=hr, minute=m, second=0, microsecond=0)
+                        if cand > now:
+                            return cand.strftime("%Y-%m-%d %H:%M:%S")
+            elif freq == "hourly":
+                cand = now.replace(minute=m, second=0, microsecond=0)
+                if cand <= now:
+                    cand += timedelta(hours=1)
+                return cand.strftime("%Y-%m-%d %H:%M:%S")
+            elif freq in ("twice_daily", "2_times_daily"):
+                candidates = [
+                    now.replace(hour=h, minute=m, second=0, microsecond=0),
+                    now.replace(hour=(h + 12) % 24, minute=m, second=0, microsecond=0)
+                ]
+                for cand in sorted(candidates):
+                    if cand > now:
+                        return cand.strftime("%Y-%m-%d %H:%M:%S")
+                return (min(candidates) + timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
+            else:
+                candidate = now.replace(hour=h, minute=m, second=0, microsecond=0)
+                if candidate <= now:
+                    candidate += timedelta(days=1)
+                return candidate.strftime("%Y-%m-%d %H:%M:%S")
         except Exception:
             pass
     return None

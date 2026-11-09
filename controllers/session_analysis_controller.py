@@ -773,7 +773,8 @@ def _compute_core_kpis(cursor) -> dict:
         return None
 
 
-    sales_tbl  = resolve("ZPVF_SD_SalesHistory_01_TR", "ZPVF_SD_CurrentSales_01_TR", "ZPVF_SD_CancelledSalesInvoice_01_TR", "sales_data")
+    sales_tbl  = resolve("ZPVF_SD_CurrentSales_01_TR", "ZPVF_SD_SalesHistory_01_TR", "sales_data")
+    canc_tbl   = resolve("ZPVF_SD_CancelledSalesInvoice_01_TR", "cancelledsalesinvoice", "cancelled_invoice")
     sku_tbl    = resolve("ZIVR_SKUMaster_01_TR", "material_master")
     cat_tbl    = resolve("ZIVF_CategoryMaster_01_TR", "category_master")
     cust_tbl   = resolve("ZIVF_CustomerMaster_01_MD", "customer_master")
@@ -798,6 +799,9 @@ def _compute_core_kpis(cursor) -> dict:
     col_sku      = "SKU"
     col_channel  = "distribution_channel"
     col_discount = "total_discount"
+    col_inv_num  = "invoice_number"
+    col_plant    = "plant"
+    col_fkart    = "FKART"
 
 
     try:
@@ -821,8 +825,19 @@ def _compute_core_kpis(cursor) -> dict:
             col_sku      = "SKU" if "sku" in cols_lower else "MATNR"
             col_channel  = "distribution_channel" if "distribution_channel" in cols_lower else "distribution__Channel"
             col_discount = "total_discount" if "total_discount" in cols_lower else "Total_Discount_INR"
+            col_inv_num  = "invoice_number" if "invoice_number" in cols_lower else "billing_document"
+            col_plant    = "plant" if "plant" in cols_lower else "WERKS"
+            col_fkart    = "FKART" if "fkart" in cols_lower else "billing_type"
     except Exception as e:
         print(f"[CoreKPI] Column detection failed on {sales_tbl}: {e}")
+
+    # Standard business filters matching SAP specification:
+    # 1. distribution_channel = 10 (Replacement Channel for primary sales)
+    # 2. indicator_cancel NOT IN ('X', 'Y', '1')
+    # 3. Exclude CancelledSalesInvoice
+    canc_filter = f"AND NOT EXISTS (SELECT 1 FROM `{canc_tbl}` c WHERE c.invoice_number = sd.{col_inv_num} AND c.plant = sd.{col_plant} AND c.FKART = sd.{col_fkart})" if (canc_tbl and is_sap) else ""
+    sales_where = f"WHERE sd.{col_date} IS NOT NULL AND (sd.{col_channel} = '10' OR sd.{col_channel} = 10) AND (sd.indicator_cancel IS NULL OR sd.indicator_cancel NOT IN ('X', 'Y', '1')) {canc_filter}" if is_sap else f"WHERE sd.{col_date} IS NOT NULL"
+    sales_where_all_channels = f"WHERE sd.{col_date} IS NOT NULL AND sd.{col_channel} IN ('10', '20', '30', '40', 10, 20, 30, 40) AND (sd.indicator_cancel IS NULL OR sd.indicator_cancel NOT IN ('X', 'Y', '1')) {canc_filter}" if is_sap else f"WHERE sd.{col_date} IS NOT NULL"
 
 
     def run(label, sql, required_tables=None):
@@ -844,30 +859,35 @@ def _compute_core_kpis(cursor) -> dict:
     run("total_revenue", f"""
         SELECT ROUND(SUM(sd.{col_revenue})/10000000, 2) AS Total_Revenue
         FROM `{sales_tbl}` sd
+        {sales_where}
     """, required_tables=[sales_tbl])
 
 
     run("total_quantity", f"""
         SELECT ROUND(SUM(sd.{col_qty}), 2) AS Total_Quantity
         FROM `{sales_tbl}` sd
+        {sales_where}
     """, required_tables=[sales_tbl])
 
 
     run("total_transactions", f"""
         SELECT COUNT(*) AS Total_Transactions
         FROM `{sales_tbl}` sd
+        {sales_where}
     """, required_tables=[sales_tbl])
 
 
     run("avg_transaction_value", f"""
-        SELECT ROUND(SUM(sd.{col_revenue})/COUNT(*), 2) AS Average_Transaction_Value
+        SELECT ROUND(SUM(sd.{col_revenue})/NULLIF(COUNT(*), 0), 2) AS Average_Transaction_Value
         FROM `{sales_tbl}` sd
+        {sales_where}
     """, required_tables=[sales_tbl])
 
 
     run("avg_selling_price", f"""
         SELECT ROUND(SUM(sd.{col_revenue})/NULLIF(SUM(sd.{col_qty}), 0), 2) AS Average_Selling_Price
         FROM `{sales_tbl}` sd
+        {sales_where}
     """, required_tables=[sales_tbl])
 
 
@@ -878,7 +898,7 @@ def _compute_core_kpis(cursor) -> dict:
             MONTHNAME(sd.{col_date}) AS Month_Name,
             ROUND(SUM(sd.{col_revenue})/10000000, 2) AS Revenue
         FROM `{sales_tbl}` sd
-        WHERE sd.{col_date} IS NOT NULL
+        {sales_where}
         GROUP BY
             YEAR(sd.{col_date}), MONTH(sd.{col_date}), MONTHNAME(sd.{col_date})
         ORDER BY Revenue DESC
@@ -892,7 +912,7 @@ def _compute_core_kpis(cursor) -> dict:
             MONTHNAME(sd.{col_date}) AS Month_Name,
             ROUND(SUM(sd.{col_revenue})/10000000, 2) AS Revenue
         FROM `{sales_tbl}` sd
-        WHERE sd.{col_date} IS NOT NULL
+        {sales_where}
         GROUP BY
             YEAR(sd.{col_date}), MONTH(sd.{col_date}), MONTHNAME(sd.{col_date})
         ORDER BY Revenue ASC
@@ -908,7 +928,7 @@ def _compute_core_kpis(cursor) -> dict:
                 MONTHNAME(sd.{col_date}) AS Month_Name,
                 (SUM(sd.{col_revenue})/10000000) AS Revenue
             FROM `{sales_tbl}` sd
-            WHERE sd.{col_date} IS NOT NULL
+            {sales_where}
             GROUP BY
                 YEAR(sd.{col_date}), MONTH(sd.{col_date}), MONTHNAME(sd.{col_date})
         ),
@@ -937,7 +957,7 @@ def _compute_core_kpis(cursor) -> dict:
                 MONTHNAME(sd.{col_date}) AS Month_Name,
                 (SUM(sd.{col_revenue})/10000000) AS Revenue
             FROM `{sales_tbl}` sd
-            WHERE sd.{col_date} IS NOT NULL
+            {sales_where}
             GROUP BY
                 YEAR(sd.{col_date}), MONTH(sd.{col_date}), MONTHNAME(sd.{col_date})
         ),
@@ -966,7 +986,8 @@ def _compute_core_kpis(cursor) -> dict:
                 ROUND(SUM(sd.{col_revenue})/10000000, 2) AS Revenue
             FROM `{sales_tbl}` sd
             JOIN `{sku_tbl}` sk ON sd.{col_sku} = sk.MATNR
-            JOIN `{cat_tbl}` cat ON sk.CAT_CODE = cat.CAT_CODE
+            LEFT JOIN `{cat_tbl}` cat ON sk.CAT_CODE = cat.CAT_CODE
+            {sales_where}
             GROUP BY category_name
             ORDER BY Revenue DESC
             LIMIT 1
@@ -979,7 +1000,8 @@ def _compute_core_kpis(cursor) -> dict:
                 ROUND(SUM(sd.{col_revenue})/10000000, 2) AS Revenue
             FROM `{sales_tbl}` sd
             JOIN `{sku_tbl}` sk ON sd.{col_sku} = sk.MATNR
-            JOIN `{cat_tbl}` cat ON sk.CAT_CODE = cat.CAT_CODE
+            LEFT JOIN `{cat_tbl}` cat ON sk.CAT_CODE = cat.CAT_CODE
+            {sales_where}
             GROUP BY category_name
             ORDER BY Revenue ASC
             LIMIT 1
@@ -992,6 +1014,7 @@ def _compute_core_kpis(cursor) -> dict:
             FROM `{sales_tbl}` sd
             JOIN `{sku_tbl}` sk ON sd.{col_sku} = sk.MATNR
             JOIN `{cat_tbl}` cat ON sk.category = cat.category_code
+            {sales_where}
             GROUP BY category_name
             ORDER BY Revenue DESC
             LIMIT 1
@@ -1005,6 +1028,7 @@ def _compute_core_kpis(cursor) -> dict:
             FROM `{sales_tbl}` sd
             JOIN `{sku_tbl}` sk ON sd.{col_sku} = sk.MATNR
             JOIN `{cat_tbl}` cat ON sk.category = cat.category_code
+            {sales_where}
             GROUP BY category_name
             ORDER BY Revenue ASC
             LIMIT 1
@@ -1023,7 +1047,8 @@ def _compute_core_kpis(cursor) -> dict:
                 ROUND(SUM(sd.{col_revenue})/10000000, 2) AS Revenue
             FROM `{sales_tbl}` sd
             JOIN `{sku_tbl}` sk ON sd.{col_sku} = sk.MATNR
-            WHERE (sk.CONSTUCTION IS NOT NULL AND sk.CONSTUCTION != '') OR (sk.BULD_TYPE IS NOT NULL AND sk.BULD_TYPE != '')
+            {sales_where}
+            AND ((sk.CONSTUCTION IS NOT NULL AND sk.CONSTUCTION != '') OR (sk.BULD_TYPE IS NOT NULL AND sk.BULD_TYPE != ''))
             GROUP BY construction_description
             ORDER BY Revenue DESC
             LIMIT 1
@@ -1082,6 +1107,7 @@ def _compute_core_kpis(cursor) -> dict:
                 ROUND(SUM(sd.{col_revenue})/10000000, 2) AS Revenue
             FROM `{sales_tbl}` sd
             JOIN `{sku_tbl}` sk ON sd.{col_sku} = sk.MATNR
+            {sales_where}
             GROUP BY product_name
             ORDER BY Revenue DESC
             LIMIT 5
@@ -1094,22 +1120,52 @@ def _compute_core_kpis(cursor) -> dict:
                 ROUND(SUM(sd.{col_revenue})/10000000, 2) AS Revenue
             FROM `{sales_tbl}` sd
             JOIN `{sku_tbl}` sk ON sd.{col_sku} = sk.MATNR
-            WHERE sk.MAKTX IS NOT NULL
+            {sales_where}
+            AND sk.MAKTX IS NOT NULL
             GROUP BY product_name
             ORDER BY Revenue ASC
             LIMIT 5
         """, required_tables=[sales_tbl, sku_tbl])
 
+        # Top 5 SKUs per Category
+        if cat_tbl:
+            col_cat_desc = "COALESCE(NULLIF(TRIM(cat.CAT_DESC), ''), 'Other Category')" if is_sap else "COALESCE(NULLIF(TRIM(cat.category_name), ''), 'Other Category')"
+            col_cat_code = "cat.CAT_CODE" if is_sap else "cat.category_code"
+            sku_cat_code = "sk.CAT_CODE" if is_sap else "sk.category"
+            run("top_skus_by_category", f"""
+                WITH CatSKU AS (
+                    SELECT 
+                        {col_cat_desc} AS category_name,
+                        {col_prod_name} AS sku_title,
+                        ROUND(SUM(sd.{col_revenue})/10000000, 2) AS revenue_cr,
+                        ROW_NUMBER() OVER(PARTITION BY {col_cat_desc} ORDER BY SUM(sd.{col_revenue}) DESC) AS rk
+                    FROM `{sales_tbl}` sd
+                    JOIN `{sku_tbl}` sk ON sd.{col_sku} = sk.MATNR
+                    LEFT JOIN `{cat_tbl}` cat ON {sku_cat_code} = {col_cat_code}
+                    {sales_where}
+                    GROUP BY category_name, sku_title
+                )
+                SELECT category_name, sku_title, revenue_cr
+                FROM CatSKU
+                WHERE rk <= 5
+                ORDER BY category_name, rk
+            """, required_tables=[sales_tbl, sku_tbl, cat_tbl])
+
 
     # ---------- 4. Customer Performance ----------
     if cust_tbl:
         col_cust_name = f"COALESCE(cm.NAME1, cm.BNAME, CONCAT('Unmapped Account (', sd.{col_cust}, ')'))" if is_sap else f"COALESCE(cm.Cname, CONCAT('Unmapped Account (', sd.{col_cust}, ')'))"
+        cust_filter_klabc = " AND (cm.KLABC IS NULL OR cm.KLABC <> 'X')" if is_sap else ""
+        cust_join = f"JOIN `{cust_tbl}` cm ON (sd.{col_cust} = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(sd.{col_cust} AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR))){cust_filter_klabc}"
+        cust_join_left = f"LEFT JOIN `{cust_tbl}` cm ON (sd.{col_cust} = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(sd.{col_cust} AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR))){cust_filter_klabc}"
+
         run("top_customer", f"""
             SELECT
                 {col_cust_name} AS Customer_Name,
                 ROUND(SUM(sd.{col_revenue})/10000000, 2) AS Revenue
             FROM `{sales_tbl}` sd
-            JOIN `{cust_tbl}` cm ON (sd.{col_cust} = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(sd.{col_cust} AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))
+            {cust_join}
+            {sales_where}
             GROUP BY Customer_Name
             ORDER BY Revenue DESC
             LIMIT 1
@@ -1121,7 +1177,8 @@ def _compute_core_kpis(cursor) -> dict:
                 {col_cust_name} AS Customer_Name,
                 ROUND(SUM(sd.{col_revenue})/10000000, 2) AS Revenue
             FROM `{sales_tbl}` sd
-            JOIN `{cust_tbl}` cm ON (sd.{col_cust} = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(sd.{col_cust} AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))
+            {cust_join}
+            {sales_where}
             GROUP BY Customer_Name
             ORDER BY Revenue DESC
             LIMIT 5
@@ -1129,40 +1186,125 @@ def _compute_core_kpis(cursor) -> dict:
 
 
         if is_sap:
+            # 1. Dealer Contribution % (Z001 or Channel DL)
+            run("dealer_contribution_pct", f"""
+                SELECT ROUND(SUM(CASE 
+                    WHEN TRIM(cm.KTOKD) = 'Z001' OR UPPER(TRIM(cm.CH_TYPE)) = 'DL'
+                    THEN sd.{col_revenue} ELSE 0 END) * 100.0 / NULLIF(SUM(sd.{col_revenue}), 0), 2) AS Dealer_Contribution_Percentage
+                FROM `{sales_tbl}` sd
+                {cust_join}
+                {sales_where}
+            """, required_tables=[sales_tbl, cust_tbl])
+
+            # 2. Fleet Contribution % (Z009 or Channel FL or KDGRP F*)
+            run("fleet_contribution_pct", f"""
+                SELECT ROUND(SUM(CASE 
+                    WHEN TRIM(cm.KTOKD) = 'Z009' 
+                      OR UPPER(TRIM(cm.CH_TYPE)) IN ('FL', 'FLEET', 'F') 
+                      OR UPPER(TRIM(cm.CH_TYPE)) LIKE '%FLEET%' 
+                      OR UPPER(TRIM(cm.KDGRP)) LIKE 'F%'
+                    THEN sd.{col_revenue} ELSE 0 END) * 100.0 / NULLIF(SUM(sd.{col_revenue}), 0), 2) AS Fleet_Contribution_Percentage
+                FROM `{sales_tbl}` sd
+                {cust_join}
+                {sales_where}
+            """, required_tables=[sales_tbl, cust_tbl])
+
+            # 3. Institutional Contribution % (Z004 or Channel IN)
+            run("institutional_contribution_pct", f"""
+                SELECT ROUND(SUM(CASE 
+                    WHEN TRIM(cm.KTOKD) = 'Z004' 
+                      OR UPPER(TRIM(cm.CH_TYPE)) IN ('IN', 'INST') 
+                      OR UPPER(TRIM(cm.KDGRP)) LIKE 'I%'
+                    THEN sd.{col_revenue} ELSE 0 END) * 100.0 / NULLIF(SUM(sd.{col_revenue}), 0), 2) AS Institutional_Contribution_Percentage
+                FROM `{sales_tbl}` sd
+                {cust_join}
+                {sales_where}
+            """, required_tables=[sales_tbl, cust_tbl])
+
+            # 4. OEM Contribution % (Calculated across all channels where OEM operates)
+            run("oem_contribution_pct", f"""
+                SELECT ROUND(SUM(CASE 
+                    WHEN CAST(sd.{col_channel} AS CHAR) = '20' 
+                      OR UPPER(TRIM(cm.CH_TYPE)) IN ('OE', 'OEM', 'O') 
+                      OR UPPER(TRIM(cm.CH_TYPE)) LIKE '%OEM%' 
+                      OR cm.KTOKD IN ('0002', 'Z002')
+                    THEN sd.{col_revenue} ELSE 0 END) * 100.0 / NULLIF(SUM(sd.{col_revenue}), 0), 2) AS OEM_Contribution_Percentage
+                FROM `{sales_tbl}` sd
+                {cust_join_left}
+                {sales_where_all_channels}
+            """, required_tables=[sales_tbl, cust_tbl])
+
+            # 5. Top Dealers (Dealer-wise Breakdown from Z001)
             run("top_dealers", f"""
                 SELECT
                     {col_cust_name} AS Dealer_Name,
-                    ROUND(SUM(sd.{col_revenue})/10000000, 2) AS Revenue
+                    ROUND(SUM(sd.{col_revenue})/10000000, 2) AS Revenue,
+                    ROUND(SUM(sd.{col_revenue}) * 100.0 / NULLIF((SELECT SUM({col_revenue}) FROM `{sales_tbl}` sd2 {sales_where.replace('sd.', 'sd2.')}), 0), 2) AS Contribution_Percentage
                 FROM `{sales_tbl}` sd
-                JOIN `{cust_tbl}` cm ON (sd.{col_cust} = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(sd.{col_cust} AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))
-                WHERE cm.KTOKD LIKE '%DEAL%' OR cm.CH_TYPE LIKE '%DEAL%' OR cm.DLR_CATG IS NOT NULL OR cm.NAME1 IS NOT NULL
+                {cust_join}
+                {sales_where}
+                WHERE TRIM(cm.KTOKD) = 'Z001' OR UPPER(TRIM(cm.CH_TYPE)) = 'DL'
                 GROUP BY Dealer_Name
                 ORDER BY Revenue DESC
                 LIMIT 5
             """, required_tables=[sales_tbl, cust_tbl])
 
-
-            run("dealer_contribution_pct", f"""
-                SELECT ROUND(SUM(sd.{col_revenue}) * 100 / NULLIF((SELECT SUM({col_revenue}) FROM `{sales_tbl}`), 0), 2) AS Dealer_Contribution_Percentage
+            # 6. Account Group Performance & Distribution (KTOKD-wise from SAP Customer Master)
+            run("account_group_distribution", f"""
+                SELECT 
+                    COALESCE(NULLIF(TRIM(cm.KTOKD), ''), 'Unassigned') AS account_group_code,
+                    CASE 
+                        WHEN TRIM(cm.KTOKD) = 'Z001' OR UPPER(TRIM(cm.CH_TYPE)) = 'DL' THEN 'Dealers / Trade Network (Z001)'
+                        WHEN TRIM(cm.KTOKD) = 'Z004' OR UPPER(TRIM(cm.CH_TYPE)) = 'IN' THEN 'Institutional Customers (Z004)'
+                        WHEN TRIM(cm.KTOKD) = 'Z009' OR UPPER(TRIM(cm.CH_TYPE)) = 'FL' THEN 'Fleet Customers (Z009)'
+                        WHEN TRIM(cm.KTOKD) = 'Z015' THEN 'Traders & Retailers (Z015)'
+                        WHEN TRIM(cm.KTOKD) = 'Z006' OR UPPER(TRIM(cm.CH_TYPE)) = 'GT' THEN 'Government & PSU (Z006)'
+                        WHEN TRIM(cm.KTOKD) = 'Z010' THEN 'Govt Special Accounts (Z010)'
+                        WHEN TRIM(cm.KTOKD) = 'Z007' THEN 'Heavy Equipment / OTR (Z007)'
+                        WHEN TRIM(cm.KTOKD) = 'Z005' THEN 'State Transport Undertakings (Z005)'
+                        WHEN TRIM(cm.KTOKD) = 'Z008' THEN 'Defense / GREF (Z008)'
+                        WHEN TRIM(cm.KTOKD) = 'Z002' THEN 'Defense / OEM (Z002)'
+                        WHEN TRIM(cm.KTOKD) = 'Z003' THEN 'Export / Overseas (Z003)'
+                        WHEN TRIM(cm.KTOKD) = 'Z011' THEN 'Retreaders & Commercial (Z011)'
+                        WHEN TRIM(cm.KTOKD) = 'Z026' THEN 'Inter-company (Cavendish) (Z026)'
+                        ELSE CONCAT('Account Group ', COALESCE(NULLIF(TRIM(cm.KTOKD), ''), 'Unassigned'))
+                    END AS account_group_name,
+                    COUNT(DISTINCT cm.KUNNR) AS active_customers,
+                    ROUND(SUM(sd.{col_revenue})/10000000, 2) AS revenue_cr,
+                    ROUND(SUM(sd.{col_qty}), 0) AS total_units,
+                    ROUND(SUM(sd.{col_revenue}) * 100.0 / NULLIF(
+                        (SELECT SUM({col_revenue}) 
+                         FROM `{sales_tbl}` sd2 
+                         WHERE {sales_where.replace('sd.', 'sd2.').replace('WHERE ', '')}
+                        ), 0), 2) AS contribution_percentage
                 FROM `{sales_tbl}` sd
-                JOIN `{cust_tbl}` cm ON (sd.{col_cust} = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(sd.{col_cust} AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))
-                WHERE cm.KTOKD LIKE '%DEAL%' OR cm.CH_TYPE LIKE '%DEAL%' OR cm.DLR_CATG IS NOT NULL
+                {cust_join}
+                {sales_where}
+                GROUP BY 
+                    cm.KTOKD,
+                    account_group_name
+                ORDER BY revenue_cr DESC
             """, required_tables=[sales_tbl, cust_tbl])
 
-
-            run("fleet_contribution_pct", f"""
-                SELECT ROUND(SUM(sd.{col_revenue}) * 100 / NULLIF((SELECT SUM({col_revenue}) FROM `{sales_tbl}`), 0), 2) AS Fleet_Contribution_Percentage
+            # 7. Top Account Group
+            run("top_account_group", f"""
+                SELECT
+                    CASE 
+                        WHEN TRIM(cm.KTOKD) = 'Z001' OR UPPER(TRIM(cm.CH_TYPE)) = 'DL' THEN 'Dealers / Trade Network (Z001)'
+                        WHEN TRIM(cm.KTOKD) = 'Z004' OR UPPER(TRIM(cm.CH_TYPE)) = 'IN' THEN 'Institutional Customers (Z004)'
+                        WHEN TRIM(cm.KTOKD) = 'Z009' OR UPPER(TRIM(cm.CH_TYPE)) = 'FL' THEN 'Fleet Customers (Z009)'
+                        WHEN TRIM(cm.KTOKD) = 'Z015' THEN 'Traders & Retailers (Z015)'
+                        WHEN TRIM(cm.KTOKD) = 'Z006' OR UPPER(TRIM(cm.CH_TYPE)) = 'GT' THEN 'Government & PSU (Z006)'
+                        ELSE CONCAT('Account Group ', COALESCE(NULLIF(TRIM(cm.KTOKD), ''), 'Unassigned'))
+                    END AS account_group_name,
+                    ROUND(SUM(sd.{col_revenue})/10000000, 2) AS revenue,
+                    ROUND(SUM(sd.{col_revenue}) * 100.0 / NULLIF((SELECT SUM({col_revenue}) FROM `{sales_tbl}` sd2 {sales_where.replace('sd.', 'sd2.')}), 0), 2) AS contribution_percentage
                 FROM `{sales_tbl}` sd
-                JOIN `{cust_tbl}` cm ON (sd.{col_cust} = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(sd.{col_cust} AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))
-                WHERE cm.KTOKD LIKE '%FLEET%' OR cm.CH_TYPE LIKE '%FLEET%' OR cm.KDGRP LIKE '%FLEET%'
-            """, required_tables=[sales_tbl, cust_tbl])
-
-
-            run("oem_contribution_pct", f"""
-                SELECT ROUND(SUM(sd.{col_revenue}) * 100 / NULLIF((SELECT SUM({col_revenue}) FROM `{sales_tbl}`), 0), 2) AS OEM_Contribution_Percentage
-                FROM `{sales_tbl}` sd
-                JOIN `{cust_tbl}` cm ON (sd.{col_cust} = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(sd.{col_cust} AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))
-                WHERE cm.KTOKD LIKE '%OEM%' OR cm.CH_TYPE LIKE '%OEM%' OR cm.KDGRP LIKE '%OEM%'
+                {cust_join}
+                {sales_where}
+                GROUP BY account_group_name
+                ORDER BY revenue DESC
+                LIMIT 1
             """, required_tables=[sales_tbl, cust_tbl])
         else:
             ag_tbl = resolve("account_group_master")
@@ -1212,13 +1354,147 @@ def _compute_core_kpis(cursor) -> dict:
             SELECT
                 {col_cust_name} AS Customer_Name,
                 ROUND(SUM(sd.{col_revenue})/10000000, 2) AS Revenue,
-                ROUND(SUM(sd.{col_revenue}) * 100 / NULLIF((SELECT SUM({col_revenue}) FROM `{sales_tbl}`), 0), 2) AS Contribution_Percentage
+                ROUND(SUM(sd.{col_revenue}) * 100 / NULLIF((SELECT SUM({col_revenue}) FROM `{sales_tbl}` sd2 {sales_where.replace('sd.', 'sd2.')}), 0), 2) AS Contribution_Percentage
             FROM `{sales_tbl}` sd
             JOIN `{cust_tbl}` cm ON (sd.{col_cust} = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(sd.{col_cust} AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))
+            {sales_where}
             GROUP BY Customer_Name
             ORDER BY Contribution_Percentage DESC
             LIMIT 5
         """, required_tables=[sales_tbl, cust_tbl])
+
+        # ---------- Last 30 Days Customer Performance & Churn Analytics ----------
+        run("top_customer_30d", f"""
+            SELECT
+                {col_cust_name} AS customer_name,
+                ROUND(SUM(sd.{col_revenue})/10000000, 2) AS revenue_cr
+            FROM `{sales_tbl}` sd
+            {cust_join}
+            CROSS JOIN (SELECT MAX(sd_max.{col_date}) AS max_dt FROM `{sales_tbl}` sd_max) md
+            {sales_where}
+            AND sd.{col_date} BETWEEN DATE_SUB(md.max_dt, INTERVAL 29 DAY) AND md.max_dt
+            GROUP BY customer_name
+            ORDER BY revenue_cr DESC
+            LIMIT 1
+        """, required_tables=[sales_tbl, cust_tbl])
+
+        run("worst_customer_30d", f"""
+            SELECT
+                {col_cust_name} AS customer_name,
+                ROUND(SUM(sd.{col_revenue})/10000000, 2) AS revenue_cr
+            FROM `{sales_tbl}` sd
+            {cust_join}
+            CROSS JOIN (SELECT MAX(sd_max.{col_date}) AS max_dt FROM `{sales_tbl}` sd_max) md
+            {sales_where}
+            AND sd.{col_date} BETWEEN DATE_SUB(md.max_dt, INTERVAL 29 DAY) AND md.max_dt
+            GROUP BY customer_name
+            HAVING SUM(sd.{col_revenue}) > 0
+            ORDER BY revenue_cr ASC
+            LIMIT 1
+        """, required_tables=[sales_tbl, cust_tbl])
+
+        run("top_5_customers_30d", f"""
+            SELECT
+                {col_cust_name} AS customer_name,
+                ROUND(SUM(sd.{col_revenue})/10000000, 2) AS revenue_cr
+            FROM `{sales_tbl}` sd
+            {cust_join}
+            CROSS JOIN (SELECT MAX(sd_max.{col_date}) AS max_dt FROM `{sales_tbl}` sd_max) md
+            {sales_where}
+            AND sd.{col_date} BETWEEN DATE_SUB(md.max_dt, INTERVAL 29 DAY) AND md.max_dt
+            GROUP BY customer_name
+            ORDER BY revenue_cr DESC
+            LIMIT 5
+        """, required_tables=[sales_tbl, cust_tbl])
+
+        run("bottom_5_customers_30d", f"""
+            SELECT
+                {col_cust_name} AS customer_name,
+                ROUND(SUM(sd.{col_revenue})/10000000, 2) AS revenue_cr
+            FROM `{sales_tbl}` sd
+            {cust_join}
+            CROSS JOIN (SELECT MAX(sd_max.{col_date}) AS max_dt FROM `{sales_tbl}` sd_max) md
+            {sales_where}
+            AND sd.{col_date} BETWEEN DATE_SUB(md.max_dt, INTERVAL 29 DAY) AND md.max_dt
+            GROUP BY customer_name
+            HAVING SUM(sd.{col_revenue}) > 0
+            ORDER BY revenue_cr ASC
+            LIMIT 5
+        """, required_tables=[sales_tbl, cust_tbl])
+
+        run("sales_decline_30d_summary", f"""
+            WITH customer_30d AS (
+                SELECT 
+                    sd.{col_cust} AS cust_code,
+                    SUM(CASE WHEN sd.{col_date} BETWEEN DATE_SUB(md.max_dt, INTERVAL 29 DAY) AND md.max_dt THEN sd.{col_revenue} ELSE 0 END) AS curr_rev,
+                    SUM(CASE WHEN sd.{col_date} BETWEEN DATE_SUB(md.max_dt, INTERVAL 59 DAY) AND DATE_SUB(md.max_dt, INTERVAL 30 DAY) THEN sd.{col_revenue} ELSE 0 END) AS prev_rev
+                FROM `{sales_tbl}` sd
+                CROSS JOIN (SELECT MAX(sd_max.{col_date}) AS max_dt FROM `{sales_tbl}` sd_max) md
+                {sales_where}
+                GROUP BY sd.{col_cust}
+                HAVING SUM(CASE WHEN sd.{col_date} BETWEEN DATE_SUB(md.max_dt, INTERVAL 59 DAY) AND DATE_SUB(md.max_dt, INTERVAL 30 DAY) THEN sd.{col_revenue} ELSE 0 END) > 0
+            )
+            SELECT 
+                COUNT(CASE WHEN (prev_rev - curr_rev) / prev_rev > 0.05 THEN 1 END) AS accounts_with_decline_gt_5pct,
+                COUNT(CASE WHEN (prev_rev - curr_rev) / prev_rev > 0.10 THEN 1 END) AS accounts_with_decline_gt_10pct
+            FROM customer_30d
+        """, required_tables=[sales_tbl])
+
+        run("worst_customers_steepest_decline_30d", f"""
+            WITH customer_30d AS (
+                SELECT 
+                    {col_cust_name} AS customer_name,
+                    SUM(CASE WHEN sd.{col_date} BETWEEN DATE_SUB(md.max_dt, INTERVAL 29 DAY) AND md.max_dt THEN sd.{col_revenue} ELSE 0 END) AS curr_rev,
+                    SUM(CASE WHEN sd.{col_date} BETWEEN DATE_SUB(md.max_dt, INTERVAL 59 DAY) AND DATE_SUB(md.max_dt, INTERVAL 30 DAY) THEN sd.{col_revenue} ELSE 0 END) AS prev_rev
+                FROM `{sales_tbl}` sd
+                {cust_join}
+                CROSS JOIN (SELECT MAX(sd_max.{col_date}) AS max_dt FROM `{sales_tbl}` sd_max) md
+                {sales_where}
+                GROUP BY customer_name
+                HAVING SUM(CASE WHEN sd.{col_date} BETWEEN DATE_SUB(md.max_dt, INTERVAL 59 DAY) AND DATE_SUB(md.max_dt, INTERVAL 30 DAY) THEN sd.{col_revenue} ELSE 0 END) > 100000
+            )
+            SELECT 
+                customer_name,
+                ROUND(curr_rev / 10000000, 2) AS current_30d_rev_cr,
+                ROUND(prev_rev / 10000000, 2) AS prev_30d_rev_cr,
+                ROUND((curr_rev - prev_rev) * 100.0 / NULLIF(prev_rev, 0), 2) AS decline_pct
+            FROM customer_30d
+            ORDER BY decline_pct ASC
+            LIMIT 5
+        """, required_tables=[sales_tbl, cust_tbl])
+
+        run("zero_billing_30d_accounts", f"""
+            WITH cust_billing AS (
+                SELECT 
+                    sd.{col_cust} AS cust_code,
+                    SUM(CASE WHEN sd.{col_date} BETWEEN DATE_SUB(md.max_dt, INTERVAL 29 DAY) AND md.max_dt THEN sd.{col_revenue} ELSE 0 END) AS curr_rev,
+                    SUM(sd.{col_revenue}) AS total_historical_rev
+                FROM `{sales_tbl}` sd
+                CROSS JOIN (SELECT MAX(sd_max.{col_date}) AS max_dt FROM `{sales_tbl}` sd_max) md
+                {sales_where}
+                GROUP BY sd.{col_cust}
+            )
+            SELECT 
+                COUNT(CASE WHEN curr_rev = 0 AND total_historical_rev >= 200000 THEN 1 END) AS high_risk_inactive_accounts_2lakh_plus,
+                COUNT(CASE WHEN curr_rev = 0 AND total_historical_rev > 0 THEN 1 END) AS total_zero_billing_accounts
+            FROM cust_billing
+        """, required_tables=[sales_tbl])
+
+        run("zero_units_30d_accounts", f"""
+            WITH cust_units AS (
+                SELECT 
+                    sd.{col_cust} AS cust_code,
+                    SUM(CASE WHEN sd.{col_date} BETWEEN DATE_SUB(md.max_dt, INTERVAL 29 DAY) AND md.max_dt THEN sd.{col_qty} ELSE 0 END) AS curr_units,
+                    SUM(sd.{col_qty}) AS total_historical_units
+                FROM `{sales_tbl}` sd
+                CROSS JOIN (SELECT MAX(sd_max.{col_date}) AS max_dt FROM `{sales_tbl}` sd_max) md
+                {sales_where}
+                GROUP BY sd.{col_cust}
+            )
+            SELECT 
+                COUNT(CASE WHEN curr_units = 0 AND total_historical_units > 0 THEN 1 END) AS zero_unit_active_counters
+            FROM cust_units
+        """, required_tables=[sales_tbl])
 
 
     # ---------- 5. Geography ----------
@@ -1239,6 +1515,7 @@ def _compute_core_kpis(cursor) -> dict:
                 {join_terr}
                 {join_reg}
                 {join_zone}
+                {sales_where}
                 GROUP BY Zone
                 ORDER BY Revenue DESC
                 LIMIT 1
@@ -1254,6 +1531,7 @@ def _compute_core_kpis(cursor) -> dict:
                 JOIN `{cust_tbl}` cm ON (sd.{col_cust} = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(sd.{col_cust} AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))
                 {join_terr}
                 {join_reg}
+                {sales_where}
                 GROUP BY region_name
                 ORDER BY Revenue DESC
                 LIMIT 1
@@ -1264,11 +1542,12 @@ def _compute_core_kpis(cursor) -> dict:
                 SELECT
                     COALESCE(rm.region_name, cm.REGIO, 'Unmapped Region') AS region_name,
                     ROUND(SUM(sd.{col_revenue})/10000000, 2) AS Revenue,
-                    ROUND(SUM(sd.{col_revenue}) * 100 / NULLIF((SELECT SUM({col_revenue}) FROM `{sales_tbl}`), 0), 2) AS Contribution_Percentage
+                    ROUND(SUM(sd.{col_revenue}) * 100 / NULLIF((SELECT SUM({col_revenue}) FROM `{sales_tbl}` sd2 {sales_where.replace('sd.', 'sd2.')}), 0), 2) AS Contribution_Percentage
                 FROM `{sales_tbl}` sd
                 JOIN `{cust_tbl}` cm ON (sd.{col_cust} = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(sd.{col_cust} AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))
                 {join_terr}
                 {join_reg}
+                {sales_where}
                 GROUP BY region_name
                 ORDER BY Revenue DESC
                 LIMIT 5
@@ -1283,6 +1562,7 @@ def _compute_core_kpis(cursor) -> dict:
                 FROM `{sales_tbl}` sd
                 JOIN `{cust_tbl}` cm ON (sd.{col_cust} = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(sd.{col_cust} AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))
                 JOIN `{terr_tbl}` tm ON cm.BZIRK = tm.BZIRK
+                {sales_where}
                 GROUP BY territory_name
                 ORDER BY Revenue DESC
                 LIMIT 1
@@ -1296,7 +1576,8 @@ def _compute_core_kpis(cursor) -> dict:
                 FROM `{sales_tbl}` sd
                 JOIN `{cust_tbl}` cm ON (sd.{col_cust} = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(sd.{col_cust} AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))
                 JOIN `{terr_tbl}` tm ON cm.BZIRK = tm.BZIRK
-                WHERE tm.NAME IS NOT NULL
+                {sales_where}
+                AND tm.NAME IS NOT NULL
                 GROUP BY territory_name
                 ORDER BY Revenue ASC
                 LIMIT 1
@@ -1310,11 +1591,61 @@ def _compute_core_kpis(cursor) -> dict:
                 FROM `{sales_tbl}` sd
                 JOIN `{cust_tbl}` cm ON (sd.{col_cust} = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(sd.{col_cust} AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))
                 JOIN `{terr_tbl}` tm ON cm.BZIRK = tm.BZIRK
-                WHERE tm.NAME IS NOT NULL
+                {sales_where}
+                AND tm.NAME IS NOT NULL
                 GROUP BY territory_name
                 ORDER BY Revenue ASC
                 LIMIT 5
             """, required_tables=[sales_tbl, cust_tbl, terr_tbl])
+
+            # ---------- Last 30 Days Geography Performance ----------
+            run("top_5_territories_30d", f"""
+                SELECT
+                    COALESCE(tm.NAME, cm.BZIRK, 'Unmapped Territory') AS territory_name,
+                    ROUND(SUM(sd.{col_revenue})/10000000, 2) AS revenue_cr
+                FROM `{sales_tbl}` sd
+                JOIN `{cust_tbl}` cm ON (sd.{col_cust} = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(sd.{col_cust} AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))
+                JOIN `{terr_tbl}` tm ON cm.BZIRK = tm.BZIRK
+                CROSS JOIN (SELECT MAX(sd_max.{col_date}) AS max_dt FROM `{sales_tbl}` sd_max) md
+                {sales_where}
+                AND sd.{col_date} BETWEEN DATE_SUB(md.max_dt, INTERVAL 29 DAY) AND md.max_dt
+                GROUP BY territory_name
+                ORDER BY revenue_cr DESC
+                LIMIT 5
+            """, required_tables=[sales_tbl, cust_tbl, terr_tbl])
+
+            run("worst_5_territories_30d", f"""
+                SELECT
+                    COALESCE(tm.NAME, cm.BZIRK, 'Unmapped Territory') AS territory_name,
+                    ROUND(SUM(sd.{col_revenue})/10000000, 2) AS revenue_cr
+                FROM `{sales_tbl}` sd
+                JOIN `{cust_tbl}` cm ON (sd.{col_cust} = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(sd.{col_cust} AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))
+                JOIN `{terr_tbl}` tm ON cm.BZIRK = tm.BZIRK
+                CROSS JOIN (SELECT MAX(sd_max.{col_date}) AS max_dt FROM `{sales_tbl}` sd_max) md
+                {sales_where}
+                AND sd.{col_date} BETWEEN DATE_SUB(md.max_dt, INTERVAL 29 DAY) AND md.max_dt
+                GROUP BY territory_name
+                HAVING SUM(sd.{col_revenue}) > 0
+                ORDER BY revenue_cr ASC
+                LIMIT 5
+            """, required_tables=[sales_tbl, cust_tbl, terr_tbl])
+
+            if reg_tbl:
+                run("top_5_regions_30d", f"""
+                    SELECT
+                        COALESCE(rm.region_name, cm.REGIO, 'Unmapped Region') AS region_name,
+                        ROUND(SUM(sd.{col_revenue})/10000000, 2) AS revenue_cr
+                    FROM `{sales_tbl}` sd
+                    JOIN `{cust_tbl}` cm ON (sd.{col_cust} = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(sd.{col_cust} AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))
+                    {join_terr}
+                    {join_reg}
+                    CROSS JOIN (SELECT MAX(sd_max.{col_date}) AS max_dt FROM `{sales_tbl}` sd_max) md
+                    {sales_where}
+                    AND sd.{col_date} BETWEEN DATE_SUB(md.max_dt, INTERVAL 29 DAY) AND md.max_dt
+                    GROUP BY region_name
+                    ORDER BY revenue_cr DESC
+                    LIMIT 5
+                """, required_tables=[sales_tbl, cust_tbl, reg_tbl])
 
 
     elif cust_tbl and terr_tbl and reg_tbl:
@@ -1410,6 +1741,7 @@ def _compute_core_kpis(cursor) -> dict:
     run("distribution_revenue", f"""
         SELECT CASE CAST(sd.{col_channel} AS CHAR) WHEN '10' THEN 'Replacement' WHEN '20' THEN 'OEM' WHEN '30' THEN 'STU' WHEN '40' THEN 'DEF' ELSE COALESCE(sd.{col_channel}, 'Other') END AS distribution_name, ROUND(SUM(sd.{col_revenue})/10000000, 2) AS Revenue
         FROM `{sales_tbl}` sd
+        {sales_where_all_channels}
         GROUP BY distribution_name
         ORDER BY Revenue DESC
     """, required_tables=[sales_tbl])
@@ -1418,6 +1750,7 @@ def _compute_core_kpis(cursor) -> dict:
     run("distribution_quantity", f"""
         SELECT CASE CAST(sd.{col_channel} AS CHAR) WHEN '10' THEN 'Replacement' WHEN '20' THEN 'OEM' WHEN '30' THEN 'STU' WHEN '40' THEN 'DEF' ELSE COALESCE(sd.{col_channel}, 'Other') END AS distribution_name, ROUND(SUM(sd.{col_qty}), 2) AS Quantity
         FROM `{sales_tbl}` sd
+        {sales_where_all_channels}
         GROUP BY distribution_name
         ORDER BY Quantity DESC
     """, required_tables=[sales_tbl])
@@ -1427,8 +1760,9 @@ def _compute_core_kpis(cursor) -> dict:
         SELECT
             CASE CAST(sd.{col_channel} AS CHAR) WHEN '10' THEN 'Replacement' WHEN '20' THEN 'OEM' WHEN '30' THEN 'STU' WHEN '40' THEN 'DEF' ELSE COALESCE(sd.{col_channel}, 'Other') END AS distribution_name,
             ROUND(SUM(sd.{col_revenue})/10000000, 2) AS Revenue,
-            ROUND(SUM(sd.{col_revenue}) * 100 / NULLIF((SELECT SUM({col_revenue}) FROM `{sales_tbl}`), 0), 2) AS Contribution_Percentage
+            ROUND(SUM(sd.{col_revenue}) * 100 / NULLIF((SELECT SUM({col_revenue}) FROM `{sales_tbl}` sd2 {sales_where_all_channels.replace('sd.', 'sd2.')}), 0), 2) AS Contribution_Percentage
         FROM `{sales_tbl}` sd
+        {sales_where_all_channels}
         GROUP BY distribution_name
         ORDER BY Revenue DESC
     """, required_tables=[sales_tbl])
@@ -1440,9 +1774,10 @@ def _compute_core_kpis(cursor) -> dict:
             ROUND(SUM(sd.{col_discount}), 2) AS discount_amount,
             ROUND(
                 ABS(SUM(sd.{col_discount})) * 100 /
-                NULLIF((SELECT SUM({col_revenue}) FROM `{sales_tbl}`), 0)
+                NULLIF((SELECT SUM({col_revenue}) FROM `{sales_tbl}` sd2 {sales_where.replace('sd.', 'sd2.')}), 0)
             , 2) AS discount_percentage
         FROM `{sales_tbl}` sd
+        {sales_where}
     """, required_tables=[sales_tbl])
 
 
@@ -1452,9 +1787,10 @@ def _compute_core_kpis(cursor) -> dict:
             CASE WHEN (
                 SELECT SUM(Revenue) FROM (
                     SELECT SUM(sd.{col_revenue}) AS Revenue FROM `{sales_tbl}` sd
+                    {sales_where}
                     GROUP BY sd.{col_cust} ORDER BY Revenue DESC LIMIT 10
                 ) t
-            ) > (SELECT SUM({col_revenue})*0.50 FROM `{sales_tbl}`)
+            ) > (SELECT SUM({col_revenue})*0.50 FROM `{sales_tbl}` sd2 {sales_where.replace('sd.', 'sd2.')})
             THEN 'High Customer Dependency' ELSE 'Normal' END AS Risk_Status
     """, required_tables=[sales_tbl])
 
@@ -1468,8 +1804,9 @@ def _compute_core_kpis(cursor) -> dict:
                     SELECT SUM(sd.{col_revenue}) FROM `{sales_tbl}` sd
                     JOIN `{cust_tbl}` cm ON (sd.{col_cust} = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(sd.{col_cust} AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))
                     {join_ag}
-                    WHERE {cond_dealer}
-                ) > (SELECT SUM({col_revenue})*0.60 FROM `{sales_tbl}`)
+                    {sales_where}
+                    AND ({cond_dealer})
+                ) > (SELECT SUM({col_revenue})*0.60 FROM `{sales_tbl}` sd2 {sales_where.replace('sd.', 'sd2.')})
                 THEN 'High Dealer Dependency' ELSE 'Normal' END AS Risk_Status
         """, required_tables=[sales_tbl, cust_tbl])
 
@@ -1521,23 +1858,26 @@ def _compute_core_kpis(cursor) -> dict:
         except Exception as e:
             print(f"[CoreKPI] Target column detection failed: {e}")
 
+        tgt_period_filter = f"WHERE st.YMONTH IN (SELECT DISTINCT DATE_FORMAT(sd.{col_date}, '%Y%m') FROM `{sales_tbl}` sd {sales_where})" if is_sap else ""
 
         run("target_performance", f"""
             SELECT
                 ROUND(SUM({col_tgt_val_expr})/10000000, 2) AS Total_Target_Value,
-                ROUND((SELECT SUM({col_revenue}) FROM `{sales_tbl}`)/10000000, 2) AS Total_Actual_Revenue,
-                ROUND(((SELECT SUM({col_revenue}) FROM `{sales_tbl}`) * 100) / NULLIF(SUM({col_tgt_val_expr}), 0), 2) AS Overall_Achievement_Percentage,
-                ROUND((SUM({col_tgt_val_expr}) - (SELECT SUM({col_revenue}) FROM `{sales_tbl}`))/10000000, 2) AS Target_Shortfall_Value
+                ROUND((SELECT SUM(sd.{col_revenue}) FROM `{sales_tbl}` sd {sales_where})/10000000, 2) AS Total_Actual_Revenue,
+                ROUND(((SELECT SUM(sd.{col_revenue}) FROM `{sales_tbl}` sd {sales_where}) * 100) / NULLIF(SUM({col_tgt_val_expr}), 0), 2) AS Overall_Achievement_Percentage,
+                ROUND((SUM({col_tgt_val_expr}) - (SELECT SUM(sd.{col_revenue}) FROM `{sales_tbl}` sd {sales_where}))/10000000, 2) AS Target_Shortfall_Value
             FROM `{target_tbl}` st
+            {tgt_period_filter}
         """, required_tables=[target_tbl, sales_tbl])
 
 
         run("target_vs_actual_quantity", f"""
             SELECT
                 ROUND(SUM({col_tgt_qty_expr}), 2) AS Total_Target_Quantity,
-                ROUND((SELECT SUM({col_qty}) FROM `{sales_tbl}`), 2) AS Total_Actual_Quantity,
-                ROUND(((SELECT SUM({col_qty}) FROM `{sales_tbl}`) * 100) / NULLIF(SUM({col_tgt_qty_expr}), 0), 2) AS Quantity_Achievement_Percentage
+                ROUND((SELECT SUM(sd.{col_qty}) FROM `{sales_tbl}` sd {sales_where}), 2) AS Total_Actual_Quantity,
+                ROUND(((SELECT SUM(sd.{col_qty}) FROM `{sales_tbl}` sd {sales_where}) * 100) / NULLIF(SUM({col_tgt_qty_expr}), 0), 2) AS Quantity_Achievement_Percentage
             FROM `{target_tbl}` st
+            {tgt_period_filter}
         """, required_tables=[target_tbl, sales_tbl])
 
 
@@ -1555,8 +1895,10 @@ def _compute_core_kpis(cursor) -> dict:
                     SELECT cm.BZIRK, SUM(sd.{col_revenue}) AS Actual_Revenue
                     FROM `{sales_tbl}` sd
                     JOIN `{cust_tbl}` cm ON (sd.{col_cust} = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(sd.{col_cust} AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))
+                    {sales_where}
                     GROUP BY cm.BZIRK
                 ) act ON st.{col_tgt_terr} = act.BZIRK
+                {tgt_period_filter}
                 GROUP BY territory_name, act.Actual_Revenue
                 ORDER BY Shortfall_Value DESC
                 LIMIT 5
@@ -1652,11 +1994,12 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
             kpis[label] = None
 
     # Common business sales filters matching exact specification:
-    # 1. distribution_channel = 10
+    # 1. distribution_channel = 10 (Replacement Channel for primary sales)
     # 2. indicator_cancel NOT IN ('X', 'Y', '1')
     # 3. Not in CancelledSalesInvoice (invoice_number, Plant, FKART)
     canc_filter = f'AND NOT EXISTS (SELECT 1 FROM "{schema}"."{canc_view}" c WHERE c."invoice_number" = s."invoice_number" AND c."plant" = s."plant" AND c."FKART" = s."FKART")' if canc_view else ''
     sales_where = f'WHERE s."invoice_date" IS NOT NULL AND (s."distribution_channel" = \'10\' OR s."distribution_channel" = 10) AND (s."indicator_cancel" IS NULL OR s."indicator_cancel" NOT IN (\'X\', \'Y\', \'1\')) {canc_filter}'
+    sales_where_all_channels = f'WHERE s."invoice_date" IS NOT NULL AND s."distribution_channel" IN (\'10\', \'20\', \'30\', \'40\', 10, 20, 30, 40) AND (s."indicator_cancel" IS NULL OR s."indicator_cancel" NOT IN (\'X\', \'Y\', \'1\')) {canc_filter}'
 
     # ---------- 1. Overall Performance ----------
     run("total_revenue", f"""
@@ -1854,11 +2197,40 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
             LIMIT 5
         """)
 
+        # Top 5 SKUs per Category
+        if cat_view:
+            run("top_skus_by_category", f"""
+                WITH CatSKU AS (
+                    SELECT 
+                        COALESCE(NULLIF(TRIM(cat."CAT_DESC"), ''), 'Other Category') AS category_name,
+                        COALESCE(NULLIF(TRIM(sk."MAKTX"), ''), NULLIF(TRIM(sk."PROD_TITLE"), ''), TRIM(s."SKU")) AS sku_title,
+                        ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue_cr,
+                        ROW_NUMBER() OVER(PARTITION BY COALESCE(NULLIF(TRIM(cat."CAT_DESC"), ''), 'Other Category') ORDER BY SUM(COALESCE(s."invoice_value", 0)) DESC) AS rk
+                    FROM "{schema}"."{sales_view}" s
+                    INNER JOIN "{schema}"."{sku_view}" sk ON TRIM(s."SKU") = TRIM(sk."MATNR")
+                    LEFT JOIN "{schema}"."{cat_view}" cat ON TRIM(sk."CAT_CODE") = TRIM(cat."CAT_CODE")
+                    {sales_where}
+                    GROUP BY COALESCE(NULLIF(TRIM(cat."CAT_DESC"), ''), 'Other Category'), COALESCE(NULLIF(TRIM(sk."MAKTX"), ''), NULLIF(TRIM(sk."PROD_TITLE"), ''), TRIM(s."SKU"))
+                )
+                SELECT category_name, sku_title, revenue_cr
+                FROM CatSKU
+                WHERE rk <= 5
+                ORDER BY category_name, rk
+            """)
+
     # ---------- 4. Customer Performance ----------
     # Customer Master business filter: KLABC <> 'X'
     if cust_view:
         cust_join = f"""
             INNER JOIN "{schema}"."{cust_view}" cm ON (
+                (s."dealer_code" = cm."KUNNR" OR
+                 LPAD(TRIM(s."dealer_code"), 10, '0') = cm."KUNNR" OR
+                 LTRIM(s."dealer_code", '0') = LTRIM(cm."KUNNR", '0'))
+                AND (cm."KLABC" IS NULL OR cm."KLABC" <> 'X')
+            )
+        """
+        cust_join_left = f"""
+            LEFT JOIN "{schema}"."{cust_view}" cm ON (
                 (s."dealer_code" = cm."KUNNR" OR
                  LPAD(TRIM(s."dealer_code"), 10, '0') = cm."KUNNR" OR
                  LTRIM(s."dealer_code", '0') = LTRIM(cm."KUNNR", '0'))
@@ -1889,42 +2261,297 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
             LIMIT 5
         """)
 
+        # 1. Dealer Contribution % (Z001 or Channel DL)
         run("dealer_contribution_pct", f"""
             SELECT ROUND(SUM(CASE 
-                WHEN s."distribution_channel" = '10' 
-                  OR UPPER(TRIM(cm."CH_TYPE")) IN ('DL', 'DEALER', 'REPL', 'D') 
-                  OR UPPER(TRIM(cm."CH_TYPE")) LIKE '%DEAL%' 
-                  OR cm."KTOKD" IN ('0001', 'Z001') 
+                WHEN TRIM(cm."KTOKD") = 'Z001' OR UPPER(TRIM(cm."CH_TYPE")) = 'DL'
                 THEN COALESCE(s."invoice_value", 0) ELSE 0 END) * 100.0 / NULLIF(SUM(COALESCE(s."invoice_value", 0)), 0), 2) AS dealer_contribution_percentage
             FROM "{schema}"."{sales_view}" s
             {cust_join}
             {sales_where}
         """)
 
+        # 2. Fleet Contribution % (Z009 or Channel FL or KDGRP F*)
         run("fleet_contribution_pct", f"""
             SELECT ROUND(SUM(CASE 
-                WHEN UPPER(TRIM(cm."CH_TYPE")) IN ('FL', 'FLEET', 'F') 
+                WHEN TRIM(cm."KTOKD") = 'Z009' 
+                  OR UPPER(TRIM(cm."CH_TYPE")) IN ('FL', 'FLEET', 'F') 
                   OR UPPER(TRIM(cm."CH_TYPE")) LIKE '%FLEET%' 
-                  OR UPPER(TRIM(cm."KDGRP")) LIKE '%FLEET%' 
-                  OR cm."KTOKD" IN ('0003', 'Z003') 
-                  OR UPPER(TRIM(cm."DLR_CATG")) LIKE '%FLEET%'
+                  OR UPPER(TRIM(cm."KDGRP")) LIKE 'F%'
                 THEN COALESCE(s."invoice_value", 0) ELSE 0 END) * 100.0 / NULLIF(SUM(COALESCE(s."invoice_value", 0)), 0), 2) AS fleet_contribution_percentage
             FROM "{schema}"."{sales_view}" s
             {cust_join}
             {sales_where}
         """)
 
-        run("oem_contribution_pct", f"""
+        # 3. Institutional Contribution % (Z004 or Channel IN)
+        run("institutional_contribution_pct", f"""
             SELECT ROUND(SUM(CASE 
-                WHEN s."distribution_channel" = '20' 
-                  OR UPPER(TRIM(cm."CH_TYPE")) IN ('OE', 'OEM', 'O') 
-                  OR UPPER(TRIM(cm."CH_TYPE")) LIKE '%OEM%' 
-                  OR UPPER(TRIM(cm."KDGRP")) LIKE '%OEM%' 
-                  OR cm."KTOKD" IN ('0002', 'Z002')
-                THEN COALESCE(s."invoice_value", 0) ELSE 0 END) * 100.0 / NULLIF(SUM(COALESCE(s."invoice_value", 0)), 0), 2) AS oem_contribution_percentage
+                WHEN TRIM(cm."KTOKD") = 'Z004' 
+                  OR UPPER(TRIM(cm."CH_TYPE")) IN ('IN', 'INST') 
+                  OR UPPER(TRIM(cm."KDGRP")) LIKE 'I%'
+                THEN COALESCE(s."invoice_value", 0) ELSE 0 END) * 100.0 / NULLIF(SUM(COALESCE(s."invoice_value", 0)), 0), 2) AS institutional_contribution_percentage
             FROM "{schema}"."{sales_view}" s
             {cust_join}
             {sales_where}
+        """)
+
+        # 4. OEM Contribution % (Calculated across all channels where OEM operates)
+        run("oem_contribution_pct", f"""
+            SELECT ROUND(SUM(CASE 
+                WHEN CAST(s."distribution_channel" AS VARCHAR(10)) = '20' 
+                  OR UPPER(TRIM(cm."CH_TYPE")) IN ('OE', 'OEM', 'O') 
+                  OR UPPER(TRIM(cm."CH_TYPE")) LIKE '%OEM%' 
+                  OR cm."KTOKD" IN ('0002', 'Z002')
+                THEN COALESCE(s."invoice_value", 0) ELSE 0 END) * 100.0 / NULLIF(SUM(COALESCE(s."invoice_value", 0)), 0), 2) AS oem_contribution_percentage
+            FROM "{schema}"."{sales_view}" s
+            {cust_join_left}
+            {sales_where_all_channels}
+        """)
+
+        # 5. Top Dealers (Dealer-wise Breakdown from Z001)
+        run("top_dealers", f"""
+            SELECT
+                COALESCE(NULLIF(TRIM(cm."NAME1"), ''), NULLIF(TRIM(cm."BNAME"), ''), TRIM(s."dealer_code")) AS dealer_name,
+                ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue,
+                ROUND(SUM(COALESCE(s."invoice_value", 0)) * 100.0 / NULLIF((SELECT SUM(COALESCE(s_tot."invoice_value", 0)) FROM "{schema}"."{sales_view}" s_tot {sales_where.replace('s."', 's_tot."')}), 0), 2) AS contribution_percentage
+            FROM "{schema}"."{sales_view}" s
+            {cust_join}
+            {sales_where}
+            WHERE TRIM(cm."KTOKD") = 'Z001' OR UPPER(TRIM(cm."CH_TYPE")) = 'DL'
+            GROUP BY COALESCE(NULLIF(TRIM(cm."NAME1"), ''), NULLIF(TRIM(cm."BNAME"), ''), TRIM(s."dealer_code"))
+            ORDER BY revenue DESC
+            LIMIT 5
+        """)
+
+        # 6. Account Group Performance & Distribution (KTOKD-wise from SAP Customer Master)
+        run("account_group_distribution", f"""
+            SELECT 
+                COALESCE(NULLIF(TRIM(cm."KTOKD"), ''), 'Unassigned') AS account_group_code,
+                CASE 
+                    WHEN TRIM(cm."KTOKD") = 'Z001' OR UPPER(TRIM(cm."CH_TYPE")) = 'DL' THEN 'Dealers / Trade Network (Z001)'
+                    WHEN TRIM(cm."KTOKD") = 'Z004' OR UPPER(TRIM(cm."CH_TYPE")) = 'IN' THEN 'Institutional Customers (Z004)'
+                    WHEN TRIM(cm."KTOKD") = 'Z009' OR UPPER(TRIM(cm."CH_TYPE")) = 'FL' THEN 'Fleet Customers (Z009)'
+                    WHEN TRIM(cm."KTOKD") = 'Z015' THEN 'Traders & Retailers (Z015)'
+                    WHEN TRIM(cm."KTOKD") = 'Z006' OR UPPER(TRIM(cm."CH_TYPE")) = 'GT' THEN 'Government & PSU (Z006)'
+                    WHEN TRIM(cm."KTOKD") = 'Z010' THEN 'Govt Special Accounts (Z010)'
+                    WHEN TRIM(cm."KTOKD") = 'Z007' THEN 'Heavy Equipment / OTR (Z007)'
+                    WHEN TRIM(cm."KTOKD") = 'Z005' THEN 'State Transport Undertakings (Z005)'
+                    WHEN TRIM(cm."KTOKD") = 'Z008' THEN 'Defense / GREF (Z008)'
+                    WHEN TRIM(cm."KTOKD") = 'Z002' THEN 'Defense / OEM (Z002)'
+                    WHEN TRIM(cm."KTOKD") = 'Z003' THEN 'Export / Overseas (Z003)'
+                    WHEN TRIM(cm."KTOKD") = 'Z011' THEN 'Retreaders & Commercial (Z011)'
+                    WHEN TRIM(cm."KTOKD") = 'Z026' THEN 'Inter-company (Cavendish) (Z026)'
+                    ELSE CONCAT('Account Group ', COALESCE(NULLIF(TRIM(cm."KTOKD"), ''), 'Unassigned'))
+                END AS account_group_name,
+                COUNT(DISTINCT cm."KUNNR") AS active_customers,
+                ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue_cr,
+                ROUND(SUM(COALESCE(s."Tyre_Quantity", 0)), 0) AS total_units,
+                ROUND(SUM(COALESCE(s."invoice_value", 0)) * 100.0 / NULLIF(
+                    (SELECT SUM(COALESCE(s_tot."invoice_value", 0)) 
+                     FROM "{schema}"."{sales_view}" s_tot 
+                     WHERE s_tot."distribution_channel" = '10'
+                       AND (s_tot."indicator_cancel" IS NULL OR s_tot."indicator_cancel" NOT IN ('X', 'Y', '1'))
+                    ), 0), 2) AS contribution_percentage
+            FROM "{schema}"."{sales_view}" s
+            {cust_join}
+            {sales_where}
+            GROUP BY 
+                cm."KTOKD",
+                CASE 
+                    WHEN TRIM(cm."KTOKD") = 'Z001' OR UPPER(TRIM(cm."CH_TYPE")) = 'DL' THEN 'Dealers / Trade Network (Z001)'
+                    WHEN TRIM(cm."KTOKD") = 'Z004' OR UPPER(TRIM(cm."CH_TYPE")) = 'IN' THEN 'Institutional Customers (Z004)'
+                    WHEN TRIM(cm."KTOKD") = 'Z009' OR UPPER(TRIM(cm."CH_TYPE")) = 'FL' THEN 'Fleet Customers (Z009)'
+                    WHEN TRIM(cm."KTOKD") = 'Z015' THEN 'Traders & Retailers (Z015)'
+                    WHEN TRIM(cm."KTOKD") = 'Z006' OR UPPER(TRIM(cm."CH_TYPE")) = 'GT' THEN 'Government & PSU (Z006)'
+                    WHEN TRIM(cm."KTOKD") = 'Z010' THEN 'Govt Special Accounts (Z010)'
+                    WHEN TRIM(cm."KTOKD") = 'Z007' THEN 'Heavy Equipment / OTR (Z007)'
+                    WHEN TRIM(cm."KTOKD") = 'Z005' THEN 'State Transport Undertakings (Z005)'
+                    WHEN TRIM(cm."KTOKD") = 'Z008' THEN 'Defense / GREF (Z008)'
+                    WHEN TRIM(cm."KTOKD") = 'Z002' THEN 'Defense / OEM (Z002)'
+                    WHEN TRIM(cm."KTOKD") = 'Z003' THEN 'Export / Overseas (Z003)'
+                    WHEN TRIM(cm."KTOKD") = 'Z011' THEN 'Retreaders & Commercial (Z011)'
+                    WHEN TRIM(cm."KTOKD") = 'Z026' THEN 'Inter-company (Cavendish) (Z026)'
+                    ELSE CONCAT('Account Group ', COALESCE(NULLIF(TRIM(cm."KTOKD"), ''), 'Unassigned'))
+                END
+            ORDER BY revenue_cr DESC
+        """)
+
+        # 7. Top Account Group
+        run("top_account_group", f"""
+            SELECT
+                CASE 
+                    WHEN TRIM(cm."KTOKD") = 'Z001' OR UPPER(TRIM(cm."CH_TYPE")) = 'DL' THEN 'Dealers / Trade Network (Z001)'
+                    WHEN TRIM(cm."KTOKD") = 'Z004' OR UPPER(TRIM(cm."CH_TYPE")) = 'IN' THEN 'Institutional Customers (Z004)'
+                    WHEN TRIM(cm."KTOKD") = 'Z009' OR UPPER(TRIM(cm."CH_TYPE")) = 'FL' THEN 'Fleet Customers (Z009)'
+                    WHEN TRIM(cm."KTOKD") = 'Z015' THEN 'Traders & Retailers (Z015)'
+                    WHEN TRIM(cm."KTOKD") = 'Z006' OR UPPER(TRIM(cm."CH_TYPE")) = 'GT' THEN 'Government & PSU (Z006)'
+                    ELSE CONCAT('Account Group ', COALESCE(NULLIF(TRIM(cm."KTOKD"), ''), 'Unassigned'))
+                END AS top_account_group,
+                ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue,
+                ROUND(SUM(COALESCE(s."invoice_value", 0)) * 100.0 / NULLIF((SELECT SUM(COALESCE(s_tot."invoice_value", 0)) FROM "{schema}"."{sales_view}" s_tot {sales_where.replace('s."', 's_tot."')}), 0), 2) AS contribution_percentage
+            FROM "{schema}"."{sales_view}" s
+            {cust_join}
+            {sales_where}
+            GROUP BY 
+                CASE 
+                    WHEN TRIM(cm."KTOKD") = 'Z001' OR UPPER(TRIM(cm."CH_TYPE")) = 'DL' THEN 'Dealers / Trade Network (Z001)'
+                    WHEN TRIM(cm."KTOKD") = 'Z004' OR UPPER(TRIM(cm."CH_TYPE")) = 'IN' THEN 'Institutional Customers (Z004)'
+                    WHEN TRIM(cm."KTOKD") = 'Z009' OR UPPER(TRIM(cm."CH_TYPE")) = 'FL' THEN 'Fleet Customers (Z009)'
+                    WHEN TRIM(cm."KTOKD") = 'Z015' THEN 'Traders & Retailers (Z015)'
+                    WHEN TRIM(cm."KTOKD") = 'Z006' OR UPPER(TRIM(cm."CH_TYPE")) = 'GT' THEN 'Government & PSU (Z006)'
+                    ELSE CONCAT('Account Group ', COALESCE(NULLIF(TRIM(cm."KTOKD"), ''), 'Unassigned'))
+                END
+            ORDER BY revenue DESC
+            LIMIT 1
+        """)
+
+        # 8. Customer Concentration Risk
+        run("customer_concentration", f"""
+            SELECT
+                COALESCE(NULLIF(TRIM(cm."NAME1"), ''), NULLIF(TRIM(cm."BNAME"), ''), TRIM(s."dealer_code")) AS customer_name,
+                ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue,
+                ROUND(SUM(COALESCE(s."invoice_value", 0)) * 100.0 / NULLIF((SELECT SUM(COALESCE(s_tot."invoice_value", 0)) FROM "{schema}"."{sales_view}" s_tot {sales_where.replace('s."', 's_tot."')}), 0), 2) AS contribution_percentage
+            FROM "{schema}"."{sales_view}" s
+            {cust_join}
+            {sales_where}
+            GROUP BY COALESCE(NULLIF(TRIM(cm."NAME1"), ''), NULLIF(TRIM(cm."BNAME"), ''), TRIM(s."dealer_code"))
+            ORDER BY revenue DESC
+            LIMIT 5
+        """)
+
+        # ---------- Last 30 Days Customer Performance & Churn Analytics ----------
+        # Note: Latest available transaction date in dataset serves as max_dt anchor
+        run("top_customer_30d", f"""
+            SELECT
+                COALESCE(NULLIF(TRIM(cm."NAME1"), ''), NULLIF(TRIM(cm."BNAME"), ''), TRIM(s."dealer_code")) AS customer_name,
+                ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue_cr
+            FROM "{schema}"."{sales_view}" s
+            {cust_join}
+            CROSS JOIN (SELECT MAX(s_max."invoice_date") AS max_dt FROM "{schema}"."{sales_view}" s_max) md
+            {sales_where}
+            AND s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -29) AND md.max_dt
+            GROUP BY COALESCE(NULLIF(TRIM(cm."NAME1"), ''), NULLIF(TRIM(cm."BNAME"), ''), TRIM(s."dealer_code"))
+            ORDER BY revenue_cr DESC
+            LIMIT 1
+        """)
+
+        run("worst_customer_30d", f"""
+            SELECT
+                COALESCE(NULLIF(TRIM(cm."NAME1"), ''), NULLIF(TRIM(cm."BNAME"), ''), TRIM(s."dealer_code")) AS customer_name,
+                ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue_cr
+            FROM "{schema}"."{sales_view}" s
+            {cust_join}
+            CROSS JOIN (SELECT MAX(s_max."invoice_date") AS max_dt FROM "{schema}"."{sales_view}" s_max) md
+            {sales_where}
+            AND s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -29) AND md.max_dt
+            GROUP BY COALESCE(NULLIF(TRIM(cm."NAME1"), ''), NULLIF(TRIM(cm."BNAME"), ''), TRIM(s."dealer_code"))
+            HAVING SUM(COALESCE(s."invoice_value", 0)) > 0
+            ORDER BY revenue_cr ASC
+            LIMIT 1
+        """)
+
+        run("top_5_customers_30d", f"""
+            SELECT
+                COALESCE(NULLIF(TRIM(cm."NAME1"), ''), NULLIF(TRIM(cm."BNAME"), ''), TRIM(s."dealer_code")) AS customer_name,
+                ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue_cr
+            FROM "{schema}"."{sales_view}" s
+            {cust_join}
+            CROSS JOIN (SELECT MAX(s_max."invoice_date") AS max_dt FROM "{schema}"."{sales_view}" s_max) md
+            {sales_where}
+            AND s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -29) AND md.max_dt
+            GROUP BY COALESCE(NULLIF(TRIM(cm."NAME1"), ''), NULLIF(TRIM(cm."BNAME"), ''), TRIM(s."dealer_code"))
+            ORDER BY revenue_cr DESC
+            LIMIT 5
+        """)
+
+        run("bottom_5_customers_30d", f"""
+            SELECT
+                COALESCE(NULLIF(TRIM(cm."NAME1"), ''), NULLIF(TRIM(cm."BNAME"), ''), TRIM(s."dealer_code")) AS customer_name,
+                ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue_cr
+            FROM "{schema}"."{sales_view}" s
+            {cust_join}
+            CROSS JOIN (SELECT MAX(s_max."invoice_date") AS max_dt FROM "{schema}"."{sales_view}" s_max) md
+            {sales_where}
+            AND s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -29) AND md.max_dt
+            GROUP BY COALESCE(NULLIF(TRIM(cm."NAME1"), ''), NULLIF(TRIM(cm."BNAME"), ''), TRIM(s."dealer_code"))
+            HAVING SUM(COALESCE(s."invoice_value", 0)) > 0
+            ORDER BY revenue_cr ASC
+            LIMIT 5
+        """)
+
+        run("sales_decline_30d_summary", f"""
+            WITH customer_30d AS (
+                SELECT 
+                    s."dealer_code",
+                    SUM(CASE WHEN s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -29) AND md.max_dt THEN COALESCE(s."invoice_value", 0) ELSE 0 END) AS curr_rev,
+                    SUM(CASE WHEN s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -59) AND ADD_DAYS(md.max_dt, -30) THEN COALESCE(s."invoice_value", 0) ELSE 0 END) AS prev_rev
+                FROM "{schema}"."{sales_view}" s
+                CROSS JOIN (SELECT MAX(s_max."invoice_date") AS max_dt FROM "{schema}"."{sales_view}" s_max) md
+                {sales_where}
+                GROUP BY s."dealer_code"
+                HAVING SUM(CASE WHEN s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -59) AND ADD_DAYS(md.max_dt, -30) THEN COALESCE(s."invoice_value", 0) ELSE 0 END) > 0
+            )
+            SELECT 
+                COUNT(CASE WHEN (prev_rev - curr_rev) * 1.0 / prev_rev > 0.05 THEN 1 END) AS accounts_with_decline_gt_5pct,
+                COUNT(CASE WHEN (prev_rev - curr_rev) * 1.0 / prev_rev > 0.10 THEN 1 END) AS accounts_with_decline_gt_10pct
+            FROM customer_30d
+        """)
+
+        run("worst_customers_steepest_decline_30d", f"""
+            WITH customer_30d AS (
+                SELECT 
+                    COALESCE(NULLIF(TRIM(cm."NAME1"), ''), NULLIF(TRIM(cm."BNAME"), ''), TRIM(s."dealer_code")) AS customer_name,
+                    SUM(CASE WHEN s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -29) AND md.max_dt THEN COALESCE(s."invoice_value", 0) ELSE 0 END) AS curr_rev,
+                    SUM(CASE WHEN s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -59) AND ADD_DAYS(md.max_dt, -30) THEN COALESCE(s."invoice_value", 0) ELSE 0 END) AS prev_rev
+                FROM "{schema}"."{sales_view}" s
+                {cust_join}
+                CROSS JOIN (SELECT MAX(s_max."invoice_date") AS max_dt FROM "{schema}"."{sales_view}" s_max) md
+                {sales_where}
+                GROUP BY COALESCE(NULLIF(TRIM(cm."NAME1"), ''), NULLIF(TRIM(cm."BNAME"), ''), TRIM(s."dealer_code"))
+                HAVING SUM(CASE WHEN s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -59) AND ADD_DAYS(md.max_dt, -30) THEN COALESCE(s."invoice_value", 0) ELSE 0 END) > 100000
+            )
+            SELECT 
+                customer_name,
+                ROUND(curr_rev / 10000000.0, 2) AS current_30d_rev_cr,
+                ROUND(prev_rev / 10000000.0, 2) AS prev_30d_rev_cr,
+                ROUND((curr_rev - prev_rev) * 100.0 / NULLIF(prev_rev, 0), 2) AS decline_pct
+            FROM customer_30d
+            ORDER BY decline_pct ASC
+            LIMIT 5
+        """)
+
+        run("zero_billing_30d_accounts", f"""
+            WITH cust_billing AS (
+                SELECT 
+                    s."dealer_code",
+                    SUM(CASE WHEN s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -29) AND md.max_dt THEN COALESCE(s."invoice_value", 0) ELSE 0 END) AS curr_rev,
+                    SUM(COALESCE(s."invoice_value", 0)) AS total_historical_rev
+                FROM "{schema}"."{sales_view}" s
+                CROSS JOIN (SELECT MAX(s_max."invoice_date") AS max_dt FROM "{schema}"."{sales_view}" s_max) md
+                {sales_where}
+                GROUP BY s."dealer_code"
+            )
+            SELECT 
+                COUNT(CASE WHEN curr_rev = 0 AND total_historical_rev >= 200000 THEN 1 END) AS high_risk_inactive_accounts_2lakh_plus,
+                COUNT(CASE WHEN curr_rev = 0 AND total_historical_rev > 0 THEN 1 END) AS total_zero_billing_accounts
+            FROM cust_billing
+        """)
+
+        run("zero_units_30d_accounts", f"""
+            WITH cust_units AS (
+                SELECT 
+                    s."dealer_code",
+                    SUM(CASE WHEN s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -29) AND md.max_dt THEN COALESCE(s."Tyre_Quantity", 0) ELSE 0 END) AS curr_units,
+                    SUM(COALESCE(s."Tyre_Quantity", 0)) AS total_historical_units
+                FROM "{schema}"."{sales_view}" s
+                CROSS JOIN (SELECT MAX(s_max."invoice_date") AS max_dt FROM "{schema}"."{sales_view}" s_max) md
+                {sales_where}
+                GROUP BY s."dealer_code"
+            )
+            SELECT 
+                COUNT(CASE WHEN curr_units = 0 AND total_historical_units > 0 THEN 1 END) AS zero_unit_active_counters
+            FROM cust_units
         """)
 
     # ---------- 5. Geography ----------
@@ -1987,6 +2614,55 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
             ORDER BY revenue ASC
             LIMIT 1
         """)
+
+        # ---------- Last 30 Days Geography Performance ----------
+        run("top_5_territories_30d", f"""
+            SELECT
+                COALESCE(NULLIF(TRIM(tm."NAME"), ''), NULLIF(TRIM(tm."BZIRK"), ''), 'Unknown') AS territory_name,
+                ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue_cr
+            FROM "{schema}"."{sales_view}" s
+            {cust_join}
+            {terr_join}
+            CROSS JOIN (SELECT MAX(s_max."invoice_date") AS max_dt FROM "{schema}"."{sales_view}" s_max) md
+            {sales_where}
+            AND s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -29) AND md.max_dt
+            GROUP BY COALESCE(NULLIF(TRIM(tm."NAME"), ''), NULLIF(TRIM(tm."BZIRK"), ''), 'Unknown')
+            ORDER BY revenue_cr DESC
+            LIMIT 5
+        """)
+
+        run("worst_5_territories_30d", f"""
+            SELECT
+                COALESCE(NULLIF(TRIM(tm."NAME"), ''), NULLIF(TRIM(tm."BZIRK"), ''), 'Unknown') AS territory_name,
+                ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue_cr
+            FROM "{schema}"."{sales_view}" s
+            {cust_join}
+            {terr_join}
+            CROSS JOIN (SELECT MAX(s_max."invoice_date") AS max_dt FROM "{schema}"."{sales_view}" s_max) md
+            {sales_where}
+            AND s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -29) AND md.max_dt
+            GROUP BY COALESCE(NULLIF(TRIM(tm."NAME"), ''), NULLIF(TRIM(tm."BZIRK"), ''), 'Unknown')
+            HAVING SUM(COALESCE(s."invoice_value", 0)) > 0
+            ORDER BY revenue_cr ASC
+            LIMIT 5
+        """)
+
+        if reg_view:
+            run("top_5_regions_30d", f"""
+                SELECT
+                    COALESCE(NULLIF(TRIM(rm."region_name"), ''), NULLIF(TRIM(rm."region_code"), ''), 'Unknown') AS region_name,
+                    ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue_cr
+                FROM "{schema}"."{sales_view}" s
+                {cust_join}
+                {terr_join}
+                {reg_join}
+                CROSS JOIN (SELECT MAX(s_max."invoice_date") AS max_dt FROM "{schema}"."{sales_view}" s_max) md
+                {sales_where}
+                AND s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -29) AND md.max_dt
+                GROUP BY COALESCE(NULLIF(TRIM(rm."region_name"), ''), NULLIF(TRIM(rm."region_code"), ''), 'Unknown')
+                ORDER BY revenue_cr DESC
+                LIMIT 5
+            """)
 
     # ---------- 6. Distribution Channels ----------
     # Query distribution_channel directly from sales view across all channels:
@@ -2766,7 +3442,25 @@ CRITICAL INSTRUCTIONS:
 7. Date Formatting: The 'Month' column or any period formatted as YYYYMM (e.g., 202601, 202512) must be translated into readable month names (e.g., 'January 2026', 'December 2025') in your report.
 8. Respond ONLY in valid JSON with a single key: "report".
 9. If a "VERIFIED KPI BLOCK" appears in the data, those numbers are pre-computed and exact — copy them into the report verbatim. Do NOT recompute, re-derive, estimate, or override them using anything from the "SUPPLEMENTARY EXECUTED INSIGHTS" section. The supplementary insights are for color/context only (e.g. the Executive Summary, Business Risks, Actionable Recommendations) — never for the numeric fields already present in the VERIFIED KPI BLOCK.
-10. In the VERIFIED KPI BLOCK, map these field names directly to report labels: claims_amount → "Claims", returns_amount → "Returns", discount_percentage → "Discount %", fleet_contribution_pct → "Fleet Contribution", oem_contribution_pct → "OEM Contribution", channel_distribution / distribution_contribution_pct → "Distribution" (Replacement %, OEM %, STU %, DEF %, and breakdown with Contribution %), target_performance → "Target vs Actual Performance" (Total Target Value, Overall Achievement %, Target Shortfall), target_vs_actual_quantity → "Quantity Achievement %", territory_target_shortfall → "Territory Target Shortfall".
+10. In the VERIFIED KPI BLOCK, map these field names directly to report labels:
+   - claims_amount → "Claims", returns_amount → "Returns", discount_percentage → "Discount %"
+   - dealer_contribution_pct → "Dealer Contribution", fleet_contribution_pct → "Fleet Contribution", institutional_contribution_pct → "Institutional Contribution", oem_contribution_pct → "OEM Contribution"
+   - top_dealers → "Top Dealers", top_account_group → "Top Account Group", account_group_distribution → "Account Group Breakdown (KTOKD)", customer_concentration → "Customer Concentration Risk"
+   - top_skus_by_category → "Top SKUs by Category"
+   - Last 30 Days Metrics:
+     * top_customer_30d → "Top Customer (Last 30 Days)"
+     * worst_customer_30d → "Worst Customer (Last 30 Days)"
+     * top_5_customers_30d → "Top 5 Customers (Last 30 Days)"
+     * bottom_5_customers_30d → "Bottom 5 Customers (Last 30 Days)"
+     * sales_decline_30d_summary → "Sales Decline Slabs (Last 30 Days vs Prior 30 Days)"
+     * worst_customers_steepest_decline_30d → "Steepest Sales Decline Accounts (Last 30 Days)"
+     * zero_billing_30d_accounts → "High-Risk Inactive / Churned Accounts (Last 30 Days)"
+     * zero_units_30d_accounts → "Zero-Sale Active Counters (Last 30 Days)"
+     * top_5_territories_30d → "Top 5 Territories (Last 30 Days)"
+     * worst_5_territories_30d → "Worst 5 Territories (Last 30 Days)"
+     * top_5_regions_30d → "Top 5 Regions (Last 30 Days)"
+   - channel_distribution / distribution_contribution_pct → "Distribution" (Replacement %, OEM %, STU %, DEF %, and breakdown with Contribution %)
+   - target_performance → "Target vs Actual Performance" (Total Target Value, Overall Achievement %, Target Shortfall), target_vs_actual_quantity → "Quantity Achievement %", territory_target_shortfall → "Territory Target Shortfall".
 11. UNIT RULE (critical): The monetary values in the VERIFIED KPI BLOCK are ALREADY IN CRORES. You MUST append " Cr" to them. Display them EXACTLY as given, formatted with a ₹ symbol and " Cr" (e.g. if the value is 995.04, write "₹995.04 Cr"). Do NOT divide or multiply them further.
 """
 
@@ -2785,7 +3479,7 @@ ALSO, generate a category-wise trend report as a "line_chart" visualization extr
 
 Return ONLY this JSON:
 {{
-  "report": "TITLE: <Create a descriptive business-focused title based on the data>\\n\\n### Executive Summary\\n<Write exactly 5 to 8 lines summarizing overall business performance, key trends, and main takeaways based purely on the data.>\\n\\n### Key Business Insights\\n\\n**1. Overall Performance**\\n- **Total Revenue**: <Value>\\n- **Total Quantity**: <Value>\\n- **Total Invoices**: <Value>\\n- **Average Invoice Value**: <Value>\\n\\n**2. Revenue Trend**\\n- **Highest Sales Month**: <Value>\\n- **Lowest Sales Month**: <Value>\\n- **Monthly Growth**: <Value>\\n\\n**3. Product Performance**\\n- **Top Category**: <Value>\\n- **Top Construction**: <Value>\\n- **Top Product**: <Value>\\n- **Lowest Selling Product**: <Value>\\n\\n**4. Customer Performance**\\n- **Top Customers**: <Value>\\n- **Dealer Contribution**: <Value>\\n- **Fleet Contribution**: <Value>\\n- **OEM Contribution**: <Value>\\n- **Customer Concentration**: <Value>\\n\\n**5. Geography**\\n- **Top Zone**: <Value>\\n- **Top Region**: <Value>\\n- **Top Territory**: <Value>\\n- **Lowest Territory**: <Value>\\n\\n**6. Distribution**\\n- **Replacement**: <Value>\\n- **OEM**: <Value>\\n- **STU**: <Value>\\n- **DEF**: <Value>\\n- **Contribution %**: <Value>\\n\\n**7. Target Performance**\\n- **Total Target Value**: <Value>\\n- **Overall Achievement %**: <Value>\\n- **Target Shortfall**: <Value>\\n- **Quantity Achievement %**: <Value>\\n- **Top Target Shortfall Territory**: <Value>\\n\\n### Business Risks\\n- <Data-driven Risk 1 (e.g. High customer concentration)>\\n- <Data-driven Risk 2 (e.g. High discount dependency)>\\n- <Data-driven Risk 3>\\n\\n### Actionable Recommendations\\n- <Data-driven Recommendation 1 (e.g. Improve sales in low-performing territories)>\\n- <Data-driven Recommendation 2 (e.g. Reduce dependency on top customers)>\\n- <Data-driven Recommendation 3>",
+  "report": "TITLE: <Create a descriptive business-focused title based on the data>\\n\\n### Executive Summary\\n<Write exactly 5 to 8 lines summarizing overall business performance, key trends, and main takeaways based purely on the data.>\\n\\n### Key Business Insights\\n\\n**1. Overall Performance**\\n- **Total Revenue**: <Value>\\n- **Total Quantity Sold**: <Value>\\n- **Total Transactions**: <Value>\\n- **Average Invoice Value**: <Value>\\n- **Average Selling Price per Unit**: <Value>\\n\\n**2. Revenue Trend**\\n- **Highest Sales Month**: <Value>\\n- **Lowest Sales Month**: <Value>\\n- **Monthly Growth**: <Value>\\n\\n**3. Product Performance**\\n- **Top Category**: <Value>\\n- **Top Construction Type**: <Value>\\n- **Top Product**: <Value>\\n- **Lowest Selling Product**: <Value>\\n- **Top SKUs by Category**: <Top 5 SKUs per category with revenue in Cr>\\n\\n**4. Customer Performance & Account Group Breakdown**\\n- **Top Customer (Overall)**: <Value>\\n- **Top 5 Customers Combined Revenue**: <Value>\\n- **Dealer Contribution**: <Value>\\n- **Fleet Contribution**: <Value>\\n- **Institutional Contribution**: <Value>\\n- **OEM Contribution**: <Value>\\n- **Customer Concentration Risk**: <Value>\\n- **Top Account Group**: <Value>\\n- **Account Group Breakdown (KTOKD)**: <Breakdown of Dealers Z001, Institutional Z004, Fleet Z009, Traders Z015, Govt Z006, etc. with Revenue, Units, and Contribution %>\\n- **Top Customer (Last 30 Days)**: <Value>\\n- **Worst Customer (Last 30 Days)**: <Value>\\n- **Top 5 Customers (Last 30 Days)**: <List of Top 5 customers with revenue in Cr>\\n- **Bottom 5 Customers (Last 30 Days)**: <List of Bottom 5 customers with revenue in Cr>\\n\\n**5. Customer Churn & Inactivity Risk (Last 30 Days)**\\n- **Accounts with >5% Sales Decline**: <Count of accounts declining >5% compared to prior 30 days>\\n- **Accounts with >10% Sales Decline**: <Count of accounts declining >10% compared to prior 30 days>\\n- **Steepest Sales Decline Accounts**: <List of worst performing accounts with decline percentage>\\n- **High-Risk Inactive Accounts (₹2L+ Historical Billing)**: <Count of zero-billing accounts>\\n- **Zero-Sale Active Counters**: <Count of counters with 0 tyre units in the last 30 days>\\n\\n**6. Geography Performance**\\n- **Top Zone**: <Value>\\n- **Top Region**: <Value>\\n- **Top Territory**: <Value>\\n- **Lowest Territory**: <Value>\\n- **Top 5 Territories (Last 30 Days)**: <List of top 5 territories with revenue>\\n- **Worst 5 Territories (Last 30 Days)**: <List of lowest 5 territories with revenue>\\n- **Top 5 Regions (Last 30 Days)**: <List of top 5 regions with revenue>\\n\\n**7. Distribution**\\n- **Replacement Channel Revenue**: <Value with contribution %>\\n- **OEM Channel Revenue**: <Value with contribution %>\\n- **STU Channel Revenue**: <Value with contribution %>\\n- **DEF Channel Revenue**: <Value with contribution %>\\n\\n**8. Target Performance**\\n- **Total Target Value**: <Value>\\n- **Overall Achievement %**: <Value>\\n- **Target Shortfall**: <Value>\\n- **Quantity Achievement %**: <Value>\\n- **Top Target Shortfall Territory**: <Value>\\n\\n### Business Risks\\n- <Data-driven Risk 1 (e.g. High customer concentration)>\\n- <Data-driven Risk 2 (e.g. High discount dependency)>\\n- <Data-driven Risk 3>\\n\\n### Actionable Recommendations\\n- <Data-driven Recommendation 1 (e.g. Improve sales in low-performing territories)>\\n- <Data-driven Recommendation 2 (e.g. Reduce dependency on top customers)>\\n- <Data-driven Recommendation 3>",
   "follow_up_questions": ["What ...?", "What ...?", "What ...?", "What ...?", "What ...?"],
   "visualizations": [
     {{

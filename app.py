@@ -1962,6 +1962,16 @@ def tyre_sales_data():
 
 
 
+@app.route("/top-bottom-performance", methods=["POST"])
+
+def top_bottom_performance():
+
+    from controllers.top_bottom_performance_controller import get_top_bottom_performance_controller
+
+    return get_top_bottom_performance_controller(get_db_connection)
+
+
+
 @app.route("/dashboard-filters/", methods=["GET"])
 
 def dashboard_filters():
