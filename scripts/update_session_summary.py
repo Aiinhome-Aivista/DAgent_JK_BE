@@ -507,9 +507,6 @@ Sales performance analysis for active period 2026 demonstrates total revenue of 
 
 **4. Customer Performance**
 - **Top Customers**: {top_c} (₹{top_c_rev:,.2f} Cr)
-- **Dealer Contribution**: {dlr_con}
-- **Fleet Contribution**: {flt_con}
-- **OEM Contribution**: {oem_con}
 - **Customer Concentration**: {cust_conc}
 
 **5. Geography**

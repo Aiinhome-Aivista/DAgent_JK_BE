@@ -234,21 +234,33 @@ def query_sales_numbers_hana(cursor, schema, year_month: str, selected_date: str
     FACT_CLASSIFIED AS (
         SELECT
             (
-                COALESCE(
-                    NULLIF(TRIM(sk."TYRE_TYPE"), ''),
-                    NULLIF(TRIM(sk."TYRE_TP"), ''),
-                    CASE
-                        WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%TRUCK%' THEN 'TRUCK'
-                        WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%LCV%' OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%LC%' THEN 'LCV'
-                        WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%CAR%' OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%CR%' OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%CB%' THEN 'CAR'
-                        WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%JEEP%' OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%JB%' OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%JR%' THEN 'JEEP'
-                        WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%TRACTOR%' OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%TR.%' THEN 'TRACTOR'
-                        WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%3W%' OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%3 WHEELER%' THEN '3W'
-                        WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%2W%' OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%2 WHEELER%' THEN '2W'
-                        ELSE NULLIF(TRIM(cat."CAT_DESC"), '')
-                    END,
-                    'OTHERS'
-                )
+                CASE
+                    -- 1. Check Category Description
+                    WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) IN ('TBB', 'TBR', 'TRUCK') OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%TRUCK%' THEN 'TRUCK'
+                    WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) IN ('LCB', 'LCR', 'LCV') OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%LCV%' THEN 'LCV'
+                    WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) IN ('CB', 'CR', 'CAR', 'PCR') OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%CAR%' THEN 'CAR'
+                    WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) IN ('JB', 'JR', 'JEEP') OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%JEEP%' THEN 'JEEP'
+                    WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%TRACTOR%' OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%FARM%' THEN 'TRACTOR'
+                    WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%3W%' OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%3 WHEELER%' THEN '3W'
+                    WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%2W%' OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%MOTOR%' OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%SCOOTER%' THEN '2W / MOTOR'
+                    WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%IND%' THEN 'INDUSTRIAL'
+                    WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%OTR%' THEN 'OTR'
+                    WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%ADV%' THEN 'ADV'
+                    -- 2. Check SKU Master TYRE_TYPE / TYRE_TP codes
+                    WHEN TRIM(COALESCE(sk."TYRE_TYPE", sk."TYRE_TP", '')) IN ('0', 'TRUCK') THEN 'TRUCK'
+                    WHEN TRIM(COALESCE(sk."TYRE_TYPE", sk."TYRE_TP", '')) IN ('1', 'LCV') THEN 'LCV'
+                    WHEN TRIM(COALESCE(sk."TYRE_TYPE", sk."TYRE_TP", '')) IN ('2', 'CAR') THEN 'CAR'
+                    WHEN TRIM(COALESCE(sk."TYRE_TYPE", sk."TYRE_TP", '')) IN ('3', 'JEEP') THEN 'JEEP'
+                    WHEN TRIM(COALESCE(sk."TYRE_TYPE", sk."TYRE_TP", '')) IN ('4', '5', '7', 'TRACTOR') THEN 'TRACTOR'
+                    WHEN TRIM(COALESCE(sk."TYRE_TYPE", sk."TYRE_TP", '')) IN ('6', 'H', '3W') THEN '3W'
+                    WHEN TRIM(COALESCE(sk."TYRE_TYPE", sk."TYRE_TP", '')) IN ('M', 'B', 'S', '2W') THEN '2W / MOTOR'
+                    WHEN TRIM(COALESCE(sk."TYRE_TYPE", sk."TYRE_TP", '')) IN ('I', 'Y', 'IND') THEN 'INDUSTRIAL'
+                    WHEN TRIM(COALESCE(sk."TYRE_TYPE", sk."TYRE_TP", '')) IN ('E', 'OTR') THEN 'OTR'
+                    WHEN TRIM(COALESCE(sk."TYRE_TYPE", sk."TYRE_TP", '')) IN ('A', 'ADV') THEN 'ADV'
+                    WHEN NULLIF(TRIM(cat."CAT_DESC"), '') IS NOT NULL THEN TRIM(cat."CAT_DESC")
+                    WHEN NULLIF(TRIM(sk."TYRE_TYPE"), '') IS NOT NULL THEN TRIM(sk."TYRE_TYPE")
+                    ELSE 'OTHERS'
+                END
                 || ' - ' ||
                 CASE
                     WHEN CAST(sk."CONSTUCTION" AS VARCHAR) IN ('1', 'BIAS')
@@ -309,22 +321,34 @@ def query_sales_numbers_hana(cursor, schema, year_month: str, selected_date: str
     AGG_TARGET AS (
         SELECT
             (
-                COALESCE(
-                    NULLIF(TRIM(sk."TYRE_TYPE"), ''),
-                    NULLIF(TRIM(sk."TYRE_TP"), ''),
-                    NULLIF(TRIM(tgt."MAT_TYPE"), ''),
-                    CASE
-                        WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%TRUCK%' THEN 'TRUCK'
-                        WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%LCV%' OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%LC%' THEN 'LCV'
-                        WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%CAR%' OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%CR%' OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%CB%' THEN 'CAR'
-                        WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%JEEP%' OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%JB%' OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%JR%' THEN 'JEEP'
-                        WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%TRACTOR%' OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%TR.%' THEN 'TRACTOR'
-                        WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%3W%' OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%3 WHEELER%' THEN '3W'
-                        WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%2W%' OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%2 WHEELER%' THEN '2W'
-                        ELSE NULLIF(TRIM(cat."CAT_DESC"), '')
-                    END,
-                    'OTHERS'
-                )
+                CASE
+                    -- 1. Check Category Description
+                    WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) IN ('TBB', 'TBR', 'TRUCK') OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%TRUCK%' THEN 'TRUCK'
+                    WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) IN ('LCB', 'LCR', 'LCV') OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%LCV%' THEN 'LCV'
+                    WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) IN ('CB', 'CR', 'CAR', 'PCR') OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%CAR%' THEN 'CAR'
+                    WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) IN ('JB', 'JR', 'JEEP') OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%JEEP%' THEN 'JEEP'
+                    WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%TRACTOR%' OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%FARM%' THEN 'TRACTOR'
+                    WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%3W%' OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%3 WHEELER%' THEN '3W'
+                    WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%2W%' OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%MOTOR%' OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%SCOOTER%' THEN '2W / MOTOR'
+                    WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%IND%' THEN 'INDUSTRIAL'
+                    WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%OTR%' THEN 'OTR'
+                    WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%ADV%' THEN 'ADV'
+                    -- 2. Check SKU / Target MAT_TYPE codes
+                    WHEN TRIM(COALESCE(sk."TYRE_TYPE", sk."TYRE_TP", tgt."MAT_TYPE", '')) IN ('0', 'TRUCK') THEN 'TRUCK'
+                    WHEN TRIM(COALESCE(sk."TYRE_TYPE", sk."TYRE_TP", tgt."MAT_TYPE", '')) IN ('1', 'LCV') THEN 'LCV'
+                    WHEN TRIM(COALESCE(sk."TYRE_TYPE", sk."TYRE_TP", tgt."MAT_TYPE", '')) IN ('2', 'CAR') THEN 'CAR'
+                    WHEN TRIM(COALESCE(sk."TYRE_TYPE", sk."TYRE_TP", tgt."MAT_TYPE", '')) IN ('3', 'JEEP') THEN 'JEEP'
+                    WHEN TRIM(COALESCE(sk."TYRE_TYPE", sk."TYRE_TP", tgt."MAT_TYPE", '')) IN ('4', '5', '7', 'TRACTOR') THEN 'TRACTOR'
+                    WHEN TRIM(COALESCE(sk."TYRE_TYPE", sk."TYRE_TP", tgt."MAT_TYPE", '')) IN ('6', 'H', '3W') THEN '3W'
+                    WHEN TRIM(COALESCE(sk."TYRE_TYPE", sk."TYRE_TP", tgt."MAT_TYPE", '')) IN ('M', 'B', 'S', '2W') THEN '2W / MOTOR'
+                    WHEN TRIM(COALESCE(sk."TYRE_TYPE", sk."TYRE_TP", tgt."MAT_TYPE", '')) IN ('I', 'Y', 'IND') THEN 'INDUSTRIAL'
+                    WHEN TRIM(COALESCE(sk."TYRE_TYPE", sk."TYRE_TP", tgt."MAT_TYPE", '')) IN ('E', 'OTR') THEN 'OTR'
+                    WHEN TRIM(COALESCE(sk."TYRE_TYPE", sk."TYRE_TP", tgt."MAT_TYPE", '')) IN ('A', 'ADV') THEN 'ADV'
+                    WHEN NULLIF(TRIM(cat."CAT_DESC"), '') IS NOT NULL THEN TRIM(cat."CAT_DESC")
+                    WHEN NULLIF(TRIM(sk."TYRE_TYPE"), '') IS NOT NULL THEN TRIM(sk."TYRE_TYPE")
+                    WHEN NULLIF(TRIM(tgt."MAT_TYPE"), '') IS NOT NULL THEN TRIM(tgt."MAT_TYPE")
+                    ELSE 'OTHERS'
+                END
                 || ' - ' ||
                 CASE
                     WHEN CAST(sk."CONSTUCTION" AS VARCHAR) IN ('1', 'BIAS')
@@ -345,37 +369,7 @@ def query_sales_numbers_hana(cursor, schema, year_month: str, selected_date: str
         LEFT JOIN "{schema}"."ZIVF_CategoryMaster_01_TR" cat
             ON (COALESCE(NULLIF(TRIM(tgt."CAT_CODE"), ''), NULLIF(TRIM(sk."CAT_CODE"), '')) = TRIM(cat."CAT_CODE"))
         WHERE (CAST(tgt."YMONTH" AS VARCHAR) = '{year_month}' OR tgt."YMONTH" = '{year_month}')
-        GROUP BY
-            (
-                COALESCE(
-                    NULLIF(TRIM(sk."TYRE_TYPE"), ''),
-                    NULLIF(TRIM(sk."TYRE_TP"), ''),
-                    NULLIF(TRIM(tgt."MAT_TYPE"), ''),
-                    CASE
-                        WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%TRUCK%' THEN 'TRUCK'
-                        WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%LCV%' OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%LC%' THEN 'LCV'
-                        WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%CAR%' OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%CR%' OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%CB%' THEN 'CAR'
-                        WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%JEEP%' OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%JB%' OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%JR%' THEN 'JEEP'
-                        WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%TRACTOR%' OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%TR.%' THEN 'TRACTOR'
-                        WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%3W%' OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%3 WHEELER%' THEN '3W'
-                        WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%2W%' OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%2 WHEELER%' THEN '2W'
-                        ELSE NULLIF(TRIM(cat."CAT_DESC"), '')
-                    END,
-                    'OTHERS'
-                )
-                || ' - ' ||
-                CASE
-                    WHEN CAST(sk."CONSTUCTION" AS VARCHAR) IN ('1', 'BIAS')
-                         OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%BIAS%'
-                         OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%B'
-                         OR UPPER(TRIM(CAST(COALESCE(sk."CONSTUCTION", '') AS VARCHAR))) = 'BIAS' THEN 'BIAS'
-                    WHEN CAST(sk."CONSTUCTION" AS VARCHAR) IN ('2', '5', 'RADIAL')
-                         OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%RADIAL%'
-                         OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%R%'
-                         OR UPPER(TRIM(CAST(COALESCE(sk."CONSTUCTION", '') AS VARCHAR))) = 'RADIAL' THEN 'RADIAL'
-                    ELSE 'BIAS'
-                END
-            )
+        GROUP BY 1
     ),
 
     ALL_CATS AS (

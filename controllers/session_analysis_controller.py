@@ -1186,55 +1186,7 @@ def _compute_core_kpis(cursor) -> dict:
 
 
         if is_sap:
-            # 1. Dealer Contribution % (Z001 or Channel DL)
-            run("dealer_contribution_pct", f"""
-                SELECT ROUND(SUM(CASE 
-                    WHEN TRIM(cm.KTOKD) = 'Z001' OR UPPER(TRIM(cm.CH_TYPE)) = 'DL'
-                    THEN sd.{col_revenue} ELSE 0 END) * 100.0 / NULLIF(SUM(sd.{col_revenue}), 0), 2) AS Dealer_Contribution_Percentage
-                FROM `{sales_tbl}` sd
-                {cust_join}
-                {sales_where}
-            """, required_tables=[sales_tbl, cust_tbl])
-
-            # 2. Fleet Contribution % (Z009 or Channel FL or KDGRP F*)
-            run("fleet_contribution_pct", f"""
-                SELECT ROUND(SUM(CASE 
-                    WHEN TRIM(cm.KTOKD) = 'Z009' 
-                      OR UPPER(TRIM(cm.CH_TYPE)) IN ('FL', 'FLEET', 'F') 
-                      OR UPPER(TRIM(cm.CH_TYPE)) LIKE '%FLEET%' 
-                      OR UPPER(TRIM(cm.KDGRP)) LIKE 'F%'
-                    THEN sd.{col_revenue} ELSE 0 END) * 100.0 / NULLIF(SUM(sd.{col_revenue}), 0), 2) AS Fleet_Contribution_Percentage
-                FROM `{sales_tbl}` sd
-                {cust_join}
-                {sales_where}
-            """, required_tables=[sales_tbl, cust_tbl])
-
-            # 3. Institutional Contribution % (Z004 or Channel IN)
-            run("institutional_contribution_pct", f"""
-                SELECT ROUND(SUM(CASE 
-                    WHEN TRIM(cm.KTOKD) = 'Z004' 
-                      OR UPPER(TRIM(cm.CH_TYPE)) IN ('IN', 'INST') 
-                      OR UPPER(TRIM(cm.KDGRP)) LIKE 'I%'
-                    THEN sd.{col_revenue} ELSE 0 END) * 100.0 / NULLIF(SUM(sd.{col_revenue}), 0), 2) AS Institutional_Contribution_Percentage
-                FROM `{sales_tbl}` sd
-                {cust_join}
-                {sales_where}
-            """, required_tables=[sales_tbl, cust_tbl])
-
-            # 4. OEM Contribution % (Calculated across all channels where OEM operates)
-            run("oem_contribution_pct", f"""
-                SELECT ROUND(SUM(CASE 
-                    WHEN CAST(sd.{col_channel} AS CHAR) = '20' 
-                      OR UPPER(TRIM(cm.CH_TYPE)) IN ('OE', 'OEM', 'O') 
-                      OR UPPER(TRIM(cm.CH_TYPE)) LIKE '%OEM%' 
-                      OR cm.KTOKD IN ('0002', 'Z002')
-                    THEN sd.{col_revenue} ELSE 0 END) * 100.0 / NULLIF(SUM(sd.{col_revenue}), 0), 2) AS OEM_Contribution_Percentage
-                FROM `{sales_tbl}` sd
-                {cust_join_left}
-                {sales_where_all_channels}
-            """, required_tables=[sales_tbl, cust_tbl])
-
-            # 5. Top Dealers (Dealer-wise Breakdown from Z001)
+            # Top Dealers (Dealer-wise Breakdown from Z001)
             run("top_dealers", f"""
                 SELECT
                     {col_cust_name} AS Dealer_Name,
@@ -1320,33 +1272,6 @@ def _compute_core_kpis(cursor) -> dict:
                     GROUP BY Dealer_Name
                     ORDER BY Revenue DESC
                     LIMIT 5
-                """, required_tables=[sales_tbl, cust_tbl, ag_tbl])
-
-
-                run("dealer_contribution_pct", f"""
-                    SELECT ROUND(SUM(sd.{col_revenue}) * 100 / NULLIF((SELECT SUM({col_revenue}) FROM `{sales_tbl}`), 0), 2) AS Dealer_Contribution_Percentage
-                    FROM `{sales_tbl}` sd
-                    JOIN `{cust_tbl}` cm ON (sd.{col_cust} = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(sd.{col_cust} AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))
-                    JOIN `{ag_tbl}` ag ON cm.acc_grp = ag.KTOKD
-                    WHERE ag.account_group_name = 'Dealer'
-                """, required_tables=[sales_tbl, cust_tbl, ag_tbl])
-
-
-                run("fleet_contribution_pct", f"""
-                    SELECT ROUND(SUM(sd.{col_revenue}) * 100 / NULLIF((SELECT SUM({col_revenue}) FROM `{sales_tbl}`), 0), 2) AS Fleet_Contribution_Percentage
-                    FROM `{sales_tbl}` sd
-                    JOIN `{cust_tbl}` cm ON (sd.{col_cust} = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(sd.{col_cust} AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))
-                    JOIN `{ag_tbl}` ag ON cm.acc_grp = ag.KTOKD
-                    WHERE ag.account_group_name = 'Fleet'
-                """, required_tables=[sales_tbl, cust_tbl, ag_tbl])
-
-
-                run("oem_contribution_pct", f"""
-                    SELECT ROUND(SUM(sd.{col_revenue}) * 100 / NULLIF((SELECT SUM({col_revenue}) FROM `{sales_tbl}`), 0), 2) AS OEM_Contribution_Percentage
-                    FROM `{sales_tbl}` sd
-                    JOIN `{cust_tbl}` cm ON (sd.{col_cust} = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(sd.{col_cust} AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))
-                    JOIN `{ag_tbl}` ag ON cm.acc_grp = ag.KTOKD
-                    WHERE ag.account_group_name = 'OEM'
                 """, required_tables=[sales_tbl, cust_tbl, ag_tbl])
 
 
@@ -2261,55 +2186,7 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
             LIMIT 5
         """)
 
-        # 1. Dealer Contribution % (Z001 or Channel DL)
-        run("dealer_contribution_pct", f"""
-            SELECT ROUND(SUM(CASE 
-                WHEN TRIM(cm."KTOKD") = 'Z001' OR UPPER(TRIM(cm."CH_TYPE")) = 'DL'
-                THEN COALESCE(s."invoice_value", 0) ELSE 0 END) * 100.0 / NULLIF(SUM(COALESCE(s."invoice_value", 0)), 0), 2) AS dealer_contribution_percentage
-            FROM "{schema}"."{sales_view}" s
-            {cust_join}
-            {sales_where}
-        """)
-
-        # 2. Fleet Contribution % (Z009 or Channel FL or KDGRP F*)
-        run("fleet_contribution_pct", f"""
-            SELECT ROUND(SUM(CASE 
-                WHEN TRIM(cm."KTOKD") = 'Z009' 
-                  OR UPPER(TRIM(cm."CH_TYPE")) IN ('FL', 'FLEET', 'F') 
-                  OR UPPER(TRIM(cm."CH_TYPE")) LIKE '%FLEET%' 
-                  OR UPPER(TRIM(cm."KDGRP")) LIKE 'F%'
-                THEN COALESCE(s."invoice_value", 0) ELSE 0 END) * 100.0 / NULLIF(SUM(COALESCE(s."invoice_value", 0)), 0), 2) AS fleet_contribution_percentage
-            FROM "{schema}"."{sales_view}" s
-            {cust_join}
-            {sales_where}
-        """)
-
-        # 3. Institutional Contribution % (Z004 or Channel IN)
-        run("institutional_contribution_pct", f"""
-            SELECT ROUND(SUM(CASE 
-                WHEN TRIM(cm."KTOKD") = 'Z004' 
-                  OR UPPER(TRIM(cm."CH_TYPE")) IN ('IN', 'INST') 
-                  OR UPPER(TRIM(cm."KDGRP")) LIKE 'I%'
-                THEN COALESCE(s."invoice_value", 0) ELSE 0 END) * 100.0 / NULLIF(SUM(COALESCE(s."invoice_value", 0)), 0), 2) AS institutional_contribution_percentage
-            FROM "{schema}"."{sales_view}" s
-            {cust_join}
-            {sales_where}
-        """)
-
-        # 4. OEM Contribution % (Calculated across all channels where OEM operates)
-        run("oem_contribution_pct", f"""
-            SELECT ROUND(SUM(CASE 
-                WHEN CAST(s."distribution_channel" AS VARCHAR(10)) = '20' 
-                  OR UPPER(TRIM(cm."CH_TYPE")) IN ('OE', 'OEM', 'O') 
-                  OR UPPER(TRIM(cm."CH_TYPE")) LIKE '%OEM%' 
-                  OR cm."KTOKD" IN ('0002', 'Z002')
-                THEN COALESCE(s."invoice_value", 0) ELSE 0 END) * 100.0 / NULLIF(SUM(COALESCE(s."invoice_value", 0)), 0), 2) AS oem_contribution_percentage
-            FROM "{schema}"."{sales_view}" s
-            {cust_join_left}
-            {sales_where_all_channels}
-        """)
-
-        # 5. Top Dealers (Dealer-wise Breakdown from Z001)
+        # Top Dealers (Dealer-wise Breakdown from Z001)
         run("top_dealers", f"""
             SELECT
                 COALESCE(NULLIF(TRIM(cm."NAME1"), ''), NULLIF(TRIM(cm."BNAME"), ''), TRIM(s."dealer_code")) AS dealer_name,
@@ -2318,7 +2195,7 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
             FROM "{schema}"."{sales_view}" s
             {cust_join}
             {sales_where}
-            WHERE TRIM(cm."KTOKD") = 'Z001' OR UPPER(TRIM(cm."CH_TYPE")) = 'DL'
+            AND (TRIM(cm."KTOKD") = 'Z001' OR UPPER(TRIM(cm."CH_TYPE")) = 'DL')
             GROUP BY COALESCE(NULLIF(TRIM(cm."NAME1"), ''), NULLIF(TRIM(cm."BNAME"), ''), TRIM(s."dealer_code"))
             ORDER BY revenue DESC
             LIMIT 5
@@ -3444,7 +3321,6 @@ CRITICAL INSTRUCTIONS:
 9. If a "VERIFIED KPI BLOCK" appears in the data, those numbers are pre-computed and exact — copy them into the report verbatim. Do NOT recompute, re-derive, estimate, or override them using anything from the "SUPPLEMENTARY EXECUTED INSIGHTS" section. The supplementary insights are for color/context only (e.g. the Executive Summary, Business Risks, Actionable Recommendations) — never for the numeric fields already present in the VERIFIED KPI BLOCK.
 10. In the VERIFIED KPI BLOCK, map these field names directly to report labels:
    - claims_amount → "Claims", returns_amount → "Returns", discount_percentage → "Discount %"
-   - dealer_contribution_pct → "Dealer Contribution", fleet_contribution_pct → "Fleet Contribution", institutional_contribution_pct → "Institutional Contribution", oem_contribution_pct → "OEM Contribution"
    - top_dealers → "Top Dealers", top_account_group → "Top Account Group", account_group_distribution → "Account Group Breakdown (KTOKD)", customer_concentration → "Customer Concentration Risk"
    - top_skus_by_category → "Top SKUs by Category"
    - Last 30 Days Metrics:
@@ -3479,7 +3355,7 @@ ALSO, generate a category-wise trend report as a "line_chart" visualization extr
 
 Return ONLY this JSON:
 {{
-  "report": "TITLE: <Create a descriptive business-focused title based on the data>\\n\\n### Executive Summary\\n<Write exactly 5 to 8 lines summarizing overall business performance, key trends, and main takeaways based purely on the data.>\\n\\n### Key Business Insights\\n\\n**1. Overall Performance**\\n- **Total Revenue**: <Value>\\n- **Total Quantity Sold**: <Value>\\n- **Total Transactions**: <Value>\\n- **Average Invoice Value**: <Value>\\n- **Average Selling Price per Unit**: <Value>\\n\\n**2. Revenue Trend**\\n- **Highest Sales Month**: <Value>\\n- **Lowest Sales Month**: <Value>\\n- **Monthly Growth**: <Value>\\n\\n**3. Product Performance**\\n- **Top Category**: <Value>\\n- **Top Construction Type**: <Value>\\n- **Top Product**: <Value>\\n- **Lowest Selling Product**: <Value>\\n- **Top SKUs by Category**: <Top 5 SKUs per category with revenue in Cr>\\n\\n**4. Customer Performance & Account Group Breakdown**\\n- **Top Customer (Overall)**: <Value>\\n- **Top 5 Customers Combined Revenue**: <Value>\\n- **Dealer Contribution**: <Value>\\n- **Fleet Contribution**: <Value>\\n- **Institutional Contribution**: <Value>\\n- **OEM Contribution**: <Value>\\n- **Customer Concentration Risk**: <Value>\\n- **Top Account Group**: <Value>\\n- **Account Group Breakdown (KTOKD)**: <Breakdown of Dealers Z001, Institutional Z004, Fleet Z009, Traders Z015, Govt Z006, etc. with Revenue, Units, and Contribution %>\\n- **Top Customer (Last 30 Days)**: <Value>\\n- **Worst Customer (Last 30 Days)**: <Value>\\n- **Top 5 Customers (Last 30 Days)**: <List of Top 5 customers with revenue in Cr>\\n- **Bottom 5 Customers (Last 30 Days)**: <List of Bottom 5 customers with revenue in Cr>\\n\\n**5. Customer Churn & Inactivity Risk (Last 30 Days)**\\n- **Accounts with >5% Sales Decline**: <Count of accounts declining >5% compared to prior 30 days>\\n- **Accounts with >10% Sales Decline**: <Count of accounts declining >10% compared to prior 30 days>\\n- **Steepest Sales Decline Accounts**: <List of worst performing accounts with decline percentage>\\n- **High-Risk Inactive Accounts (₹2L+ Historical Billing)**: <Count of zero-billing accounts>\\n- **Zero-Sale Active Counters**: <Count of counters with 0 tyre units in the last 30 days>\\n\\n**6. Geography Performance**\\n- **Top Zone**: <Value>\\n- **Top Region**: <Value>\\n- **Top Territory**: <Value>\\n- **Lowest Territory**: <Value>\\n- **Top 5 Territories (Last 30 Days)**: <List of top 5 territories with revenue>\\n- **Worst 5 Territories (Last 30 Days)**: <List of lowest 5 territories with revenue>\\n- **Top 5 Regions (Last 30 Days)**: <List of top 5 regions with revenue>\\n\\n**7. Distribution**\\n- **Replacement Channel Revenue**: <Value with contribution %>\\n- **OEM Channel Revenue**: <Value with contribution %>\\n- **STU Channel Revenue**: <Value with contribution %>\\n- **DEF Channel Revenue**: <Value with contribution %>\\n\\n**8. Target Performance**\\n- **Total Target Value**: <Value>\\n- **Overall Achievement %**: <Value>\\n- **Target Shortfall**: <Value>\\n- **Quantity Achievement %**: <Value>\\n- **Top Target Shortfall Territory**: <Value>\\n\\n### Business Risks\\n- <Data-driven Risk 1 (e.g. High customer concentration)>\\n- <Data-driven Risk 2 (e.g. High discount dependency)>\\n- <Data-driven Risk 3>\\n\\n### Actionable Recommendations\\n- <Data-driven Recommendation 1 (e.g. Improve sales in low-performing territories)>\\n- <Data-driven Recommendation 2 (e.g. Reduce dependency on top customers)>\\n- <Data-driven Recommendation 3>",
+  "report": "TITLE: <Create a descriptive business-focused title based on the data>\\n\\n### Executive Summary\\n<Write exactly 5 to 8 lines summarizing overall business performance, key trends, and main takeaways based purely on the data.>\\n\\n### Key Business Insights\\n\\n**1. Overall Performance**\\n- **Total Revenue**: <Value>\\n- **Total Quantity Sold**: <Value>\\n- **Total Transactions**: <Value>\\n- **Average Invoice Value**: <Value>\\n- **Average Selling Price per Unit**: <Value>\\n\\n**2. Revenue Trend**\\n- **Highest Sales Month**: <Value>\\n- **Lowest Sales Month**: <Value>\\n- **Monthly Growth**: <Value>\\n\\n**3. Product Performance**\\n- **Top Category**: <Value>\\n- **Top Construction Type**: <Value>\\n- **Top Product**: <Value>\\n- **Lowest Selling Product**: <Value>\\n- **Top SKUs by Category**: <Top 5 SKUs per category with revenue in Cr>\\n\\n**4. Customer Performance & Account Group Breakdown**\\n- **Top Customer (Overall)**: <Value>\\n- **Top 5 Customers Combined Revenue**: <Value>\\n- **Customer Concentration Risk**: <Value>\\n- **Top Account Group**: <Value>\\n- **Account Group Breakdown (KTOKD)**: <Breakdown of Dealers Z001, Institutional Z004, Fleet Z009, Traders Z015, Govt Z006, etc. with Revenue, Units, and Contribution %>\\n- **Top Customer (Last 30 Days)**: <Value>\\n- **Worst Customer (Last 30 Days)**: <Value>\\n- **Top 5 Customers (Last 30 Days)**: <List of Top 5 customers with revenue in Cr>\\n- **Bottom 5 Customers (Last 30 Days)**: <List of Bottom 5 customers with revenue in Cr>\\n\\n**5. Customer Churn & Inactivity Risk (Last 30 Days)**\\n- **Accounts with >5% Sales Decline**: <Count of accounts declining >5% compared to prior 30 days>\\n- **Accounts with >10% Sales Decline**: <Count of accounts declining >10% compared to prior 30 days>\\n- **Steepest Sales Decline Accounts**: <List of worst performing accounts with decline percentage>\\n- **High-Risk Inactive Accounts (₹2L+ Historical Billing)**: <Count of zero-billing accounts>\\n- **Zero-Sale Active Counters**: <Count of counters with 0 tyre units in the last 30 days>\\n\\n**6. Geography Performance**\\n- **Top Zone**: <Value>\\n- **Top Region**: <Value>\\n- **Top Territory**: <Value>\\n- **Lowest Territory**: <Value>\\n- **Top 5 Territories (Last 30 Days)**: <List of top 5 territories with revenue>\\n- **Worst 5 Territories (Last 30 Days)**: <List of lowest 5 territories with revenue>\\n- **Top 5 Regions (Last 30 Days)**: <List of top 5 regions with revenue>\\n\\n**7. Distribution**\\n- **Replacement Channel Revenue**: <Value with contribution %>\\n- **OEM Channel Revenue**: <Value with contribution %>\\n- **STU Channel Revenue**: <Value with contribution %>\\n- **DEF Channel Revenue**: <Value with contribution %>\\n\\n**8. Target Performance**\\n- **Total Target Value**: <Value>\\n- **Overall Achievement %**: <Value>\\n- **Target Shortfall**: <Value>\\n- **Quantity Achievement %**: <Value>\\n- **Top Target Shortfall Territory**: <Value>\\n\\n### Business Risks\\n- <Data-driven Risk 1 (e.g. High customer concentration)>\\n- <Data-driven Risk 2 (e.g. High discount dependency)>\\n- <Data-driven Risk 3>\\n\\n### Actionable Recommendations\\n- <Data-driven Recommendation 1 (e.g. Improve sales in low-performing territories)>\\n- <Data-driven Recommendation 2 (e.g. Reduce dependency on top customers)>\\n- <Data-driven Recommendation 3>",
   "follow_up_questions": ["What ...?", "What ...?", "What ...?", "What ...?", "What ...?"],
   "visualizations": [
     {{

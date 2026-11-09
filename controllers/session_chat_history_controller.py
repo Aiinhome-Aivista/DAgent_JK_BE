@@ -757,13 +757,20 @@ def get_chat_history(get_connection_func):
                 try: viz = json.loads(row["visualizations"])
                 except: pass
 
+            c_at = None
+            if row.get("created_at"):
+                val = row["created_at"].isoformat() if hasattr(row["created_at"], "isoformat") else str(row["created_at"])
+                if not val.endswith("Z") and "+" not in val and "-" not in val[10:]:
+                    val += "Z"
+                c_at = val
+
             grouped_sessions[visit_num].append({
                 "questionId": str(row['id']),
                 "question": row["question"],
                 "answer": row["answer"],
                 "follow_up_questions": fuq,    
                 "visualizations": viz,
-                "created_at": row["created_at"].isoformat() if row.get("created_at") else None         
+                "created_at": c_at         
             })
             
             if visit_num not in grouped_users:
