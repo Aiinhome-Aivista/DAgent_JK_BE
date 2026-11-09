@@ -984,12 +984,8 @@ def get_sales_summary_no_values_controller(get_db_connection):
         cached_rows = get_cached_data(mysql_conn, effective_session, year_month)
 
         if cached_rows and not force_refresh:
-            last_sync = cached_rows[0].get("last_synced_at")
-            if last_sync:
-                diff_sec = (datetime.now() - last_sync).total_seconds()
-                if diff_sec < 7200:  # Fresh for 2 hours
-                    rows = cached_rows
-                    is_fresh = True
+            rows = cached_rows
+            is_fresh = True
 
         if not is_fresh and is_hana:
             try:
