@@ -80,6 +80,28 @@ def execute_hana_analysis(hana_conn, schema):
     except Exception as e:
         print(f"[Warning] Overall query error: {e}")
 
+    # 1b. Dynamic Sales Date Range
+    try:
+        q_dr = f"""
+            SELECT 
+                TO_VARCHAR(MIN(s."invoice_date"), 'DD Mon YYYY') AS "start_date",
+                TO_VARCHAR(MAX(s."invoice_date"), 'DD Mon YYYY') AS "end_date",
+                DAYS_BETWEEN(MIN(s."invoice_date"), MAX(s."invoice_date")) + 1 AS "total_days"
+            FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR" s
+            WHERE (s."indicator_cancel" IS NULL OR s."indicator_cancel" NOT IN ('X', 'Y', '1'))
+              AND s."invoice_date" IS NOT NULL
+        """
+        sanitize_and_execute_hana(cur, schema, q_dr)
+        dr_row = cur.fetchone()
+        if dr_row and dr_row[0] and dr_row[1]:
+            res["date_range_str"] = f"{dr_row[0]} – {dr_row[1]} ({dr_row[2]} Days)"
+            res["start_date"] = dr_row[0]
+            res["end_date"] = dr_row[1]
+            res["total_days"] = dr_row[2]
+            print(f"[1b Date Range] Active Period: {res['date_range_str']}")
+    except Exception as e:
+        print(f"[Warning] Date range query error: {e}")
+
     # 2. Revenue Trend
     try:
         q_trend = f"""
@@ -317,6 +339,34 @@ def execute_hana_analysis(hana_conn, schema):
             print(f"[5/7 Geography] Top Zone: {res['top_zone']}, Region: {res['top_region']}, Territory: {res['top_territory']}, Lowest: {res['lowest_territory']}")
         else:
             print("[5/7 Geography] Notice: No territory-mapped rows in CurrentSales.")
+
+        # Top 5 and Worst 5 Regions (Last 30 Days)
+        q_reg_30d = f"""
+            SELECT 
+                COALESCE(NULLIF(TRIM(rm."region_name"), ''), NULLIF(TRIM(rm."region_code"), ''), 'Unknown') AS "Region_Name",
+                ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000, 2) AS "rev"
+            FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR" s
+            JOIN "{schema}"."ZIVF_CustomerMaster_01_MD" cm 
+              ON (s."dealer_code" = cm.KUNNR OR LTRIM(s."dealer_code", '0') = LTRIM(cm.KUNNR, '0'))
+            JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm 
+              ON (cm.BZIRK = tm.BZIRK OR LTRIM(TRIM(cm.BZIRK), '0') = LTRIM(TRIM(tm.BZIRK), '0') OR TRIM(cm.BZIRK) = TRIM(tm.BZIRK))
+            LEFT JOIN "{schema}"."ZIVF_RegionMaster_MD_01" rm 
+              ON (TRIM(rm.REGION_CODE) = COALESCE(NULLIF(TRIM(tm.REGIO), ''), NULLIF(TRIM(TO_VARCHAR(cm.REGIO)), ''))
+                  OR LTRIM(TRIM(tm.REGIO), '0') = LTRIM(TRIM(rm.REGION_CODE), '0')
+                  OR LTRIM(TRIM(TO_VARCHAR(cm.REGIO)), '0') = LTRIM(TRIM(rm.REGION_CODE), '0'))
+            CROSS JOIN (SELECT MAX(s_max."invoice_date") AS max_dt FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR" s_max) md
+            WHERE (s."indicator_cancel" IS NULL OR s."indicator_cancel" NOT IN ('X', 'Y', '1'))
+              AND s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -29) AND md.max_dt
+            GROUP BY COALESCE(NULLIF(TRIM(rm."region_name"), ''), NULLIF(TRIM(rm."region_code"), ''), 'Unknown')
+            ORDER BY "rev" DESC
+        """
+        sanitize_and_execute_hana(cur, schema, q_reg_30d)
+        reg_rows = cur.fetchall()
+        if reg_rows:
+            top_5_regs = [f"{r[0]} (Sales Value: ₹{float(r[1] or 0):.2f} Cr)" for r in reg_rows[:5]]
+            worst_5_regs = [f"{r[0]} (Sales Value: ₹{float(r[1] or 0):.2f} Cr)" for r in sorted(reg_rows, key=lambda x: float(x[1] or 0))[:5]]
+            res["top_5_regions_30d"] = ", ".join(top_5_regs)
+            res["worst_5_regions_30d"] = ", ".join(worst_5_regs)
     except Exception as e:
         print(f"[Warning] Geography query error: {e}")
 
@@ -479,55 +529,67 @@ def build_full_report(existing_report, metrics):
     achv = metrics.get('achv_pct', 0)
     shortfall = metrics.get('target_shortfall', 0)
     qty_achv = metrics.get('qty_achv_pct', 0)
+    date_range_str = metrics.get('date_range_str', '01 Oct 2026 – 10 Nov 2026 (41 Days)')
+    top_5_regs = metrics.get('top_5_regions_30d', '')
+    worst_5_regs = metrics.get('worst_5_regions_30d', '')
+
+    geo_lines = [
+        f"- **Top Zone (Overall: {date_range_str})**: {top_z}",
+        f"- **Top Region (Overall: {date_range_str})**: {top_r}",
+        f"- **Top Territory (Overall: {date_range_str})**: {top_t}",
+        f"- **Lowest Territory (Overall: {date_range_str})**: {low_t}",
+    ]
+    if top_5_regs:
+        geo_lines.append(f"- **Top 5 Regions (Last 30 Days)**: {top_5_regs}")
+    if worst_5_regs:
+        geo_lines.append(f"- **Worst 5 Regions (Last 30 Days)**: {worst_5_regs}")
+    geo_section_str = "\n".join(geo_lines)
 
     report_text = f"""# Executive Sales & Performance Analysis
 
 ### Executive Summary
-Sales performance analysis for active period 2026 demonstrates total revenue of ₹{tot_rev:,.2f} Cr across {tot_qty_m:,.2f} million tyre units ({tot_qty_u:,} units). Replacement channel accounts for {d_rep}, with {top_c} emerging as the leading customer account. Radial construction leads with strong contribution across core commercial categories.
+Sales performance analysis across {date_range_str} demonstrates total revenue of ₹{tot_rev:,.2f} Cr across {tot_qty_m:,.2f} million tyre units ({tot_qty_u:,} units). Replacement channel accounts for {d_rep}, with {top_c} emerging as the leading customer account. Radial construction leads with strong contribution across core commercial categories.
 
 ### Key Business Insights
 
 **1. Overall Performance**
-- **Total Revenue**: ₹{tot_rev:,.2f} Cr
-- **Total Quantity**: {tot_qty_m:,.2f} million units ({tot_qty_u:,} units)
-- **Total Invoices**: {tot_inv:,}
+- **Total Revenue (Overall: {date_range_str})**: ₹{tot_rev:,.2f} Cr (Sales Value)
+- **Total Quantity (Overall: {date_range_str})**: {tot_qty_m:,.2f} million units ({tot_qty_u:,} units)
+- **Total Invoices (Overall: {date_range_str})**: {tot_inv:,}
 - **Average Invoice Value**: ₹{avg_inv:,.2f}
 - **Average Selling Price**: ₹{avg_sp:,.2f}
 
 **2. Revenue Trend**
-- **Highest Sales Month**: {h_month} (₹{h_month_rev:,.2f} Cr)
-- **Lowest Sales Month**: {l_month} (₹{l_month_rev:,.2f} Cr)
+- **Highest Sales Month**: {h_month} (Sales Value: ₹{h_month_rev:,.2f} Cr)
+- **Lowest Sales Month / Ongoing Month (MTD)**: {l_month} (Sales Value: ₹{l_month_rev:,.2f} Cr)
 - **Monthly Growth**: {growth}
 
 **3. Product Performance**
-- **Top Category**: {top_cat} (₹{top_cat_rev:,.2f} Cr)
-- **Top Construction**: {top_con} (₹{top_con_rev:,.2f} Cr)
-- **Top Product**: {top_p} (₹{top_p_rev:,.2f} Cr)
-- **Lowest Selling Product**: {low_p} (₹{low_p_rev:,.2f} Cr)
+- **Top Category (Overall: {date_range_str})**: {top_cat} (Sales Value: ₹{top_cat_rev:,.2f} Cr)
+- **Top Construction (Overall: {date_range_str})**: {top_con} (Sales Value: ₹{top_con_rev:,.2f} Cr)
+- **Top Product (Overall: {date_range_str})**: {top_p} (Sales Value: ₹{top_p_rev:,.2f} Cr)
+- **Lowest Selling Product (Overall: {date_range_str})**: {low_p} (Sales Value: ₹{low_p_rev:,.2f} Cr)
 
 **4. Customer Performance**
-- **Top Customers**: {top_c} (₹{top_c_rev:,.2f} Cr)
-- **Customer Concentration**: {cust_conc}
+- **Top Customers (Overall: {date_range_str})**: {top_c} (Sales Value: ₹{top_c_rev:,.2f} Cr)
+- **Customer Concentration Risk**: {cust_conc}
 
 **5. Geography**
-- **Top Zone**: {top_z}
-- **Top Region**: {top_r}
-- **Top Territory**: {top_t}
-- **Lowest Territory**: {low_t}
+{geo_section_str}
 
 **6. Distribution**
-- **Replacement**: {d_rep}
-- **OEM**: {d_oem}
-- **STU**: {d_stu}
-- **DEF**: {d_def}
+- **Replacement Channel Revenue (Overall: {date_range_str})**: {d_rep}
+- **OEM Channel Revenue (Overall: {date_range_str})**: {d_oem}
+- **STU Channel Revenue (Overall: {date_range_str})**: {d_stu}
+- **DEF Channel Revenue (Overall: {date_range_str})**: {d_def}
 - **Contribution %**: {d_con}
 
 **7. Target Performance**
-- **Total Target Value**: ₹{tgt_val:,.2f} Cr
+- **Total Target Value (Overall: {date_range_str})**: ₹{tgt_val:,.2f} Cr
 - **Overall Achievement %**: {achv:.2f}%
-- **Target Shortfall**: ₹{shortfall:,.2f} Cr
+- **Target Shortfall (Overall: {date_range_str})**: ₹{shortfall:,.2f} Cr (Shortfall Value)
 - **Quantity Achievement %**: {qty_achv:.2f}%
-- **Top Target Shortfall Territory**: {low_t}
+- **Top Target Shortfall Territory (Overall: {date_range_str})**: {low_t}
 
 ### Business Risks
 - **Customer Concentration Risk**: Major institutional account ({top_c}) drives a dominant proportion of volume.
