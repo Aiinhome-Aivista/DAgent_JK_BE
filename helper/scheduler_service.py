@@ -81,6 +81,7 @@ def _execute_sync_task():
             execute_exposure_pct,
         )
         from helper.dashboard_cache_service import set_cached_component_data
+        from utils.logger_service import log_system_error
 
         for ws in workspaces:
             s_id = ws.get("session_id")
@@ -103,6 +104,8 @@ def _execute_sync_task():
                 print(f"[Scheduler] ✅ [1/12] Key Metrics synced in {round(time.time() - t_step, 2)}s", flush=True)
             except Exception as e:
                 print(f"[Scheduler] ❌ [1/12] Error syncing key_metrics: {e}", flush=True)
+                try: log_system_error(session_id=s_id, module_name="scheduler:key_metrics", error_msg=str(e))
+                except Exception: pass
 
             # 2. Top 10 Tyre Types by Sales (Dedicated table: dashboard_tyre_sales_top_10 - Bulk Permutations)
             t_step = time.time()
@@ -113,6 +116,8 @@ def _execute_sync_task():
                 print(f"[Scheduler] ✅ [2/12] Tyre Sales permutations synced in {round(time.time() - t_step, 2)}s", flush=True)
             except Exception as e:
                 print(f"[Scheduler] ❌ [2/12] Error syncing tyre_sales: {e}", flush=True)
+                try: log_system_error(session_id=s_id, module_name="scheduler:tyre_sales", error_msg=str(e))
+                except Exception: pass
 
             # 3. Sales By Zone (Pie Chart - Dedicated table: dashboard_sales_by_zone - Bulk Permutations)
             t_step = time.time()
@@ -123,6 +128,8 @@ def _execute_sync_task():
                 print(f"[Scheduler] ✅ [3/12] Sales by Zone permutations synced in {round(time.time() - t_step, 2)}s", flush=True)
             except Exception as e:
                 print(f"[Scheduler] ❌ [3/12] Error syncing sales_by_zone: {e}", flush=True)
+                try: log_system_error(session_id=s_id, module_name="scheduler:sales_by_zone", error_msg=str(e))
+                except Exception: pass
 
             # 4. Year-wise Sales Comparison (Dedicated table: year_wise_sales_comparison - Bulk Permutations)
             t_step = time.time()
@@ -133,6 +140,8 @@ def _execute_sync_task():
                 print(f"[Scheduler] ✅ [4/12] Year-wise Sales permutations synced in {round(time.time() - t_step, 2)}s", flush=True)
             except Exception as e:
                 print(f"[Scheduler] ❌ [4/12] Error syncing year_wise_sales: {e}", flush=True)
+                try: log_system_error(session_id=s_id, module_name="scheduler:year_wise_sales", error_msg=str(e))
+                except Exception: pass
 
             # 5. Sales Revenue Plan vs Sale (Dedicated controller & table)
             t_step = time.time()
@@ -144,6 +153,8 @@ def _execute_sync_task():
                 print(f"[Scheduler] ✅ [5/12] Sales Revenue Plan vs Sale synced in {round(time.time() - t_step, 2)}s", flush=True)
             except Exception as e:
                 print(f"[Scheduler] ❌ [5/12] Error syncing sales_revenue: {e}", flush=True)
+                try: log_system_error(session_id=s_id, module_name="scheduler:sales_revenue", error_msg=str(e))
+                except Exception: pass
 
             # 6. Actual Sales by Account Category (Dedicated controller & table)
             t_step = time.time()
@@ -155,6 +166,8 @@ def _execute_sync_task():
                 print(f"[Scheduler] ✅ [6/12] Sales by Account Category synced in {round(time.time() - t_step, 2)}s", flush=True)
             except Exception as e:
                 print(f"[Scheduler] ❌ [6/12] Error syncing sales_by_account: {e}", flush=True)
+                try: log_system_error(session_id=s_id, module_name="scheduler:sales_by_account", error_msg=str(e))
+                except Exception: pass
 
             # 7. Category Sales (Dedicated controller & table)
             t_step = time.time()
@@ -166,6 +179,8 @@ def _execute_sync_task():
                 print(f"[Scheduler] ✅ [7/12] Category Sales synced in {round(time.time() - t_step, 2)}s", flush=True)
             except Exception as e:
                 print(f"[Scheduler] ❌ [7/12] Error syncing category_sales: {e}", flush=True)
+                try: log_system_error(session_id=s_id, module_name="scheduler:category_sales", error_msg=str(e))
+                except Exception: pass
 
             # 8. Domestic Sales Value Achievement (Dedicated table: sales_summary_domestic_sales_value_achievement - All Month Permutations)
             t_step = time.time()
@@ -176,6 +191,8 @@ def _execute_sync_task():
                 print(f"[Scheduler] ✅ [8/12] Domestic Sales Value Achievement (Sheet 1) synced in {round(time.time() - t_step, 2)}s", flush=True)
             except Exception as e:
                 print(f"[Scheduler] ❌ [8/12] Error syncing domestic_sales_value_achievement: {e}", flush=True)
+                try: log_system_error(session_id=s_id, module_name="scheduler:domestic_sales_value_achievement", error_msg=str(e))
+                except Exception: pass
 
             # 9. Sales Number's (Sheet 2 - Dedicated table: sales_summary_sales_numbers - All Month Permutations)
             t_step = time.time()
@@ -186,6 +203,8 @@ def _execute_sync_task():
                 print(f"[Scheduler] ✅ [9/12] Sales Number's (Sheet 2) synced in {round(time.time() - t_step, 2)}s", flush=True)
             except Exception as e:
                 print(f"[Scheduler] ❌ [9/12] Error syncing sales_numbers_report: {e}", flush=True)
+                try: log_system_error(session_id=s_id, module_name="scheduler:sales_numbers_report", error_msg=str(e))
+                except Exception: pass
 
             # 10. Sales Report by Values (Sheet 3 - Dedicated table: sales_summary_sales_report_by_values - All Month Permutations)
             t_step = time.time()
@@ -196,6 +215,8 @@ def _execute_sync_task():
                 print(f"[Scheduler] ✅ [10/12] Sales Report by Values (Sheet 3) synced in {round(time.time() - t_step, 2)}s", flush=True)
             except Exception as e:
                 print(f"[Scheduler] ❌ [10/12] Error syncing sales_report_by_values: {e}", flush=True)
+                try: log_system_error(session_id=s_id, module_name="scheduler:sales_report_by_values", error_msg=str(e))
+                except Exception: pass
 
             # 11. Sales Summary in No's & Values (Sheet 4 - Dedicated table: sales_summary_no_values - All Month Permutations)
             t_step = time.time()
@@ -206,6 +227,8 @@ def _execute_sync_task():
                 print(f"[Scheduler] ✅ [11/12] Sales Summary in No's & Values (Sheet 4) synced in {round(time.time() - t_step, 2)}s", flush=True)
             except Exception as e:
                 print(f"[Scheduler] ❌ [11/12] Error syncing sales_summary_no_values: {e}", flush=True)
+                try: log_system_error(session_id=s_id, module_name="scheduler:sales_summary_no_values", error_msg=str(e))
+                except Exception: pass
 
             # 12. Executive Sales & Performance Analysis Summary (HANA Core KPIs + LLM Summary)
             t_step = time.time()
@@ -216,6 +239,8 @@ def _execute_sync_task():
                 print(f"[Scheduler] ✅ [12/13] Executive Analysis Summary synced in {round(time.time() - t_step, 2)}s", flush=True)
             except Exception as e:
                 print(f"[Scheduler] ❌ [12/13] Error syncing executive_analysis_summary: {e}", flush=True)
+                try: log_system_error(session_id=s_id, module_name="scheduler:executive_analysis_summary", error_msg=str(e))
+                except Exception: pass
 
             # 13. Top 10 & Bottom 10 Sales Performance (Dedicated table: dashboard_top_bottom_performance)
             t_step = time.time()
@@ -226,6 +251,8 @@ def _execute_sync_task():
                 print(f"[Scheduler] ✅ [13/13] Top 10 & Bottom 10 Performance synced in {round(time.time() - t_step, 2)}s", flush=True)
             except Exception as e:
                 print(f"[Scheduler] ❌ [13/13] Error syncing top_bottom_performance: {e}", flush=True)
+                try: log_system_error(session_id=s_id, module_name="scheduler:top_bottom_performance", error_msg=str(e))
+                except Exception: pass
 
             # Filter Metadata Cache
             try:
@@ -235,6 +262,8 @@ def _execute_sync_task():
                     dashboard_filters_controller(_get_db_conn_func)
             except Exception as e:
                 print(f"[Scheduler] Note on filters cache: {e}", flush=True)
+                try: log_system_error(session_id=s_id, module_name="scheduler:filters_cache", error_msg=str(e))
+                except Exception: pass
 
             print(f"[Scheduler] 🎉 Completed all 13 dashboard components (Key Metrics, 7 Charts, 4 Sales Summary Sheets & Executive Analysis) for '{ws_name}' in {round(time.time() - ws_start_t, 2)}s!", flush=True)
             print(f"[Scheduler] ====================================================================\n", flush=True)
@@ -261,6 +290,11 @@ def _execute_sync_task():
             if job and job.next_run_time:
                 next_run = job.next_run_time.strftime("%Y-%m-%d %H:%M:%S")
         record_scheduler_run(conn, "sync_dashboard_metrics", "failed", duration, next_run, error_message=err_msg)
+        try:
+            from utils.logger_service import log_system_error
+            log_system_error(session_id="scheduler", module_name="sync_dashboard_metrics", error_msg=err_msg)
+        except Exception:
+            pass
     finally:
         if conn and hasattr(conn, "is_connected") and conn.is_connected():
             try: conn.close()

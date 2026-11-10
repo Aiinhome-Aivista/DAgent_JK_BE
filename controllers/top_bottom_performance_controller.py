@@ -19,6 +19,7 @@ Features:
 import time
 from datetime import datetime, timezone, timedelta
 from flask import request, jsonify
+from utils.logger_service import log_system_error
 
 TOP_BOTTOM_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS `dashboard_top_bottom_performance` (
@@ -377,6 +378,10 @@ def bulk_sync_top_bottom_performance(mysql_conn, session_id: str, user_id=None):
                         ))
                 except Exception as slice_err:
                     print(f"[Bulk Sync Top/Bottom] Error on {dim} ({d} days): {slice_err}", flush=True)
+                    try:
+                        log_system_error(session_id=effective_session, module_name="top_bottom_performance", error_msg=f"{dim} ({d} days): {slice_err}")
+                    except Exception:
+                        pass
 
         if records_to_insert:
             m_cur = mysql_conn.cursor()
@@ -394,6 +399,10 @@ def bulk_sync_top_bottom_performance(mysql_conn, session_id: str, user_id=None):
             return True
     except Exception as e:
         print(f"[Bulk Sync Top/Bottom] Main execution error: {e}", flush=True)
+        try:
+            log_system_error(session_id=effective_session, module_name="top_bottom_performance", error_msg=f"Bulk sync: {e}")
+        except Exception:
+            pass
         return False
     finally:
         try:
@@ -544,6 +553,10 @@ def get_top_bottom_performance_controller(get_db_connection):
 
     except Exception as e:
         print(f"[Top/Bottom Controller] Error: {e}", flush=True)
+        try:
+            log_system_error(session_id=effective_session, module_name="top_bottom_performance", error_msg=str(e))
+        except Exception:
+            pass
         return jsonify({"status": "error", "message": str(e), "top_10": [], "bottom_10": []}), 500
     finally:
         try: mysql_conn.close()

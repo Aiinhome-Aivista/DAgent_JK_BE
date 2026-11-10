@@ -14,6 +14,7 @@ import calendar
 from datetime import datetime
 from flask import request, jsonify
 from helper.sap_connection import get_sap_connection_for_session, sanitize_and_execute_hana, detect_sales_dates
+from utils.logger_service import log_system_error
 
 TABLE_NAME = "sales_summary_sales_numbers"
 
@@ -370,7 +371,7 @@ def query_sales_numbers_hana(cursor, schema, year_month: str, selected_date: str
         GROUP BY Category
     ),
 
-    AGG_TARGET AS (
+    TARGET_CLASSIFIED AS (
         SELECT
             (
                 CASE
@@ -414,14 +415,21 @@ def query_sales_numbers_hana(cursor, schema, year_month: str, selected_date: str
                     ELSE 'BIAS'
                 END
             ) AS Category,
-            SUM(COALESCE(NULLIF(tgt."ORG_PLAN", 0), NULLIF(tgt."REV_PLAN", 0), NULLIF(tgt."HO_PLAN", 0), NULLIF(tgt."REG_PLAN", 0), NULLIF(tgt."AREA_PLAN", 0), 0)) AS Target_Qty
+            COALESCE(NULLIF(tgt."ORG_PLAN", 0), NULLIF(tgt."REV_PLAN", 0), NULLIF(tgt."HO_PLAN", 0), NULLIF(tgt."REG_PLAN", 0), NULLIF(tgt."AREA_PLAN", 0), 0) AS Target_Plan
         FROM "{schema}"."ZIVF_SD_Sales_Plan_Target_01_TR" tgt
         LEFT JOIN "{schema}"."ZIVR_SKUMaster_01_TR" sk
             ON LTRIM(TRIM(tgt."MATNR"), '0') = LTRIM(TRIM(sk."MATNR"), '0')
         LEFT JOIN "{schema}"."ZIVF_CategoryMaster_01_TR" cat
             ON (COALESCE(NULLIF(TRIM(tgt."CAT_CODE"), ''), NULLIF(TRIM(sk."CAT_CODE"), '')) = TRIM(cat."CAT_CODE"))
         WHERE (CAST(tgt."YMONTH" AS VARCHAR) = '{year_month}' OR tgt."YMONTH" = '{year_month}')
-        GROUP BY 1
+    ),
+
+    AGG_TARGET AS (
+        SELECT
+            Category,
+            SUM(Target_Plan) AS Target_Qty
+        FROM TARGET_CLASSIFIED
+        GROUP BY Category
     ),
 
     ALL_CATS AS (
@@ -724,11 +732,19 @@ def bulk_sync_sales_numbers_report(mysql_conn, session_id: str, user_id=None):
                     save_data_to_table(mysql_conn, session_id, ym, sel_date, rows)
             except Exception as e:
                 print(f"[{TABLE_NAME}] Sync error for month {ym}: {e}", flush=True)
+                try:
+                    log_system_error(session_id=session_id, module_name=TABLE_NAME, error_msg=f"Sync error for month {ym}: {e}")
+                except Exception:
+                    pass
 
         h_cur.close()
         return True
     except Exception as e:
         print(f"[{TABLE_NAME}] Bulk sync failed: {e}", flush=True)
+        try:
+            log_system_error(session_id=session_id, module_name=TABLE_NAME, error_msg=f"Bulk sync failed: {e}")
+        except Exception:
+            pass
         return False
     finally:
         if hana_conn:
