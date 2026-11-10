@@ -1902,8 +1902,9 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
                 return view_lookup[n.lower()]
         return None
 
-    # Prefer CurrentSales (active period 2026), fallback to SalesHistory
-    sales_view = resolve("ZPVF_SD_CurrentSales_01_TR", "ZPVF_SD_SalesHistory_01_TR", "ZPVF_SD_CancelledSalesInvoice_01_TR")
+    # Resolve fact and master views
+    curr_view = resolve("ZPVF_SD_CurrentSales_01_TR")
+    hist_view = resolve("ZPVF_SD_SalesHistory_01_TR")
     sku_view = resolve("ZIVR_SKUMaster_01_TR")
     cat_view = resolve("ZIVF_CategoryMaster_01_TR")
     cust_view = resolve("ZIVF_CustomerMaster_01_MD")
@@ -1913,11 +1914,42 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
     target_view = resolve("ZIVF_SD_Sales_Plan_Target_01_TR")
     canc_view = resolve("ZPVF_SD_CancelledSalesInvoice_01_TR")
 
-    if not sales_view:
+    if not curr_view and not hist_view:
         print("[CoreKPI-HANA] No sales fact view found in view list", flush=True)
         return kpis
 
+    # Current Calendar Year 2026 (01 Jan 2026 – Till Now)
     schema = sap_schema or "SAP_S4"
+    current_year = datetime.now().year
+    year_start = f"{current_year}-01-01"
+
+    # Common projected sales columns across CurrentSales and SalesHistory
+    sales_cols = '''s."distribution_channel", s."plant", s."invoice_number", s."invoice_date", 
+                    s."indicator_cancel", s."dealer_code", s."SKU", s."FKART", s."invoice_value", s."Tyre_Quantity"'''
+
+    if curr_view and hist_view:
+        sales_source = f'''(
+            SELECT {sales_cols}
+            FROM "{schema}"."{curr_view}" s
+            WHERE s."invoice_date" >= '{year_start}'
+            UNION ALL
+            SELECT {sales_cols}
+            FROM "{schema}"."{hist_view}" s
+            WHERE s."invoice_date" >= '{year_start}'
+        )'''
+    elif curr_view:
+        sales_source = f'''(
+            SELECT {sales_cols}
+            FROM "{schema}"."{curr_view}" s
+            WHERE s."invoice_date" >= '{year_start}'
+        )'''
+    else:
+        sales_source = f'''(
+            SELECT {sales_cols}
+            FROM "{schema}"."{hist_view}" s
+            WHERE s."invoice_date" >= '{year_start}'
+        )'''
+
     cur = None
     try:
         cur = hana_conn.cursor()
@@ -1955,31 +1987,31 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
     # ---------- 1. Overall Performance ----------
     run("total_revenue", f"""
         SELECT ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS total_revenue
-        FROM "{schema}"."{sales_view}" s
+        FROM {sales_source} s
         {sales_where}
     """)
 
     run("total_quantity", f"""
         SELECT ROUND(SUM(COALESCE(s."Tyre_Quantity", 0)), 2) AS total_quantity
-        FROM "{schema}"."{sales_view}" s
+        FROM {sales_source} s
         {sales_where}
     """)
 
     run("total_transactions", f"""
         SELECT COUNT(*) AS total_transactions
-        FROM "{schema}"."{sales_view}" s
+        FROM {sales_source} s
         {sales_where}
     """)
 
     run("avg_transaction_value", f"""
         SELECT ROUND(SUM(COALESCE(s."invoice_value", 0)) / NULLIF(COUNT(*), 0), 2) AS average_transaction_value
-        FROM "{schema}"."{sales_view}" s
+        FROM {sales_source} s
         {sales_where}
     """)
 
     run("avg_selling_price", f"""
         SELECT ROUND(SUM(COALESCE(s."invoice_value", 0)) / NULLIF(SUM(COALESCE(s."Tyre_Quantity", 0)), 0), 2) AS average_selling_price
-        FROM "{schema}"."{sales_view}" s
+        FROM {sales_source} s
         {sales_where}
     """)
 
@@ -1987,8 +2019,10 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
         SELECT 
             TO_VARCHAR(MIN(s."invoice_date"), 'DD Mon YYYY') AS start_date,
             TO_VARCHAR(MAX(s."invoice_date"), 'DD Mon YYYY') AS end_date,
-            DAYS_BETWEEN(MIN(s."invoice_date"), MAX(s."invoice_date")) + 1 AS total_days
-        FROM "{schema}"."{sales_view}" s
+            DAYS_BETWEEN(MIN(s."invoice_date"), MAX(s."invoice_date")) + 1 AS total_days,
+            'Till Now' AS till_date_str,
+            TO_VARCHAR(MIN(s."invoice_date"), 'DD Mon YYYY') || ' – Till Now' AS display_range
+        FROM {sales_source} s
         {sales_where}
     """)
 
@@ -1998,7 +2032,7 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
             YEAR(s."invoice_date") AS sales_year,
             MONTHNAME(s."invoice_date") AS month_name,
             ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue
-        FROM "{schema}"."{sales_view}" s
+        FROM {sales_source} s
         {sales_where}
         GROUP BY YEAR(s."invoice_date"), MONTH(s."invoice_date"), MONTHNAME(s."invoice_date")
         ORDER BY revenue DESC
@@ -2010,7 +2044,7 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
             YEAR(s."invoice_date") AS sales_year,
             MONTHNAME(s."invoice_date") AS month_name,
             ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue
-        FROM "{schema}"."{sales_view}" s
+        FROM {sales_source} s
         {sales_where}
         GROUP BY YEAR(s."invoice_date"), MONTH(s."invoice_date"), MONTHNAME(s."invoice_date")
         ORDER BY revenue ASC
@@ -2024,7 +2058,7 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
                 MONTH(s."invoice_date") AS sales_month,
                 MONTHNAME(s."invoice_date") AS month_name,
                 (SUM(COALESCE(s."invoice_value", 0)) / 10000000.0) AS revenue
-            FROM "{schema}"."{sales_view}" s
+            FROM {sales_source} s
             {sales_where}
             GROUP BY YEAR(s."invoice_date"), MONTH(s."invoice_date"), MONTHNAME(s."invoice_date")
         ),
@@ -2051,7 +2085,7 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
                 MONTH(s."invoice_date") AS sales_month,
                 MONTHNAME(s."invoice_date") AS month_name,
                 (SUM(COALESCE(s."invoice_value", 0)) / 10000000.0) AS revenue
-            FROM "{schema}"."{sales_view}" s
+            FROM {sales_source} s
             {sales_where}
             GROUP BY YEAR(s."invoice_date"), MONTH(s."invoice_date"), MONTHNAME(s."invoice_date")
         ),
@@ -2077,7 +2111,7 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
             SELECT
                 COALESCE(NULLIF(TRIM(cat."CAT_DESC"), ''), NULLIF(TRIM(cat."SHORT_DESC"), ''), 'Unmapped Category') AS category_name,
                 ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue
-            FROM "{schema}"."{sales_view}" s
+            FROM {sales_source} s
             INNER JOIN "{schema}"."{sku_view}" sk ON TRIM(s."SKU") = TRIM(sk."MATNR")
             LEFT JOIN "{schema}"."{cat_view}" cat ON TRIM(sk."CAT_CODE") = TRIM(cat."CAT_CODE")
             {sales_where}
@@ -2090,7 +2124,7 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
             SELECT
                 COALESCE(NULLIF(TRIM(cat."CAT_DESC"), ''), NULLIF(TRIM(cat."SHORT_DESC"), ''), 'Unmapped Category') AS category_name,
                 ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue
-            FROM "{schema}"."{sales_view}" s
+            FROM {sales_source} s
             INNER JOIN "{schema}"."{sku_view}" sk ON TRIM(s."SKU") = TRIM(sk."MATNR")
             LEFT JOIN "{schema}"."{cat_view}" cat ON TRIM(sk."CAT_CODE") = TRIM(cat."CAT_CODE")
             {sales_where}
@@ -2108,7 +2142,7 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
                     ELSE COALESCE(NULLIF(TRIM(sk."CONSTUCTION"), ''), NULLIF(TRIM(sk."BULD_TYPE"), ''), 'Unknown')
                 END AS construction_description,
                 ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue
-            FROM "{schema}"."{sales_view}" s
+            FROM {sales_source} s
             INNER JOIN "{schema}"."{sku_view}" sk ON TRIM(s."SKU") = TRIM(sk."MATNR")
             {sales_where}
             GROUP BY CASE 
@@ -2125,7 +2159,7 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
         #     SELECT
         #         COALESCE(NULLIF(TRIM(sk."TYRE_TYPE"), ''), NULLIF(TRIM(sk."TYRE_TP"), ''), 'Unknown') AS tyre_type_name,
         #         ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue
-        #     FROM "{schema}"."{sales_view}" s
+        #     FROM {sales_source} s
         #     INNER JOIN "{schema}"."{sku_view}" sk ON TRIM(s."SKU") = TRIM(sk."MATNR")
         #     {sales_where}
         #     GROUP BY COALESCE(NULLIF(TRIM(sk."TYRE_TYPE"), ''), NULLIF(TRIM(sk."TYRE_TP"), ''), 'Unknown')
@@ -2137,7 +2171,7 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
             SELECT
                 COALESCE(NULLIF(TRIM(sk."MAKTX"), ''), NULLIF(TRIM(sk."PROD_TITLE"), ''), TRIM(s."SKU")) AS product_name,
                 ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue
-            FROM "{schema}"."{sales_view}" s
+            FROM {sales_source} s
             INNER JOIN "{schema}"."{sku_view}" sk ON TRIM(s."SKU") = TRIM(sk."MATNR")
             {sales_where}
             GROUP BY COALESCE(NULLIF(TRIM(sk."MAKTX"), ''), NULLIF(TRIM(sk."PROD_TITLE"), ''), TRIM(s."SKU"))
@@ -2149,7 +2183,7 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
             SELECT
                 COALESCE(NULLIF(TRIM(sk."MAKTX"), ''), NULLIF(TRIM(sk."PROD_TITLE"), ''), TRIM(s."SKU")) AS product_name,
                 ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue
-            FROM "{schema}"."{sales_view}" s
+            FROM {sales_source} s
             INNER JOIN "{schema}"."{sku_view}" sk ON TRIM(s."SKU") = TRIM(sk."MATNR")
             {sales_where}
             GROUP BY COALESCE(NULLIF(TRIM(sk."MAKTX"), ''), NULLIF(TRIM(sk."PROD_TITLE"), ''), TRIM(s."SKU"))
@@ -2166,7 +2200,7 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
                         COALESCE(NULLIF(TRIM(sk."MAKTX"), ''), NULLIF(TRIM(sk."PROD_TITLE"), ''), TRIM(s."SKU")) AS sku_title,
                         ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue_cr,
                         ROW_NUMBER() OVER(PARTITION BY COALESCE(NULLIF(TRIM(cat."CAT_DESC"), ''), 'Other Category') ORDER BY SUM(COALESCE(s."invoice_value", 0)) DESC) AS rk
-                    FROM "{schema}"."{sales_view}" s
+                    FROM {sales_source} s
                     INNER JOIN "{schema}"."{sku_view}" sk ON TRIM(s."SKU") = TRIM(sk."MATNR")
                     LEFT JOIN "{schema}"."{cat_view}" cat ON TRIM(sk."CAT_CODE") = TRIM(cat."CAT_CODE")
                     {sales_where}
@@ -2201,7 +2235,7 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
             SELECT
                 COALESCE(NULLIF(TRIM(cm."NAME1"), ''), NULLIF(TRIM(cm."BNAME"), ''), TRIM(s."dealer_code")) AS customer_name,
                 ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue
-            FROM "{schema}"."{sales_view}" s
+            FROM {sales_source} s
             {cust_join}
             {sales_where}
             GROUP BY COALESCE(NULLIF(TRIM(cm."NAME1"), ''), NULLIF(TRIM(cm."BNAME"), ''), TRIM(s."dealer_code"))
@@ -2213,7 +2247,7 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
             SELECT
                 COALESCE(NULLIF(TRIM(cm."NAME1"), ''), NULLIF(TRIM(cm."BNAME"), ''), TRIM(s."dealer_code")) AS customer_name,
                 ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue
-            FROM "{schema}"."{sales_view}" s
+            FROM {sales_source} s
             {cust_join}
             {sales_where}
             GROUP BY COALESCE(NULLIF(TRIM(cm."NAME1"), ''), NULLIF(TRIM(cm."BNAME"), ''), TRIM(s."dealer_code"))
@@ -2226,8 +2260,8 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
             SELECT
                 COALESCE(NULLIF(TRIM(cm."NAME1"), ''), NULLIF(TRIM(cm."BNAME"), ''), TRIM(s."dealer_code")) AS dealer_name,
                 ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue,
-                ROUND(SUM(COALESCE(s."invoice_value", 0)) * 100.0 / NULLIF((SELECT SUM(COALESCE(s_tot."invoice_value", 0)) FROM "{schema}"."{sales_view}" s_tot {sales_where.replace('s."', 's_tot."')}), 0), 2) AS contribution_percentage
-            FROM "{schema}"."{sales_view}" s
+                ROUND(SUM(COALESCE(s."invoice_value", 0)) * 100.0 / NULLIF((SELECT SUM(COALESCE(s_tot."invoice_value", 0)) FROM {sales_source} s_tot {sales_where.replace('s."', 's_tot."')}), 0), 2) AS contribution_percentage
+            FROM {sales_source} s
             {cust_join}
             {sales_where}
             AND (TRIM(cm."KTOKD") = 'Z001' OR UPPER(TRIM(cm."CH_TYPE")) = 'DL')
@@ -2261,11 +2295,11 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
                 ROUND(SUM(COALESCE(s."Tyre_Quantity", 0)), 0) AS total_units,
                 ROUND(SUM(COALESCE(s."invoice_value", 0)) * 100.0 / NULLIF(
                     (SELECT SUM(COALESCE(s_tot."invoice_value", 0)) 
-                     FROM "{schema}"."{sales_view}" s_tot 
+                     FROM {sales_source} s_tot 
                      WHERE s_tot."distribution_channel" = '10'
                        AND (s_tot."indicator_cancel" IS NULL OR s_tot."indicator_cancel" NOT IN ('X', 'Y', '1'))
                     ), 0), 2) AS contribution_percentage
-            FROM "{schema}"."{sales_view}" s
+            FROM {sales_source} s
             {cust_join}
             {sales_where}
             GROUP BY 
@@ -2301,8 +2335,8 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
                     ELSE CONCAT('Account Group ', COALESCE(NULLIF(TRIM(cm."KTOKD"), ''), 'Unassigned'))
                 END AS top_account_group,
                 ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue,
-                ROUND(SUM(COALESCE(s."invoice_value", 0)) * 100.0 / NULLIF((SELECT SUM(COALESCE(s_tot."invoice_value", 0)) FROM "{schema}"."{sales_view}" s_tot {sales_where.replace('s."', 's_tot."')}), 0), 2) AS contribution_percentage
-            FROM "{schema}"."{sales_view}" s
+                ROUND(SUM(COALESCE(s."invoice_value", 0)) * 100.0 / NULLIF((SELECT SUM(COALESCE(s_tot."invoice_value", 0)) FROM {sales_source} s_tot {sales_where.replace('s."', 's_tot."')}), 0), 2) AS contribution_percentage
+            FROM {sales_source} s
             {cust_join}
             {sales_where}
             GROUP BY 
@@ -2323,8 +2357,8 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
             SELECT
                 COALESCE(NULLIF(TRIM(cm."NAME1"), ''), NULLIF(TRIM(cm."BNAME"), ''), TRIM(s."dealer_code")) AS customer_name,
                 ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue,
-                ROUND(SUM(COALESCE(s."invoice_value", 0)) * 100.0 / NULLIF((SELECT SUM(COALESCE(s_tot."invoice_value", 0)) FROM "{schema}"."{sales_view}" s_tot {sales_where.replace('s."', 's_tot."')}), 0), 2) AS contribution_percentage
-            FROM "{schema}"."{sales_view}" s
+                ROUND(SUM(COALESCE(s."invoice_value", 0)) * 100.0 / NULLIF((SELECT SUM(COALESCE(s_tot."invoice_value", 0)) FROM {sales_source} s_tot {sales_where.replace('s."', 's_tot."')}), 0), 2) AS contribution_percentage
+            FROM {sales_source} s
             {cust_join}
             {sales_where}
             GROUP BY COALESCE(NULLIF(TRIM(cm."NAME1"), ''), NULLIF(TRIM(cm."BNAME"), ''), TRIM(s."dealer_code"))
@@ -2338,9 +2372,9 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
             SELECT
                 COALESCE(NULLIF(TRIM(cm."NAME1"), ''), NULLIF(TRIM(cm."BNAME"), ''), TRIM(s."dealer_code")) AS customer_name,
                 ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue_cr
-            FROM "{schema}"."{sales_view}" s
+            FROM {sales_source} s
             {cust_join}
-            CROSS JOIN (SELECT MAX(s_max."invoice_date") AS max_dt FROM "{schema}"."{sales_view}" s_max) md
+            CROSS JOIN (SELECT MAX(s_max."invoice_date") AS max_dt FROM {sales_source} s_max) md
             {sales_where}
             AND s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -29) AND md.max_dt
             GROUP BY COALESCE(NULLIF(TRIM(cm."NAME1"), ''), NULLIF(TRIM(cm."BNAME"), ''), TRIM(s."dealer_code"))
@@ -2352,9 +2386,9 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
             SELECT
                 COALESCE(NULLIF(TRIM(cm."NAME1"), ''), NULLIF(TRIM(cm."BNAME"), ''), TRIM(s."dealer_code")) AS customer_name,
                 ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue_cr
-            FROM "{schema}"."{sales_view}" s
+            FROM {sales_source} s
             {cust_join}
-            CROSS JOIN (SELECT MAX(s_max."invoice_date") AS max_dt FROM "{schema}"."{sales_view}" s_max) md
+            CROSS JOIN (SELECT MAX(s_max."invoice_date") AS max_dt FROM {sales_source} s_max) md
             {sales_where}
             AND s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -29) AND md.max_dt
             GROUP BY COALESCE(NULLIF(TRIM(cm."NAME1"), ''), NULLIF(TRIM(cm."BNAME"), ''), TRIM(s."dealer_code"))
@@ -2367,9 +2401,9 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
             SELECT
                 COALESCE(NULLIF(TRIM(cm."NAME1"), ''), NULLIF(TRIM(cm."BNAME"), ''), TRIM(s."dealer_code")) AS customer_name,
                 ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue_cr
-            FROM "{schema}"."{sales_view}" s
+            FROM {sales_source} s
             {cust_join}
-            CROSS JOIN (SELECT MAX(s_max."invoice_date") AS max_dt FROM "{schema}"."{sales_view}" s_max) md
+            CROSS JOIN (SELECT MAX(s_max."invoice_date") AS max_dt FROM {sales_source} s_max) md
             {sales_where}
             AND s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -29) AND md.max_dt
             GROUP BY COALESCE(NULLIF(TRIM(cm."NAME1"), ''), NULLIF(TRIM(cm."BNAME"), ''), TRIM(s."dealer_code"))
@@ -2381,9 +2415,9 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
             SELECT
                 COALESCE(NULLIF(TRIM(cm."NAME1"), ''), NULLIF(TRIM(cm."BNAME"), ''), TRIM(s."dealer_code")) AS customer_name,
                 ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue_cr
-            FROM "{schema}"."{sales_view}" s
+            FROM {sales_source} s
             {cust_join}
-            CROSS JOIN (SELECT MAX(s_max."invoice_date") AS max_dt FROM "{schema}"."{sales_view}" s_max) md
+            CROSS JOIN (SELECT MAX(s_max."invoice_date") AS max_dt FROM {sales_source} s_max) md
             {sales_where}
             AND s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -29) AND md.max_dt
             GROUP BY COALESCE(NULLIF(TRIM(cm."NAME1"), ''), NULLIF(TRIM(cm."BNAME"), ''), TRIM(s."dealer_code"))
@@ -2398,8 +2432,8 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
                     s."dealer_code",
                     SUM(CASE WHEN s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -29) AND md.max_dt THEN COALESCE(s."invoice_value", 0) ELSE 0 END) AS curr_rev,
                     SUM(CASE WHEN s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -59) AND ADD_DAYS(md.max_dt, -30) THEN COALESCE(s."invoice_value", 0) ELSE 0 END) AS prev_rev
-                FROM "{schema}"."{sales_view}" s
-                CROSS JOIN (SELECT MAX(s_max."invoice_date") AS max_dt FROM "{schema}"."{sales_view}" s_max) md
+                FROM {sales_source} s
+                CROSS JOIN (SELECT MAX(s_max."invoice_date") AS max_dt FROM {sales_source} s_max) md
                 {sales_where}
                 GROUP BY s."dealer_code"
                 HAVING SUM(CASE WHEN s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -59) AND ADD_DAYS(md.max_dt, -30) THEN COALESCE(s."invoice_value", 0) ELSE 0 END) > 0
@@ -2416,9 +2450,9 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
                     COALESCE(NULLIF(TRIM(cm."NAME1"), ''), NULLIF(TRIM(cm."BNAME"), ''), TRIM(s."dealer_code")) AS customer_name,
                     SUM(CASE WHEN s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -29) AND md.max_dt THEN COALESCE(s."invoice_value", 0) ELSE 0 END) AS curr_rev,
                     SUM(CASE WHEN s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -59) AND ADD_DAYS(md.max_dt, -30) THEN COALESCE(s."invoice_value", 0) ELSE 0 END) AS prev_rev
-                FROM "{schema}"."{sales_view}" s
+                FROM {sales_source} s
                 {cust_join}
-                CROSS JOIN (SELECT MAX(s_max."invoice_date") AS max_dt FROM "{schema}"."{sales_view}" s_max) md
+                CROSS JOIN (SELECT MAX(s_max."invoice_date") AS max_dt FROM {sales_source} s_max) md
                 {sales_where}
                 GROUP BY COALESCE(NULLIF(TRIM(cm."NAME1"), ''), NULLIF(TRIM(cm."BNAME"), ''), TRIM(s."dealer_code"))
                 HAVING SUM(CASE WHEN s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -59) AND ADD_DAYS(md.max_dt, -30) THEN COALESCE(s."invoice_value", 0) ELSE 0 END) > 100000
@@ -2439,8 +2473,8 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
                     s."dealer_code",
                     SUM(CASE WHEN s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -29) AND md.max_dt THEN COALESCE(s."invoice_value", 0) ELSE 0 END) AS curr_rev,
                     SUM(COALESCE(s."invoice_value", 0)) AS total_historical_rev
-                FROM "{schema}"."{sales_view}" s
-                CROSS JOIN (SELECT MAX(s_max."invoice_date") AS max_dt FROM "{schema}"."{sales_view}" s_max) md
+                FROM {sales_source} s
+                CROSS JOIN (SELECT MAX(s_max."invoice_date") AS max_dt FROM {sales_source} s_max) md
                 {sales_where}
                 GROUP BY s."dealer_code"
             )
@@ -2456,8 +2490,8 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
                     s."dealer_code",
                     SUM(CASE WHEN s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -29) AND md.max_dt THEN COALESCE(s."Tyre_Quantity", 0) ELSE 0 END) AS curr_units,
                     SUM(COALESCE(s."Tyre_Quantity", 0)) AS total_historical_units
-                FROM "{schema}"."{sales_view}" s
-                CROSS JOIN (SELECT MAX(s_max."invoice_date") AS max_dt FROM "{schema}"."{sales_view}" s_max) md
+                FROM {sales_source} s
+                CROSS JOIN (SELECT MAX(s_max."invoice_date") AS max_dt FROM {sales_source} s_max) md
                 {sales_where}
                 GROUP BY s."dealer_code"
             )
@@ -2476,7 +2510,7 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
             SELECT
                 COALESCE(NULLIF(TRIM(zm."NAME"), ''), NULLIF(TRIM(zm."P_ZONE"), ''), NULLIF(TRIM(tm."P_ZONE"), ''), 'Unknown') AS zone_name,
                 ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue
-            FROM "{schema}"."{sales_view}" s
+            FROM {sales_source} s
             {cust_join}
             {terr_join}
             {reg_join}
@@ -2491,7 +2525,7 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
             SELECT
                 COALESCE(NULLIF(TRIM(rm."region_name"), ''), NULLIF(TRIM(rm."region_code"), ''), 'Unknown') AS region_name,
                 ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue
-            FROM "{schema}"."{sales_view}" s
+            FROM {sales_source} s
             {cust_join}
             {terr_join}
             {reg_join}
@@ -2505,7 +2539,7 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
             SELECT
                 COALESCE(NULLIF(TRIM(tm."NAME"), ''), NULLIF(TRIM(tm."BZIRK"), ''), 'Unknown') AS territory_name,
                 ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue
-            FROM "{schema}"."{sales_view}" s
+            FROM {sales_source} s
             {cust_join}
             {terr_join}
             {sales_where}
@@ -2518,7 +2552,7 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
             SELECT
                 COALESCE(NULLIF(TRIM(tm."NAME"), ''), NULLIF(TRIM(tm."BZIRK"), ''), 'Unknown') AS territory_name,
                 ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue
-            FROM "{schema}"."{sales_view}" s
+            FROM {sales_source} s
             {cust_join}
             {terr_join}
             {sales_where}
@@ -2532,10 +2566,10 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
             SELECT
                 COALESCE(NULLIF(TRIM(tm."NAME"), ''), NULLIF(TRIM(tm."BZIRK"), ''), 'Unknown') AS territory_name,
                 ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue_cr
-            FROM "{schema}"."{sales_view}" s
+            FROM {sales_source} s
             {cust_join}
             {terr_join}
-            CROSS JOIN (SELECT MAX(s_max."invoice_date") AS max_dt FROM "{schema}"."{sales_view}" s_max) md
+            CROSS JOIN (SELECT MAX(s_max."invoice_date") AS max_dt FROM {sales_source} s_max) md
             {sales_where}
             AND s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -29) AND md.max_dt
             GROUP BY COALESCE(NULLIF(TRIM(tm."NAME"), ''), NULLIF(TRIM(tm."BZIRK"), ''), 'Unknown')
@@ -2547,10 +2581,10 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
             SELECT
                 COALESCE(NULLIF(TRIM(tm."NAME"), ''), NULLIF(TRIM(tm."BZIRK"), ''), 'Unknown') AS territory_name,
                 ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue_cr
-            FROM "{schema}"."{sales_view}" s
+            FROM {sales_source} s
             {cust_join}
             {terr_join}
-            CROSS JOIN (SELECT MAX(s_max."invoice_date") AS max_dt FROM "{schema}"."{sales_view}" s_max) md
+            CROSS JOIN (SELECT MAX(s_max."invoice_date") AS max_dt FROM {sales_source} s_max) md
             {sales_where}
             AND s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -29) AND md.max_dt
             GROUP BY COALESCE(NULLIF(TRIM(tm."NAME"), ''), NULLIF(TRIM(tm."BZIRK"), ''), 'Unknown')
@@ -2564,11 +2598,11 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
                 SELECT
                     COALESCE(NULLIF(TRIM(rm."region_name"), ''), NULLIF(TRIM(rm."region_code"), ''), 'Unknown') AS region_name,
                     ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue_cr
-                FROM "{schema}"."{sales_view}" s
+                FROM {sales_source} s
                 {cust_join}
                 {terr_join}
                 {reg_join}
-                CROSS JOIN (SELECT MAX(s_max."invoice_date") AS max_dt FROM "{schema}"."{sales_view}" s_max) md
+                CROSS JOIN (SELECT MAX(s_max."invoice_date") AS max_dt FROM {sales_source} s_max) md
                 {sales_where}
                 AND s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -29) AND md.max_dt
                 GROUP BY COALESCE(NULLIF(TRIM(rm."region_name"), ''), NULLIF(TRIM(rm."region_code"), ''), 'Unknown')
@@ -2580,11 +2614,11 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
                 SELECT
                     COALESCE(NULLIF(TRIM(rm."region_name"), ''), NULLIF(TRIM(rm."region_code"), ''), 'Unknown') AS region_name,
                     ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue_cr
-                FROM "{schema}"."{sales_view}" s
+                FROM {sales_source} s
                 {cust_join}
                 {terr_join}
                 {reg_join}
-                CROSS JOIN (SELECT MAX(s_max."invoice_date") AS max_dt FROM "{schema}"."{sales_view}" s_max) md
+                CROSS JOIN (SELECT MAX(s_max."invoice_date") AS max_dt FROM {sales_source} s_max) md
                 {sales_where}
                 AND s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -29) AND md.max_dt
                 GROUP BY COALESCE(NULLIF(TRIM(rm."region_name"), ''), NULLIF(TRIM(rm."region_code"), ''), 'Unknown')
@@ -2604,7 +2638,7 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
             ROUND(SUM(CASE WHEN CAST(s."distribution_channel" AS VARCHAR(10)) = '20' THEN COALESCE(s."invoice_value", 0) ELSE 0 END) * 100.0 / NULLIF(SUM(COALESCE(s."invoice_value", 0)), 0), 2) AS oem_pct,
             ROUND(SUM(CASE WHEN CAST(s."distribution_channel" AS VARCHAR(10)) = '30' THEN COALESCE(s."invoice_value", 0) ELSE 0 END) * 100.0 / NULLIF(SUM(COALESCE(s."invoice_value", 0)), 0), 2) AS stu_pct,
             ROUND(SUM(CASE WHEN CAST(s."distribution_channel" AS VARCHAR(10)) = '40' THEN COALESCE(s."invoice_value", 0) ELSE 0 END) * 100.0 / NULLIF(SUM(COALESCE(s."invoice_value", 0)), 0), 2) AS def_pct
-        FROM "{schema}"."{sales_view}" s
+        FROM {sales_source} s
         {sales_where_all_channels}
     """)
 
@@ -2617,8 +2651,8 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
                 WHEN '40' THEN 'DEF'
             END AS distribution_name,
             ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue,
-            ROUND(SUM(COALESCE(s."invoice_value", 0)) * 100.0 / NULLIF((SELECT SUM(COALESCE(s_tot."invoice_value", 0)) FROM "{schema}"."{sales_view}" s_tot {sales_where_all_channels.replace('s."', 's_tot."')}), 0), 2) AS contribution_percentage
-        FROM "{schema}"."{sales_view}" s
+            ROUND(SUM(COALESCE(s."invoice_value", 0)) * 100.0 / NULLIF((SELECT SUM(COALESCE(s_tot."invoice_value", 0)) FROM {sales_source} s_tot {sales_where_all_channels.replace('s."', 's_tot."')}), 0), 2) AS contribution_percentage
+        FROM {sales_source} s
         {sales_where_all_channels}
         GROUP BY CASE CAST(s."distribution_channel" AS VARCHAR(10))
             WHEN '10' THEN 'Replacement'
@@ -2635,7 +2669,7 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
         tgt_qty_col = 'st."ORG_PLAN"'
 
         # Match target to the period/months present in sales fact view
-        tgt_period_filter = f'WHERE st."YMONTH" IN (SELECT DISTINCT TO_VARCHAR(s."invoice_date", \'YYYYMM\') FROM "{schema}"."{sales_view}" s WHERE s."invoice_date" IS NOT NULL)'
+        tgt_period_filter = f'WHERE st."YMONTH" IN (SELECT DISTINCT TO_VARCHAR(s."invoice_date", \'YYYYMM\') FROM {sales_source} s WHERE s."invoice_date" IS NOT NULL)'
 
         # Check if period filter matches rows; if not, fallback gracefully
         test_cnt = 0
@@ -2648,7 +2682,7 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
 
         if test_cnt == 0:
             # Fallback to matching year
-            tgt_period_filter = f'WHERE SUBSTR(st."YMONTH", 1, 4) IN (SELECT DISTINCT TO_VARCHAR(s."invoice_date", \'YYYY\') FROM "{schema}"."{sales_view}" s WHERE s."invoice_date" IS NOT NULL)'
+            tgt_period_filter = f'WHERE SUBSTR(st."YMONTH", 1, 4) IN (SELECT DISTINCT TO_VARCHAR(s."invoice_date", \'YYYY\') FROM {sales_source} s WHERE s."invoice_date" IS NOT NULL)'
             try:
                 cur.execute(f'SELECT COUNT(*) FROM "{schema}"."{target_view}" st {tgt_period_filter}')
                 row_cnt = cur.fetchone()
@@ -2668,9 +2702,9 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
         run("target_performance", f"""
             SELECT
                 ROUND(SUM({tgt_val_col}) / 10000000.0, 2) AS Total_Target_Value,
-                ROUND((SELECT SUM(COALESCE(s."invoice_value", 0)) FROM "{schema}"."{sales_view}" s {sales_where}) / 10000000.0, 2) AS Total_Actual_Revenue,
-                ROUND(((SELECT SUM(COALESCE(s."invoice_value", 0)) FROM "{schema}"."{sales_view}" s {sales_where}) * 100.0) / NULLIF(SUM({tgt_val_col}), 0), 2) AS Overall_Achievement_Percentage,
-                ROUND((SUM({tgt_val_col}) - (SELECT SUM(COALESCE(s."invoice_value", 0)) FROM "{schema}"."{sales_view}" s {sales_where})) / 10000000.0, 2) AS Target_Shortfall_Value
+                ROUND((SELECT SUM(COALESCE(s."invoice_value", 0)) FROM {sales_source} s {sales_where}) / 10000000.0, 2) AS Total_Actual_Revenue,
+                ROUND(((SELECT SUM(COALESCE(s."invoice_value", 0)) FROM {sales_source} s {sales_where}) * 100.0) / NULLIF(SUM({tgt_val_col}), 0), 2) AS Overall_Achievement_Percentage,
+                ROUND((SUM({tgt_val_col}) - (SELECT SUM(COALESCE(s."invoice_value", 0)) FROM {sales_source} s {sales_where})) / 10000000.0, 2) AS Target_Shortfall_Value
             FROM "{schema}"."{target_view}" st
             {tgt_period_filter}
         """)
@@ -2679,8 +2713,8 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
         run("target_vs_actual_quantity", f"""
             SELECT
                 ROUND(SUM({tgt_qty_col}), 2) AS Total_Target_Quantity,
-                ROUND((SELECT SUM(COALESCE(s."Tyre_Quantity", 0)) FROM "{schema}"."{sales_view}" s {sales_where}), 2) AS Total_Actual_Quantity,
-                ROUND(((SELECT SUM(COALESCE(s."Tyre_Quantity", 0)) FROM "{schema}"."{sales_view}" s {sales_where}) * 100.0) / NULLIF(SUM({tgt_qty_col}), 0), 2) AS Quantity_Achievement_Percentage
+                ROUND((SELECT SUM(COALESCE(s."Tyre_Quantity", 0)) FROM {sales_source} s {sales_where}), 2) AS Total_Actual_Quantity,
+                ROUND(((SELECT SUM(COALESCE(s."Tyre_Quantity", 0)) FROM {sales_source} s {sales_where}) * 100.0) / NULLIF(SUM({tgt_qty_col}), 0), 2) AS Quantity_Achievement_Percentage
             FROM "{schema}"."{target_view}" st
             {tgt_period_filter}
         """)
@@ -2698,7 +2732,7 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
                 LEFT JOIN "{schema}"."{terr_view}" tm ON TRIM(st."TERR_CODE") = TRIM(tm."BZIRK")
                 LEFT JOIN (
                     SELECT cm."BZIRK", SUM(COALESCE(sd."invoice_value", 0)) AS actual_revenue
-                    FROM "{schema}"."{sales_view}" sd
+                    FROM {sales_source} sd
                     {cust_join.replace('s."', 'sd."')}
                     {sales_where.replace('s."', 'sd."')}
                     GROUP BY cm."BZIRK"
@@ -3419,24 +3453,41 @@ CRITICAL INSTRUCTIONS:
     `#### Account Group Breakdown (KTOKD)`
     followed by their respective bullet items.
 14. REVENUE TREND & ONGOING MONTH RULE:
-    If the latest month in the dataset is an incomplete ongoing month (e.g. November with only partial days of data), you MUST label it as "Current Ongoing Month (MTD)".
+    If the latest month in the dataset is an incomplete ongoing month (e.g. November with only partial days of data), you MUST label it with Till Now:
+    - In Section 2, format the ongoing month explicitly with "Till Now":
+      e.g. `Current Ongoing Month (MTD): November 2026 (Till Now: ₹<Value> Cr)`
     - NEVER compare a partial ongoing month directly to a full 31-day previous month to claim a massive business collapse or decline (e.g. "-81.45% decline"). Such comparisons are statistically invalid.
-    - State the completed full month revenue and the ongoing month's MTD revenue clearly.
+    - State the completed full month revenue and the ongoing month's MTD revenue clearly with "Till Now".
     - In Actionable Recommendations and Business Risks, do NOT claim the business suffered a massive revenue decline due to the partial month.
 15. DYNAMIC DATE RANGE RULE (CRITICAL):
     Look for `sales_date_range` in the VERIFIED KPI BLOCK:
-    - It contains the exact dynamic `start_date`, `end_date`, and `total_days` calculated directly from the database.
-    - Whenever referencing the overall/total dataset timeframe, explicitly replace bare "(Overall)" with this dynamic date range:
-      e.g. `(Overall: <start_date> – <end_date>, <total_days> Days)` or `(Overall: <start_date> – <end_date>)`.
+    - It contains the exact dynamic `start_date`, `end_date`, and `total_days` calculated directly from the database for the Current Calendar Year (01 Jan up to Till Now).
+    - The overall dataset timeframe represents Current Calendar Year 2026 Till Now.
+    - Whenever referencing the overall/total dataset timeframe, explicitly replace bare "(Overall)" with this dynamic date range ending with "Till Now":
+      e.g. `(Overall: <start_date> – Till Now, <total_days> Days)` or `(Overall: <start_date> – Till Now)`.
       Examples:
-      * Total Revenue (Overall: <start_date> – <end_date>, <total_days> Days): ₹<Value> Cr (Sales Value)
-      * Top Category (Overall: <start_date> – <end_date>): <Category Name> (Sales Value: ₹<Value> Cr)
-      * Top Construction Type (Overall: <start_date> – <end_date>): <Construction Type> (Sales Value: ₹<Value> Cr)
-      * Top Zone (Overall: <start_date> – <end_date>): <Zone Name> (Sales Value: ₹<Value> Cr)
-      * Top Region (Overall: <start_date> – <end_date>): <Region Name> (Sales Value: ₹<Value> Cr)
-      * Top Territory (Overall: <start_date> – <end_date>): <Territory Name> (Sales Value: ₹<Value> Cr)
-    - In Executive Summary: Explicitly mention the dynamic date range:
-      "Sales performance analysis across <total_days> days (<start_date> – <end_date>) demonstrates a total revenue of ₹<Value> Cr..."
+      * Total Revenue (Overall: <start_date> – Till Now, <total_days> Days): ₹<Value> Cr (Sales Value)
+      * Total Quantity Sold (Overall: <start_date> – Till Now): <Value> units
+      * Total Transactions (Overall: <start_date> – Till Now): <Value>
+      * Top Category (Overall: <start_date> – Till Now): <Category Name> (Sales Value: ₹<Value> Cr)
+      * Top Construction Type (Overall: <start_date> – Till Now): <Construction Type> (Sales Value: ₹<Value> Cr)
+      * Top Product (Overall: <start_date> – Till Now): <Product Name> (Sales Value: ₹<Value> Cr)
+      * Top SKUs by Category (Overall: <start_date> – Till Now)
+      * Top Customer (Overall: <start_date> – Till Now): <Customer Name>
+      * Top Account Group (Overall: <start_date> – Till Now): <Account Group Name>
+      * Top Zone (Overall: <start_date> – Till Now): <Zone Name> (Sales Value: ₹<Value> Cr)
+      * Top Region (Overall: <start_date> – Till Now): <Region Name> (Sales Value: ₹<Value> Cr)
+      * Top Territory (Overall: <start_date> – Till Now): <Territory Name> (Sales Value: ₹<Value> Cr)
+      * Replacement Channel Revenue (Overall: <start_date> – Till Now): ₹<Value> Cr
+      * OEM Channel Revenue (Overall: <start_date> – Till Now): ₹<Value> Cr
+      * Total Target Value (Overall: <start_date> – Till Now): ₹<Value> Cr
+    - Current Ongoing Month (MTD): Always explicitly mention Till Now:
+      e.g. `Current Ongoing Month (MTD): November 2026 (Till Now)` or `November 2026 (01 Nov – Till Now)`
+    - In Executive Summary Title & Paragraph: Explicitly mention the Current Year dynamic range with Till Now:
+      Title example: `Tyre & Tube Sales Performance Analysis: ... (Current Year: <start_date> – Till Now)`
+      Opening line: "Sales performance analysis across <total_days> days (<start_date> – Till Now) demonstrates a total revenue of ₹<Value> Cr..."
+    - For rolling 30-day sections (Customer Churn & Inactivity Risk, Top 5 & Worst 5 Customers 30d, Top 5 & Worst 5 Territories & Regions 30d):
+      Keep the explicit label `(Last 30 Days)`.
 """
 
 
@@ -3454,7 +3505,7 @@ ALSO, generate a category-wise trend report as a "line_chart" visualization extr
 
 Return ONLY this JSON:
 {{
-  "report": "TITLE: <Create a descriptive business-focused title based on the data>\\n\\n### Executive Summary\\n<Write exactly 5 to 8 lines summarizing overall business performance across <total_days> days (<start_date> – <end_date>), key trends, and main takeaways based purely on the data. If the latest month is ongoing/partial (MTD), state it clearly as Month-to-Date rather than a business decline.>\\n\\n### Key Business Insights\\n\\n**1. Overall Performance**\\n- **Total Revenue (Overall: <start_date> – <end_date>, <total_days> Days)**: <Value in Cr> (Sales Value)\\n- **Total Quantity Sold (Overall)**: <Value>\\n- **Total Transactions (Overall)**: <Value>\\n- **Average Invoice Value**: <Value>\\n- **Average Selling Price per Unit**: <Value>\\n\\n**2. Revenue Trend**\\n- **Highest Completed Sales Month**: <Value>\\n- **Current Ongoing Month (MTD)**: <Value>\\n- **Monthly Trend Context**: <State growth between completed full months, or explain that current month is ongoing MTD>\\n\\n**3. Product Performance**\\n- **Top Category (Overall: <start_date> – <end_date>)**: <Category name> (Sales Value: <Value in Cr>)\\n- **Top Construction Type (Overall: <start_date> – <end_date>)**: <Construction type> (Sales Value: <Value in Cr>)\\n- **Top Product (Overall: <start_date> – <end_date>)**: <Product name> (Sales Value: <Value in Cr>)\\n- **Lowest Selling Product (Overall: <start_date> – <end_date>)**: <Product name> (Sales Value: <Value in Cr>)\\n\\n#### Top SKUs by Category (Overall: <start_date> – <end_date>)\\n- **<Category 1>**: <Top 5 SKUs with Sales Value in Cr>\\n- **<Category 2>**: <Top 5 SKUs with Sales Value in Cr>\\n\\n**4. Customer Performance & Account Group Breakdown**\\n- **Top Customer (Overall: <start_date> – <end_date>)**: <Customer name> (Sales Value: <Value in Cr>)\\n- **Top 5 Customers Combined Sales Value (Overall: <start_date> – <end_date>)**: <Value in Cr>\\n- **Customer Concentration Risk**: <Value>\\n- **Top Account Group (Overall: <start_date> – <end_date>)**: <Account group name> (Sales Value: <Value in Cr>, <Contribution %>)\\n\\n#### Account Group Breakdown (KTOKD: <start_date> – <end_date>)\\n- **Dealers / Trade Network (Z001)**: <Active customers count>, Sales Value <Value in Cr>, <Units count> units, <Contribution %> contribution\\n- **Institutional Customers (Z004)**: <Active customers count>, Sales Value <Value in Cr>, <Units count> units, <Contribution %> contribution\\n- **Fleet Customers (Z009)**: <Active customers count>, Sales Value <Value in Cr>, <Units count> units, <Contribution %> contribution\\n- **Traders & Retailers (Z015)**: <Active customers count>, Sales Value <Value in Cr>, <Units count> units, <Contribution %> contribution\\n- **Government & PSU (Z006)**: <Active customers count>, Sales Value <Value in Cr>, <Units count> units, <Contribution %> contribution\\n- **Govt Special Accounts (Z010)**: <Active customers count>, Sales Value <Value in Cr>, <Units count> units, <Contribution %> contribution\\n- **Export / Overseas (Z003)**: <Active customers count>, Sales Value <Value in Cr>, <Units count> units, <Contribution %> contribution\\n- **Heavy Equipment / OTR (Z007)**: <Active customers count>, Sales Value <Value in Cr>, <Units count> units, <Contribution %> contribution\\n\\n- **Top 5 Customers (Last 30 Days)**: <List of Top 5 customers with Sales Value in Cr>\\n- **Worst 5 Customers (Last 30 Days)**: <List of Worst 5 customers with Sales Value in Cr>\\n\\n**5. Customer Churn & Inactivity Risk (Last 30 Days)**\\n- **Accounts with >5% Sales Decline**: <Count of accounts declining >5% compared to prior 30 days>\\n- **Accounts with >10% Sales Decline**: <Count of accounts declining >10% compared to prior 30 days>\\n- **Steepest Sales Decline Accounts**: <List of worst performing accounts with decline percentage>\\n- **High-Risk Inactive Accounts (₹2L+ Historical Billing)**: <Count of zero-billing accounts>\\n- **Zero-Sale Active Counters**: <Count of counters with 0 tyre units in the last 30 days>\\n\\n**6. Geography Performance**\\n- **Top Zone (Overall: <start_date> – <end_date>)**: <Zone name> (Sales Value: <Value in Cr>)\\n- **Top Region (Overall: <start_date> – <end_date>)**: <Region name> (Sales Value: <Value in Cr>)\\n- **Top Territory (Overall: <start_date> – <end_date>)**: <Territory name> (Sales Value: <Value in Cr>)\\n- **Lowest Territory (Overall: <start_date> – <end_date>)**: <Territory name> (Sales Value: <Value in Cr>)\\n- **Top 5 Territories (Last 30 Days)**: <List of top 5 territories with Sales Value in Cr>\\n- **Worst 5 Territories (Last 30 Days)**: <List of lowest 5 territories with Sales Value in Cr>\\n- **Top 5 Regions (Last 30 Days)**: <List of top 5 regions with Sales Value in Cr>\\n- **Worst 5 Regions (Last 30 Days)**: <List of lowest 5 regions with Sales Value in Cr>\\n\\n**7. Distribution**\\n- **Replacement Channel Revenue (Overall: <start_date> – <end_date>)**: <Sales Value with contribution %>\\n- **OEM Channel Revenue (Overall: <start_date> – <end_date>)**: <Sales Value with contribution %>\\n- **STU Channel Revenue (Overall: <start_date> – <end_date>)**: <Sales Value with contribution %>\\n- **DEF Channel Revenue (Overall: <start_date> – <end_date>)**: <Sales Value with contribution %>\\n\\n**8. Target Performance**\\n- **Total Target Value (Overall: <start_date> – <end_date>)**: <Value in Cr>\\n- **Overall Achievement %**: <Value>\\n- **Target Shortfall (Overall: <start_date> – <end_date>)**: <Shortfall Value in Cr>\\n- **Quantity Achievement %**: <Value>\\n- **Top Target Shortfall Territory (Overall: <start_date> – <end_date>)**: <Territory name> (Sales Value Shortfall: <Value in Cr>, <Achievement %>)\\n\\n### Business Risks\\n- <Data-driven Risk 1 (e.g. High customer concentration)>\\n- <Data-driven Risk 2 (e.g. High discount dependency)>\\n- <Data-driven Risk 3>\\n\\n### Actionable Recommendations\\n- <Data-driven Recommendation 1 (e.g. Improve sales in low-performing territories)>\\n- <Data-driven Recommendation 2 (e.g. Reduce dependency on top customers)>\\n- <Data-driven Recommendation 3>",
+  "report": "TITLE: <Create a descriptive business-focused title based on the data>\\n\\n### Executive Summary\\n<Write exactly 5 to 8 lines summarizing overall business performance across <total_days> days (<start_date> – Till Now), key trends, and main takeaways based purely on the data. If the latest month is ongoing/partial (MTD), state it clearly as Month-to-Date rather than a business decline.>\\n\\n### Key Business Insights\\n\\n**1. Overall Performance**\\n- **Total Revenue (Overall: <start_date> – Till Now, <total_days> Days)**: <Value in Cr> (Sales Value)\\n- **Total Quantity Sold (Overall: <start_date> – Till Now)**: <Value> units\\n- **Total Transactions (Overall: <start_date> – Till Now)**: <Value>\\n- **Average Invoice Value**: <Value>\\n- **Average Selling Price per Unit**: <Value>\\n\\n**2. Revenue Trend**\\n- **Highest Completed Sales Month**: <Value>\\n- **Current Ongoing Month (MTD)**: <Month Year> (Till Now: ₹<Value> Cr)\\n- **Monthly Trend Context**: <State growth between completed full months, or explain that current month is ongoing MTD up to Till Now>\\n\\n**3. Product Performance**\\n- **Top Category (Overall: <start_date> – Till Now)**: <Category name> (Sales Value: <Value in Cr>)\\n- **Top Construction Type (Overall: <start_date> – Till Now)**: <Construction type> (Sales Value: <Value in Cr>)\\n- **Top Product (Overall: <start_date> – Till Now)**: <Product name> (Sales Value: <Value in Cr>)\\n- **Lowest Selling Product (Overall: <start_date> – Till Now)**: <Product name> (Sales Value: <Value in Cr>)\\n\\n#### Top SKUs by Category (Overall: <start_date> – Till Now)\\n- **<Category 1>**: <Top 5 SKUs with Sales Value in Cr>\\n- **<Category 2>**: <Top 5 SKUs with Sales Value in Cr>\\n\\n**4. Customer Performance & Account Group Breakdown**\\n- **Top Customer (Overall: <start_date> – Till Now)**: <Customer name> (Sales Value: <Value in Cr>)\\n- **Top 5 Customers Combined Sales Value (Overall: <start_date> – Till Now)**: <Value in Cr>\\n- **Customer Concentration Risk**: <Value>\\n- **Top Account Group (Overall: <start_date> – Till Now)**: <Account group name> (Sales Value: <Value in Cr>, <Contribution %>)\\n\\n#### Account Group Breakdown (KTOKD: <start_date> – Till Now)\\n- **Dealers / Trade Network (Z001)**: <Active customers count>, Sales Value <Value in Cr>, <Units count> units, <Contribution %> contribution\\n- **Institutional Customers (Z004)**: <Active customers count>, Sales Value <Value in Cr>, <Units count> units, <Contribution %> contribution\\n- **Fleet Customers (Z009)**: <Active customers count>, Sales Value <Value in Cr>, <Units count> units, <Contribution %> contribution\\n- **Traders & Retailers (Z015)**: <Active customers count>, Sales Value <Value in Cr>, <Units count> units, <Contribution %> contribution\\n- **Government & PSU (Z006)**: <Active customers count>, Sales Value <Value in Cr>, <Units count> units, <Contribution %> contribution\\n- **Govt Special Accounts (Z010)**: <Active customers count>, Sales Value <Value in Cr>, <Units count> units, <Contribution %> contribution\\n- **Export / Overseas (Z003)**: <Active customers count>, Sales Value <Value in Cr>, <Units count> units, <Contribution %> contribution\\n- **Heavy Equipment / OTR (Z007)**: <Active customers count>, Sales Value <Value in Cr>, <Units count> units, <Contribution %> contribution\\n\\n- **Top 5 Customers (Last 30 Days)**: <List of Top 5 customers with Sales Value in Cr>\\n- **Worst 5 Customers (Last 30 Days)**: <List of Worst 5 customers with Sales Value in Cr>\\n\\n**5. Customer Churn & Inactivity Risk (Last 30 Days)**\\n- **Accounts with >5% Sales Decline**: <Count of accounts declining >5% compared to prior 30 days>\\n- **Accounts with >10% Sales Decline**: <Count of accounts declining >10% compared to prior 30 days>\\n- **Steepest Sales Decline Accounts**: <List of worst performing accounts with decline percentage>\\n- **High-Risk Inactive Accounts (₹2L+ Historical Billing)**: <Count of zero-billing accounts>\\n- **Zero-Sale Active Counters**: <Count of counters with 0 tyre units in the last 30 days>\\n\\n**6. Geography Performance**\\n- **Top Zone (Overall: <start_date> – Till Now)**: <Zone name> (Sales Value: <Value in Cr>)\\n- **Top Region (Overall: <start_date> – Till Now)**: <Region name> (Sales Value: <Value in Cr>)\\n- **Top Territory (Overall: <start_date> – Till Now)**: <Territory name> (Sales Value: <Value in Cr>)\\n- **Lowest Territory (Overall: <start_date> – Till Now)**: <Territory name> (Sales Value: <Value in Cr>)\\n- **Top 5 Territories (Last 30 Days)**: <List of top 5 territories with Sales Value in Cr>\\n- **Worst 5 Territories (Last 30 Days)**: <List of lowest 5 territories with Sales Value in Cr>\\n- **Top 5 Regions (Last 30 Days)**: <List of top 5 regions with Sales Value in Cr>\\n- **Worst 5 Regions (Last 30 Days)**: <List of lowest 5 regions with Sales Value in Cr>\\n\\n**7. Distribution**\\n- **Replacement Channel Revenue (Overall: <start_date> – Till Now)**: <Sales Value with contribution %>\\n- **OEM Channel Revenue (Overall: <start_date> – Till Now)**: <Sales Value with contribution %>\\n- **STU Channel Revenue (Overall: <start_date> – Till Now)**: <Sales Value with contribution %>\\n- **DEF Channel Revenue (Overall: <start_date> – Till Now)**: <Sales Value with contribution %>\\n\\n**8. Target Performance**\\n- **Total Target Value (Overall: <start_date> – Till Now)**: <Value in Cr>\\n- **Overall Achievement %**: <Value>\\n- **Target Shortfall (Overall: <start_date> – Till Now)**: <Shortfall Value in Cr>\\n- **Quantity Achievement %**: <Value>\\n- **Top Target Shortfall Territory (Overall: <start_date> – Till Now)**: <Territory name> (Sales Value Shortfall: <Value in Cr>, <Achievement %>)\\n\\n### Business Risks\\n- <Data-driven Risk 1 (e.g. High customer concentration)>\\n- <Data-driven Risk 2 (e.g. High discount dependency)>\\n- <Data-driven Risk 3>\\n\\n### Actionable Recommendations\\n- <Data-driven Recommendation 1 (e.g. Improve sales in low-performing territories)>\\n- <Data-driven Recommendation 2 (e.g. Reduce dependency on top customers)>\\n- <Data-driven Recommendation 3>",
   "follow_up_questions": ["What ...?", "What ...?", "What ...?", "What ...?", "What ...?"],
   "visualizations": [
     {{

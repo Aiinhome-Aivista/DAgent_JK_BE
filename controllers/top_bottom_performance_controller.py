@@ -104,33 +104,36 @@ def _compute_top_bottom_slice_hana(cursor, schema, dimension: str, days: int):
     select_expr = ""
 
     if dimension == "Customers":
-        entity_expr = f'COALESCE(NULLIF(TRIM(cm."NAME1"), \'\'), TRIM(TO_VARCHAR(s."dealer_code")))'
+        entity_expr = f'COALESCE(NULLIF(TRIM(cm."NAME1"), \'\'), NULLIF(TRIM(cm."BNAME"), \'\'), TRIM(TO_VARCHAR(s."dealer_code")))'
         joins = f"""
             JOIN "{schema}"."{cust_view}" cm ON (
-                LTRIM(TRIM(TO_VARCHAR(s."dealer_code")), '0') = LTRIM(TRIM(TO_VARCHAR(cm."KUNNR")), '0')
-                OR s."dealer_code" = cm."KUNNR"
+                s."dealer_code" = cm."KUNNR"
+                OR LPAD(TRIM(TO_VARCHAR(s."dealer_code")), 10, '0') = cm."KUNNR"
+                OR LTRIM(TO_VARCHAR(s."dealer_code"), '0') = LTRIM(cm."KUNNR", '0')
             )
         """
         extra_filter = 'AND (cm."KLABC" IS NULL OR cm."KLABC" <> \'X\')'
         select_expr = f'{entity_expr} AS entity_name'
-        group_by = f'LTRIM(TRIM(TO_VARCHAR(s."dealer_code")), \'0\'), {entity_expr}'
+        group_by = entity_expr
     elif dimension == "Dealers":
-        entity_expr = f'COALESCE(NULLIF(TRIM(cm."NAME1"), \'\'), TRIM(TO_VARCHAR(s."dealer_code")))'
+        entity_expr = f'COALESCE(NULLIF(TRIM(cm."NAME1"), \'\'), NULLIF(TRIM(cm."BNAME"), \'\'), TRIM(TO_VARCHAR(s."dealer_code")))'
         joins = f"""
             JOIN "{schema}"."{cust_view}" cm ON (
-                LTRIM(TRIM(TO_VARCHAR(s."dealer_code")), '0') = LTRIM(TRIM(TO_VARCHAR(cm."KUNNR")), '0')
-                OR s."dealer_code" = cm."KUNNR"
+                s."dealer_code" = cm."KUNNR"
+                OR LPAD(TRIM(TO_VARCHAR(s."dealer_code")), 10, '0') = cm."KUNNR"
+                OR LTRIM(TO_VARCHAR(s."dealer_code"), '0') = LTRIM(cm."KUNNR", '0')
             )
         """
         extra_filter = 'AND (TRIM(cm."KTOKD") = \'Z001\' OR UPPER(TRIM(cm."CH_TYPE")) = \'DL\') AND (cm."KLABC" IS NULL OR cm."KLABC" <> \'X\')'
         select_expr = f'{entity_expr} AS entity_name'
-        group_by = f'LTRIM(TRIM(TO_VARCHAR(s."dealer_code")), \'0\'), {entity_expr}'
+        group_by = entity_expr
     elif dimension == "Territories":
         entity_expr = f'COALESCE(NULLIF(TRIM(tm."NAME"), \'\'), NULLIF(TRIM(tm."BZIRK"), \'\'), \'Unmapped Territory\')'
         joins = f"""
             JOIN "{schema}"."{cust_view}" cm ON (
-                LTRIM(TRIM(TO_VARCHAR(s."dealer_code")), '0') = LTRIM(TRIM(TO_VARCHAR(cm."KUNNR")), '0')
-                OR s."dealer_code" = cm."KUNNR"
+                s."dealer_code" = cm."KUNNR"
+                OR LPAD(TRIM(TO_VARCHAR(s."dealer_code")), 10, '0') = cm."KUNNR"
+                OR LTRIM(TO_VARCHAR(s."dealer_code"), '0') = LTRIM(cm."KUNNR", '0')
             )
             JOIN "{schema}"."{terr_view}" tm ON (cm."BZIRK" = tm."BZIRK" OR TRIM(cm."BZIRK") = TRIM(tm."BZIRK"))
         """
@@ -141,8 +144,9 @@ def _compute_top_bottom_slice_hana(cursor, schema, dimension: str, days: int):
         entity_expr = f'COALESCE(NULLIF(TRIM(rm."region_name"), \'\'), NULLIF(TRIM(rm."region_code"), \'\'), \'Unmapped Region\')'
         joins = f"""
             JOIN "{schema}"."{cust_view}" cm ON (
-                LTRIM(TRIM(TO_VARCHAR(s."dealer_code")), '0') = LTRIM(TRIM(TO_VARCHAR(cm."KUNNR")), '0')
-                OR s."dealer_code" = cm."KUNNR"
+                s."dealer_code" = cm."KUNNR"
+                OR LPAD(TRIM(TO_VARCHAR(s."dealer_code")), 10, '0') = cm."KUNNR"
+                OR LTRIM(TO_VARCHAR(s."dealer_code"), '0') = LTRIM(cm."KUNNR", '0')
             )
             JOIN "{schema}"."{terr_view}" tm ON (cm."BZIRK" = tm."BZIRK" OR TRIM(cm."BZIRK") = TRIM(tm."BZIRK"))
             JOIN "{schema}"."{reg_view}" rm ON (tm."REGIO" = rm."region_code" OR TRIM(tm."REGIO") = TRIM(rm."region_code"))
@@ -152,7 +156,7 @@ def _compute_top_bottom_slice_hana(cursor, schema, dimension: str, days: int):
         group_by = entity_expr
     elif dimension in ("Tyres", "Tyre Types"):
         cat_view = "ZIVF_CategoryMaster_01_TR"
-        entity_expr = f'COALESCE(NULLIF(TRIM(cat."CAT_DESC"), \'\'), NULLIF(TRIM(sk."TYRE_TYPE"), \'\'), \'Unknown Tyre\')'
+        entity_expr = f'COALESCE(NULLIF(TRIM(cat."CAT_DESC"), \'\'), NULLIF(TRIM(cat."SHORT_DESC"), \'\'), \'Unknown Tyre\')'
         joins = f"""
             JOIN "{schema}"."{sku_view}" sk ON TRIM(s."SKU") = TRIM(sk."MATNR")
             LEFT JOIN "{schema}"."{cat_view}" cat ON TRIM(sk."CAT_CODE") = TRIM(cat."CAT_CODE")
@@ -172,17 +176,23 @@ def _compute_top_bottom_slice_hana(cursor, schema, dimension: str, days: int):
     sql = f"""
         SELECT 
             {select_expr},
-            SUM(COALESCE(s."invoice_value", 0)) AS sales_value
+            ROUND(SUM(COALESCE(s."invoice_value", 0)), 2) AS sales_value
         FROM "{schema}"."{sales_view}" s
         {joins}
-        CROSS JOIN (SELECT MAX(s_max."invoice_date") AS max_dt FROM "{schema}"."{sales_view}" s_max) md
+        CROSS JOIN (
+            SELECT MAX(s_max."invoice_date") AS max_dt 
+            FROM "{schema}"."{sales_view}" s_max
+            WHERE s_max."invoice_date" IS NOT NULL
+              AND (s_max."distribution_channel" = '10' OR s_max."distribution_channel" = 10)
+              AND (s_max."indicator_cancel" IS NULL OR s_max."indicator_cancel" NOT IN ('X', 'Y', '1'))
+        ) md
         WHERE s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -{day_offset}) AND md.max_dt
-          AND s."distribution_channel" = '10'
+          AND (s."distribution_channel" = '10' OR s."distribution_channel" = 10)
           AND (s."indicator_cancel" IS NULL OR s."indicator_cancel" NOT IN ('X', 'Y', '1'))
           {extra_filter}
         GROUP BY {group_by}
         HAVING SUM(COALESCE(s."invoice_value", 0)) > 0
-        ORDER BY sales_value DESC
+        ORDER BY 2 DESC
     """
 
     cursor.execute(sql)
@@ -359,6 +369,7 @@ def bulk_sync_top_bottom_performance(mysql_conn, session_id: str, user_id=None):
 
     try:
         t0 = time.time()
+        print(f"[Bulk Sync Top/Bottom] Starting sync for session={effective_session}, is_hana={is_hana}, schema={sap_schema}...", flush=True)
         for dim in SUPPORTED_DIMENSIONS:
             for d in SUPPORTED_DAYS:
                 try:
@@ -366,6 +377,8 @@ def bulk_sync_top_bottom_performance(mysql_conn, session_id: str, user_id=None):
                         top_10, bottom_10 = _compute_top_bottom_slice_hana(source_cursor, sap_schema, dim, d)
                     else:
                         top_10, bottom_10 = _compute_top_bottom_slice_mysql(source_cursor, user_db, dim, d)
+
+                    print(f"[Bulk Sync Top/Bottom] Slice {dim} ({d} days): {len(top_10)} top, {len(bottom_10)} bottom", flush=True)
 
                     for item in top_10:
                         records_to_insert.append((
@@ -382,6 +395,7 @@ def bulk_sync_top_bottom_performance(mysql_conn, session_id: str, user_id=None):
                     except Exception:
                         pass
 
+        print(f"[Bulk Sync Top/Bottom] Total records collected across all slices: {len(records_to_insert)}", flush=True)
         if records_to_insert:
             m_cur = mysql_conn.cursor()
             # Clear old records for this session
@@ -396,6 +410,8 @@ def bulk_sync_top_bottom_performance(mysql_conn, session_id: str, user_id=None):
             m_cur.close()
             print(f"[Bulk Sync Top/Bottom] ✅ Saved {len(records_to_insert)} records in {round(time.time() - t0, 2)}s", flush=True)
             return True
+        else:
+            print(f"[Bulk Sync Top/Bottom] ⚠️ No records collected across 25 permutations!", flush=True)
     except Exception as e:
         print(f"[Bulk Sync Top/Bottom] Main execution error: {e}", flush=True)
         try:

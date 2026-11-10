@@ -9,22 +9,50 @@ _app_instance = None
 _get_db_conn_func = None
 JOB_ID = "sync_dashboard_metrics_job"
 
+# Global concurrency protection & run state
+_sync_lock = threading.Lock()
+_is_sync_running = False
+_sync_started_at = None
+_sync_origin = None
 
-def _execute_sync_task():
+
+def is_sync_in_progress():
+    """Returns (is_running, duration_seconds, origin)"""
+    global _is_sync_running, _sync_started_at, _sync_origin
+    if _is_sync_running and _sync_started_at:
+        return True, round(time.time() - _sync_started_at, 1), _sync_origin
+    return False, 0.0, None
+
+
+def _execute_sync_task(origin: str = "scheduled"):
     """Background task that calculates and caches metrics for all active workspaces."""
-    global _app_instance, _get_db_conn_func
-    if not _app_instance or not _get_db_conn_func:
-        print("[Scheduler] App or DB connection not ready, skipping sync.", flush=True)
-        return
+    global _app_instance, _get_db_conn_func, _is_sync_running, _sync_started_at, _sync_origin
 
-    from helper.dashboard_cache_service import record_scheduler_run
-    conn = _get_db_conn_func()
-    if not conn:
-        print("[Scheduler] Failed to connect to DB for sync job.", flush=True)
-        return
+    # Non-blocking lock acquisition: strictly prevent duplicate/overlapping executions
+    if not _sync_lock.acquire(blocking=False):
+        running_time = round(time.time() - (_sync_started_at or time.time()), 1)
+        print(f"[Scheduler] ⚠️ Sync task already active (started {running_time}s ago via {_sync_origin}). Skipping new {origin} run.", flush=True)
+        return False
 
-    start_t = time.time()
+    _is_sync_running = True
+    _sync_started_at = time.time()
+    _sync_origin = origin
+
     try:
+        if not _app_instance or not _get_db_conn_func:
+            print(f"[Scheduler] App or DB connection not ready, skipping {origin} sync.", flush=True)
+            return False
+
+        from helper.dashboard_cache_service import record_scheduler_run
+        conn = _get_db_conn_func()
+        if not conn:
+            print(f"[Scheduler] Failed to connect to DB for {origin} sync job.", flush=True)
+            return False
+
+        start_t = time.time()
+        print(f"[Scheduler] ====================================================================", flush=True)
+        print(f"[Scheduler] 🔒 Acquired sync lock. Starting {origin.upper()} dashboard sync at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}...", flush=True)
+        print(f"[Scheduler] ====================================================================", flush=True)
         try:
             record_scheduler_run(conn, "sync_dashboard_metrics", "running", 0.0)
         except Exception as r_err:
@@ -299,6 +327,14 @@ def _execute_sync_task():
         if conn and hasattr(conn, "is_connected") and conn.is_connected():
             try: conn.close()
             except Exception: pass
+        _is_sync_running = False
+        _sync_started_at = None
+        _sync_origin = None
+        try:
+            _sync_lock.release()
+            print(f"[Scheduler] 🔓 Released sync lock. System is now IDLE for next run.", flush=True)
+        except Exception:
+            pass
 
 
 def parse_schedule_trigger(schedule_time: str, frequency: str = "daily"):
@@ -459,7 +495,17 @@ def get_next_run_time(schedule_time: str = None, frequency: str = "daily"):
 
 
 def trigger_now_in_background():
-    """Triggers the sync task immediately in a separate background thread."""
-    t = threading.Thread(target=_execute_sync_task, daemon=True)
+    """
+    Triggers the sync task immediately in a separate background thread if not already running.
+    Returns (success: bool, message: str).
+    """
+    global _is_sync_running, _sync_started_at, _sync_origin
+    if _is_sync_running:
+        duration = round(time.time() - (_sync_started_at or time.time()), 1)
+        msg = f"A sync task is already in progress (running for {duration}s via {_sync_origin}). Please wait for it to complete."
+        print(f"[Scheduler] ⚠️ Manual sync request rejected: {msg}", flush=True)
+        return False, msg
+
+    t = threading.Thread(target=_execute_sync_task, kwargs={"origin": "manual"}, daemon=True)
     t.start()
-    return True
+    return True, "Dashboard sync triggered in background successfully."

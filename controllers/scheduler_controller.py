@@ -114,23 +114,31 @@ def update_scheduler_config_controller(get_db_connection):
 
 
 def run_scheduler_now_controller(get_db_connection):
-    """POST /api/scheduler/run-now: Triggers immediate background sync."""
-    conn = get_db_connection()
-    if conn:
-        try:
-            from helper.dashboard_cache_service import record_scheduler_run
-            record_scheduler_run(conn, "sync_dashboard_metrics", "running", 0.0)
-        except Exception as err:
-            print(f"[Scheduler] Could not mark running: {err}", flush=True)
-        finally:
-            if hasattr(conn, "is_connected") and conn.is_connected():
-                try: conn.close()
-                except Exception: pass
+    """POST /api/scheduler/run-now: Triggers immediate background sync if not already active."""
     try:
-        trigger_now_in_background()
+        from helper.scheduler_service import trigger_now_in_background
+        success, msg = trigger_now_in_background()
+        if not success:
+            return jsonify({
+                "status": "in_progress",
+                "message": msg
+            }), 409
+
+        conn = get_db_connection()
+        if conn:
+            try:
+                from helper.dashboard_cache_service import record_scheduler_run
+                record_scheduler_run(conn, "sync_dashboard_metrics", "running", 0.0)
+            except Exception as err:
+                print(f"[Scheduler] Could not mark running: {err}", flush=True)
+            finally:
+                if hasattr(conn, "is_connected") and conn.is_connected():
+                    try: conn.close()
+                    except Exception: pass
+
         return jsonify({
             "status": "success",
-            "message": "Dashboard sync triggered in background successfully."
+            "message": msg
         }), 200
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
