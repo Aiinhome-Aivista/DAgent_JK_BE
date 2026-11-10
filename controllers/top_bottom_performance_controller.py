@@ -37,27 +37,17 @@ CREATE TABLE IF NOT EXISTS `dashboard_top_bottom_performance` (
 """
 
 _tb_table_initialized = False
-_cache_invalidated = False
 
 
 def ensure_top_bottom_table(conn):
-    """Ensures `dashboard_top_bottom_performance` exists and clears stale legacy cache on version upgrade."""
-    global _tb_table_initialized, _cache_invalidated
-    if not conn:
+    """Ensures `dashboard_top_bottom_performance` exists."""
+    global _tb_table_initialized
+    if _tb_table_initialized or not conn:
         return
     try:
         cur = conn.cursor()
         cur.execute(TOP_BOTTOM_TABLE_SQL)
         conn.commit()
-        if not _cache_invalidated:
-            try:
-                # Invalidate stale legacy cache so fresh HANA CurrentSales calculations are stored and served
-                cur.execute("DELETE FROM `dashboard_top_bottom_performance`")
-                conn.commit()
-                _cache_invalidated = True
-                print("[Top/Bottom Table] Invalidation completed: deleted stale cache.", flush=True)
-            except Exception as e_del:
-                print(f"[Top/Bottom Table] cache invalidate note: {e_del}", flush=True)
         cur.close()
         _tb_table_initialized = True
     except Exception as e:
