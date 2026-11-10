@@ -104,32 +104,32 @@ def _compute_top_bottom_slice_hana(cursor, schema, dimension: str, days: int):
     select_expr = ""
 
     if dimension == "Customers":
-        entity_expr = f'COALESCE(NULLIF(TRIM(cm."NAME1"), \'\'), TRIM(s."dealer_code"))'
+        entity_expr = f'COALESCE(NULLIF(TRIM(cm."NAME1"), \'\'), TRIM(TO_VARCHAR(s."dealer_code")))'
         joins = f"""
             JOIN "{schema}"."{cust_view}" cm ON (
-                LTRIM(TRIM(s."dealer_code"), '0') = LTRIM(TRIM(cm."KUNNR"), '0')
+                LTRIM(TRIM(TO_VARCHAR(s."dealer_code")), '0') = LTRIM(TRIM(TO_VARCHAR(cm."KUNNR")), '0')
                 OR s."dealer_code" = cm."KUNNR"
             )
         """
         extra_filter = 'AND (cm."KLABC" IS NULL OR cm."KLABC" <> \'X\')'
         select_expr = f'{entity_expr} AS entity_name'
-        group_by = f'LTRIM(TRIM(s."dealer_code"), \'0\'), {entity_expr}'
+        group_by = f'LTRIM(TRIM(TO_VARCHAR(s."dealer_code")), \'0\'), {entity_expr}'
     elif dimension == "Dealers":
-        entity_expr = f'COALESCE(NULLIF(TRIM(cm."NAME1"), \'\'), TRIM(s."dealer_code"))'
+        entity_expr = f'COALESCE(NULLIF(TRIM(cm."NAME1"), \'\'), TRIM(TO_VARCHAR(s."dealer_code")))'
         joins = f"""
             JOIN "{schema}"."{cust_view}" cm ON (
-                LTRIM(TRIM(s."dealer_code"), '0') = LTRIM(TRIM(cm."KUNNR"), '0')
+                LTRIM(TRIM(TO_VARCHAR(s."dealer_code")), '0') = LTRIM(TRIM(TO_VARCHAR(cm."KUNNR")), '0')
                 OR s."dealer_code" = cm."KUNNR"
             )
         """
         extra_filter = 'AND (TRIM(cm."KTOKD") = \'Z001\' OR UPPER(TRIM(cm."CH_TYPE")) = \'DL\') AND (cm."KLABC" IS NULL OR cm."KLABC" <> \'X\')'
         select_expr = f'{entity_expr} AS entity_name'
-        group_by = f'LTRIM(TRIM(s."dealer_code"), \'0\'), {entity_expr}'
+        group_by = f'LTRIM(TRIM(TO_VARCHAR(s."dealer_code")), \'0\'), {entity_expr}'
     elif dimension == "Territories":
         entity_expr = f'COALESCE(NULLIF(TRIM(tm."NAME"), \'\'), NULLIF(TRIM(tm."BZIRK"), \'\'), \'Unmapped Territory\')'
         joins = f"""
             JOIN "{schema}"."{cust_view}" cm ON (
-                LTRIM(TRIM(s."dealer_code"), '0') = LTRIM(TRIM(cm."KUNNR"), '0')
+                LTRIM(TRIM(TO_VARCHAR(s."dealer_code")), '0') = LTRIM(TRIM(TO_VARCHAR(cm."KUNNR")), '0')
                 OR s."dealer_code" = cm."KUNNR"
             )
             JOIN "{schema}"."{terr_view}" tm ON (cm."BZIRK" = tm."BZIRK" OR TRIM(cm."BZIRK") = TRIM(tm."BZIRK"))
@@ -141,7 +141,7 @@ def _compute_top_bottom_slice_hana(cursor, schema, dimension: str, days: int):
         entity_expr = f'COALESCE(NULLIF(TRIM(rm."region_name"), \'\'), NULLIF(TRIM(rm."region_code"), \'\'), \'Unmapped Region\')'
         joins = f"""
             JOIN "{schema}"."{cust_view}" cm ON (
-                LTRIM(TRIM(s."dealer_code"), '0') = LTRIM(TRIM(cm."KUNNR"), '0')
+                LTRIM(TRIM(TO_VARCHAR(s."dealer_code")), '0') = LTRIM(TRIM(TO_VARCHAR(cm."KUNNR")), '0')
                 OR s."dealer_code" = cm."KUNNR"
             )
             JOIN "{schema}"."{terr_view}" tm ON (cm."BZIRK" = tm."BZIRK" OR TRIM(cm."BZIRK") = TRIM(tm."BZIRK"))
@@ -172,8 +172,7 @@ def _compute_top_bottom_slice_hana(cursor, schema, dimension: str, days: int):
     sql = f"""
         SELECT 
             {select_expr},
-            SUM(COALESCE(s."invoice_value", 0)) AS sales_value,
-            SUM(COALESCE(s."Tyre_Quantity", 0)) AS total_quantity
+            SUM(COALESCE(s."invoice_value", 0)) AS sales_value
         FROM "{schema}"."{sales_view}" s
         {joins}
         CROSS JOIN (SELECT MAX(s_max."invoice_date") AS max_dt FROM "{schema}"."{sales_view}" s_max) md
