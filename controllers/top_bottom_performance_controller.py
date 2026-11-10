@@ -37,17 +37,27 @@ CREATE TABLE IF NOT EXISTS `dashboard_top_bottom_performance` (
 """
 
 _tb_table_initialized = False
+_cache_invalidated = False
 
 
 def ensure_top_bottom_table(conn):
-    """Ensures `dashboard_top_bottom_performance` exists."""
-    global _tb_table_initialized
-    if _tb_table_initialized or not conn:
+    """Ensures `dashboard_top_bottom_performance` exists and clears stale legacy cache on version upgrade."""
+    global _tb_table_initialized, _cache_invalidated
+    if not conn:
         return
     try:
         cur = conn.cursor()
         cur.execute(TOP_BOTTOM_TABLE_SQL)
         conn.commit()
+        if not _cache_invalidated:
+            try:
+                # Invalidate stale legacy cache so fresh HANA CurrentSales calculations are stored and served
+                cur.execute("DELETE FROM `dashboard_top_bottom_performance`")
+                conn.commit()
+                _cache_invalidated = True
+                print("[Top/Bottom Table] Invalidation completed: deleted stale cache.", flush=True)
+            except Exception as e_del:
+                print(f"[Top/Bottom Table] cache invalidate note: {e_del}", flush=True)
         cur.close()
         _tb_table_initialized = True
     except Exception as e:
@@ -89,7 +99,7 @@ def _compute_top_bottom_slice_hana(cursor, schema, dimension: str, days: int):
     Executes aggregation on SAP HANA views for a specific dimension & days window.
     Returns (top_10, bottom_10) tuples with {entity_name, sales_value, rank}.
     """
-    sales_view = "ZPVF_SD_SalesHistory_01_TR"
+    sales_view = "ZPVF_SD_CurrentSales_01_TR"
     cust_view = "ZIVF_CustomerMaster_01_MD"
     terr_view = "ZIVF_TerritoryMaster_01_TR"
     reg_view = "ZIVF_RegionMaster_MD_01"
@@ -99,67 +109,88 @@ def _compute_top_bottom_slice_hana(cursor, schema, dimension: str, days: int):
 
     joins = ""
     extra_filter = ""
+    group_by = ""
+    select_expr = ""
+
     if dimension == "Customers":
-        entity_expr = f'COALESCE(NULLIF(TRIM(cm."NAME1"), \'\'), NULLIF(TRIM(cm."BNAME"), \'\'), TRIM(s."dealer_code"))'
+        entity_expr = f'COALESCE(NULLIF(TRIM(cm."NAME1"), \'\'), TRIM(s."dealer_code"))'
         joins = f"""
             JOIN "{schema}"."{cust_view}" cm ON (
-                s."dealer_code" = cm."KUNNR" OR
-                LPAD(TRIM(s."dealer_code"), 10, '0') = cm."KUNNR" OR
-                LTRIM(s."dealer_code", '0') = LTRIM(cm."KUNNR", '0')
+                LTRIM(TRIM(s."dealer_code"), '0') = LTRIM(TRIM(cm."KUNNR"), '0')
+                OR s."dealer_code" = cm."KUNNR"
             )
         """
         extra_filter = 'AND (cm."KLABC" IS NULL OR cm."KLABC" <> \'X\')'
+        select_expr = f'{entity_expr} AS entity_name'
+        group_by = f'LTRIM(TRIM(s."dealer_code"), \'0\'), {entity_expr}'
     elif dimension == "Dealers":
-        entity_expr = f'COALESCE(NULLIF(TRIM(cm."NAME1"), \'\'), NULLIF(TRIM(cm."BNAME"), \'\'), TRIM(s."dealer_code"))'
+        entity_expr = f'COALESCE(NULLIF(TRIM(cm."NAME1"), \'\'), TRIM(s."dealer_code"))'
         joins = f"""
             JOIN "{schema}"."{cust_view}" cm ON (
-                s."dealer_code" = cm."KUNNR" OR
-                LPAD(TRIM(s."dealer_code"), 10, '0') = cm."KUNNR" OR
-                LTRIM(s."dealer_code", '0') = LTRIM(cm."KUNNR", '0')
+                LTRIM(TRIM(s."dealer_code"), '0') = LTRIM(TRIM(cm."KUNNR"), '0')
+                OR s."dealer_code" = cm."KUNNR"
             )
         """
         extra_filter = 'AND (TRIM(cm."KTOKD") = \'Z001\' OR UPPER(TRIM(cm."CH_TYPE")) = \'DL\') AND (cm."KLABC" IS NULL OR cm."KLABC" <> \'X\')'
+        select_expr = f'{entity_expr} AS entity_name'
+        group_by = f'LTRIM(TRIM(s."dealer_code"), \'0\'), {entity_expr}'
     elif dimension == "Territories":
         entity_expr = f'COALESCE(NULLIF(TRIM(tm."NAME"), \'\'), NULLIF(TRIM(tm."BZIRK"), \'\'), \'Unmapped Territory\')'
         joins = f"""
             JOIN "{schema}"."{cust_view}" cm ON (
-                s."dealer_code" = cm."KUNNR" OR
-                LPAD(TRIM(s."dealer_code"), 10, '0') = cm."KUNNR" OR
-                LTRIM(s."dealer_code", '0') = LTRIM(cm."KUNNR", '0')
+                LTRIM(TRIM(s."dealer_code"), '0') = LTRIM(TRIM(cm."KUNNR"), '0')
+                OR s."dealer_code" = cm."KUNNR"
             )
             JOIN "{schema}"."{terr_view}" tm ON (cm."BZIRK" = tm."BZIRK" OR TRIM(cm."BZIRK") = TRIM(tm."BZIRK"))
         """
+        extra_filter = 'AND (cm."KLABC" IS NULL OR cm."KLABC" <> \'X\')'
+        select_expr = f'{entity_expr} AS entity_name'
+        group_by = entity_expr
     elif dimension == "Regions":
         entity_expr = f'COALESCE(NULLIF(TRIM(rm."region_name"), \'\'), NULLIF(TRIM(rm."region_code"), \'\'), \'Unmapped Region\')'
         joins = f"""
             JOIN "{schema}"."{cust_view}" cm ON (
-                s."dealer_code" = cm."KUNNR" OR
-                LPAD(TRIM(s."dealer_code"), 10, '0') = cm."KUNNR" OR
-                LTRIM(s."dealer_code", '0') = LTRIM(cm."KUNNR", '0')
+                LTRIM(TRIM(s."dealer_code"), '0') = LTRIM(TRIM(cm."KUNNR"), '0')
+                OR s."dealer_code" = cm."KUNNR"
             )
             JOIN "{schema}"."{terr_view}" tm ON (cm."BZIRK" = tm."BZIRK" OR TRIM(cm."BZIRK") = TRIM(tm."BZIRK"))
             JOIN "{schema}"."{reg_view}" rm ON (tm."REGIO" = rm."region_code" OR TRIM(tm."REGIO") = TRIM(rm."region_code"))
         """
+        extra_filter = 'AND (cm."KLABC" IS NULL OR cm."KLABC" <> \'X\')'
+        select_expr = f'{entity_expr} AS entity_name'
+        group_by = entity_expr
+    elif dimension in ("Tyres", "Tyre Types"):
+        cat_view = "ZIVF_CategoryMaster_01_TR"
+        entity_expr = f'COALESCE(NULLIF(TRIM(cat."CAT_DESC"), \'\'), NULLIF(TRIM(sk."TYRE_TYPE"), \'\'), \'Unknown Tyre\')'
+        joins = f"""
+            JOIN "{schema}"."{sku_view}" sk ON TRIM(s."SKU") = TRIM(sk."MATNR")
+            LEFT JOIN "{schema}"."{cat_view}" cat ON TRIM(sk."CAT_CODE") = TRIM(cat."CAT_CODE")
+        """
+        select_expr = f'{entity_expr} AS entity_name'
+        group_by = entity_expr
     elif dimension == "Materials":
         entity_expr = f'COALESCE(NULLIF(TRIM(sk."MAKTX"), \'\'), NULLIF(TRIM(sk."PROD_TITLE"), \'\'), TRIM(s."SKU"))'
         joins = f"""
             JOIN "{schema}"."{sku_view}" sk ON TRIM(s."SKU") = TRIM(sk."MATNR")
         """
+        select_expr = f'{entity_expr} AS entity_name'
+        group_by = entity_expr
     else:
         return [], []
 
     sql = f"""
         SELECT 
-            {entity_expr} AS entity_name,
-            SUM(COALESCE(s."invoice_value", 0)) AS sales_value
+            {select_expr},
+            SUM(COALESCE(s."invoice_value", 0)) AS sales_value,
+            SUM(COALESCE(s."Tyre_Quantity", 0)) AS total_quantity
         FROM "{schema}"."{sales_view}" s
         {joins}
         CROSS JOIN (SELECT MAX(s_max."invoice_date") AS max_dt FROM "{schema}"."{sales_view}" s_max) md
         WHERE s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -{day_offset}) AND md.max_dt
-          AND s."distribution_channel" IN ('10', 10)
+          AND s."distribution_channel" = '10'
           AND (s."indicator_cancel" IS NULL OR s."indicator_cancel" NOT IN ('X', 'Y', '1'))
           {extra_filter}
-        GROUP BY {entity_expr}
+        GROUP BY {group_by}
         HAVING SUM(COALESCE(s."invoice_value", 0)) > 0
         ORDER BY sales_value DESC
     """
@@ -173,7 +204,7 @@ def _compute_top_bottom_slice_hana(cursor, schema, dimension: str, days: int):
     for r in rows:
         name = r.get("entity_name") or r.get("ENTITY_NAME") or "Unknown"
         val = float(r.get("sales_value") or r.get("SALES_VALUE") or 0.0)
-        clean_rows.append({"name": str(name).strip(), "sales_value": val})
+        clean_rows.append({"name": str(name).strip(), "sales_value": round(val, 2)})
 
     top_10 = [{"rank": i + 1, "name": item["name"], "sales_value": item["sales_value"]} for i, item in enumerate(clean_rows[:10])]
     
@@ -195,33 +226,56 @@ def _compute_top_bottom_slice_mysql(cursor, user_db: str, dimension: str, days: 
 
     joins = ""
     extra_filter = ""
-    if dimension in ("Customers", "Dealers"):
-        entity_expr = "COALESCE(cm.NAME1, cm.BNAME, sd.dealer_code)"
+    group_by = ""
+    select_expr = ""
+
+    if dimension == "Customers":
+        cust_name_expr = "COALESCE(NULLIF(TRIM(cm.NAME1), ''), CAST(sd.dealer_code AS CHAR))"
         joins = f"JOIN {cust_tbl} cm ON (sd.dealer_code = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(sd.dealer_code AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))"
-        if dimension == "Dealers":
-            extra_filter = "AND (TRIM(cm.KTOKD) = 'Z001' OR UPPER(TRIM(cm.CH_TYPE)) = 'DL')"
+        extra_filter = "AND (cm.KLABC IS NULL OR cm.KLABC <> 'X')"
+        select_expr = f"{cust_name_expr} AS entity_name"
+        group_by = f"TRIM(LEADING '0' FROM CAST(sd.dealer_code AS CHAR)), {cust_name_expr}"
+    elif dimension == "Dealers":
+        cust_name_expr = "COALESCE(NULLIF(TRIM(cm.NAME1), ''), CAST(sd.dealer_code AS CHAR))"
+        joins = f"JOIN {cust_tbl} cm ON (sd.dealer_code = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(sd.dealer_code AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))"
+        extra_filter = "AND (TRIM(cm.KTOKD) = 'Z001' OR UPPER(TRIM(cm.CH_TYPE)) = 'DL') AND (cm.KLABC IS NULL OR cm.KLABC <> 'X')"
+        select_expr = f"{cust_name_expr} AS entity_name"
+        group_by = f"TRIM(LEADING '0' FROM CAST(sd.dealer_code AS CHAR)), {cust_name_expr}"
     elif dimension == "Territories":
-        entity_expr = "COALESCE(tm.NAME, cm.BZIRK, 'Unmapped Territory')"
+        entity_expr = "COALESCE(NULLIF(TRIM(tm.NAME), ''), NULLIF(TRIM(cm.BZIRK), ''), 'Unmapped Territory')"
         joins = f"""
             JOIN {cust_tbl} cm ON (sd.dealer_code = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(sd.dealer_code AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))
             JOIN {terr_tbl} tm ON cm.BZIRK = tm.BZIRK
         """
+        extra_filter = "AND (cm.KLABC IS NULL OR cm.KLABC <> 'X')"
+        select_expr = f"{entity_expr} AS entity_name"
+        group_by = entity_expr
     elif dimension == "Regions":
-        entity_expr = "COALESCE(rm.region_name, rm.region_code, 'Unmapped Region')"
+        entity_expr = "COALESCE(NULLIF(TRIM(rm.region_name), ''), NULLIF(TRIM(rm.region_code), ''), 'Unmapped Region')"
         joins = f"""
             JOIN {cust_tbl} cm ON (sd.dealer_code = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(sd.dealer_code AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))
             JOIN {terr_tbl} tm ON cm.BZIRK = tm.BZIRK
             JOIN {reg_tbl} rm ON tm.REGIO = rm.region_code
         """
-    elif dimension == "Materials":
-        entity_expr = "COALESCE(sk.MAKTX, sk.PROD_TITLE, sd.SKU)"
+        extra_filter = "AND (cm.KLABC IS NULL OR cm.KLABC <> 'X')"
+        select_expr = f"{entity_expr} AS entity_name"
+        group_by = entity_expr
+    elif dimension in ("Tyres", "Tyre Types"):
+        entity_expr = "COALESCE(NULLIF(TRIM(sk.tyre_type), ''), 'Unknown Tyre')"
         joins = f"JOIN {sku_tbl} sk ON sd.SKU = sk.MATNR"
+        select_expr = f"{entity_expr} AS entity_name"
+        group_by = entity_expr
+    elif dimension == "Materials":
+        entity_expr = "COALESCE(NULLIF(TRIM(sk.MAKTX), ''), NULLIF(TRIM(sk.PROD_TITLE), ''), CAST(sd.SKU AS CHAR))"
+        joins = f"JOIN {sku_tbl} sk ON sd.SKU = sk.MATNR"
+        select_expr = f"{entity_expr} AS entity_name"
+        group_by = entity_expr
     else:
         return [], []
 
     sql = f"""
         SELECT 
-            {entity_expr} AS entity_name,
+            {select_expr},
             SUM(sd.invoice_value) AS sales_value
         FROM {sales_tbl} sd
         {joins}
@@ -230,7 +284,7 @@ def _compute_top_bottom_slice_mysql(cursor, user_db: str, dimension: str, days: 
           AND CAST(sd.distribution_channel AS CHAR) = '10'
           AND (sd.indicator_cancel IS NULL OR sd.indicator_cancel NOT IN ('X', 'Y', '1'))
           {extra_filter}
-        GROUP BY {entity_expr}
+        GROUP BY {group_by}
         HAVING SUM(sd.invoice_value) > 0
         ORDER BY sales_value DESC
     """
@@ -244,10 +298,13 @@ def _compute_top_bottom_slice_mysql(cursor, user_db: str, dimension: str, days: 
     for r in rows:
         name = r.get("entity_name") or "Unknown"
         val = float(r.get("sales_value") or 0.0)
-        clean_rows.append({"name": str(name).strip(), "sales_value": val})
+        clean_rows.append({"name": str(name).strip(), "sales_value": round(val, 2)})
 
     top_10 = [{"rank": i + 1, "name": item["name"], "sales_value": item["sales_value"]} for i, item in enumerate(clean_rows[:10])]
     bottom_sorted = sorted(clean_rows, key=lambda x: x["sales_value"])[:10]
+    bottom_10 = [{"rank": i + 1, "name": item["name"], "sales_value": item["sales_value"]} for i, item in enumerate(bottom_sorted)]
+
+    return top_10, bottom_10
     bottom_10 = [{"rank": i + 1, "name": item["name"], "sales_value": item["sales_value"]} for i, item in enumerate(bottom_sorted)]
 
     return top_10, bottom_10
@@ -257,7 +314,7 @@ def _compute_top_bottom_slice_mysql(cursor, user_db: str, dimension: str, days: 
 # Bulk Sync Function (Called by Scheduler & On-Demand)
 # ─────────────────────────────────────────────────────────────────────────────
 
-SUPPORTED_DIMENSIONS = ["Customers", "Territories", "Regions", "Materials"]
+SUPPORTED_DIMENSIONS = ["Customers", "Tyres", "Territories", "Regions", "Materials"]
 SUPPORTED_DAYS = [2, 3, 4, 5, 6]
 
 

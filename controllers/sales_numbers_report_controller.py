@@ -17,6 +17,58 @@ from helper.sap_connection import get_sap_connection_for_session, sanitize_and_e
 
 TABLE_NAME = "sales_summary_sales_numbers"
 
+CATEGORY_CODE_MAP = {
+    "0": "TRUCK",
+    "1": "LCV",
+    "2": "CAR",
+    "3": "JEEP",
+    "4": "TRACTOR",
+    "5": "TRACTOR",
+    "6": "3W",
+    "7": "FARM",
+    "A": "ADV",
+    "B": "2W / SCOOTER",
+    "C": "LCV",
+    "D": "OTR / DUMPER",
+    "E": "OTR / EARTHMOVER",
+    "F": "FARM / TRACTOR",
+    "H": "3W",
+    "I": "INDUSTRIAL",
+    "J": "JEEP / SUV",
+    "K": "CRANE / FORKLIFT",
+    "L": "LIGHT TRUCK",
+    "M": "2W / MOTORCYCLE",
+    "MOTOR": "2W / MOTORCYCLE",
+    "N": "LCV / BUS",
+    "O": "OTR",
+    "P": "CAR",
+    "Q": "3W / QUAD",
+    "R": "SPECIAL / ROLLER",
+    "S": "2W / SCOOTER",
+    "T": "TRACTOR",
+    "TBB": "TRUCK",
+    "TBR": "TRUCK",
+    "TRACTOR": "TRACTOR",
+    "V": "COMMERCIAL / OTR",
+    "Y": "INDUSTRIAL",
+    "Z": "RETREAD",
+}
+
+def normalize_category_name(raw_name: str) -> str:
+    if not raw_name:
+        return "Unknown"
+    trimmed = str(raw_name).strip()
+    if trimmed.lower() == "total":
+        return "Total"
+    if " - " in trimmed:
+        parts = trimmed.split(" - ", 1)
+        code = parts[0].strip().upper()
+        construction = parts[1].strip()
+        mapped = CATEGORY_CODE_MAP.get(code, parts[0].strip())
+        return f"{mapped} - {construction}"
+    code = trimmed.upper()
+    return CATEGORY_CODE_MAP.get(code, trimmed)
+
 CREATE_TABLE_SQL = f"""
 CREATE TABLE IF NOT EXISTS `{TABLE_NAME}` (
     `id` INT AUTO_INCREMENT PRIMARY KEY,
@@ -419,6 +471,7 @@ def query_sales_numbers_hana(cursor, schema, year_month: str, selected_date: str
         cat_name = str(r[0]).strip() if r[0] is not None else "Unknown"
         if not cat_name or cat_name.lower() == 'none':
             cat_name = "Unknown - Unknown"
+        cat_name = normalize_category_name(cat_name)
 
         p_act = round(float(r[1] or 0), 2)
         tgt = round(float(r[2] or 0), 2)
@@ -565,6 +618,7 @@ def get_cached_data(mysql_conn, session_id: str, year_month: str):
         if rows and len(rows) > 0:
             for r in rows:
                 r["is_total"] = bool(r.get("is_total"))
+                r["category"] = normalize_category_name(r.get("category", ""))
             return rows
     except Exception as e:
         print(f"[{TABLE_NAME}] Cache fetch error: {e}", flush=True)
