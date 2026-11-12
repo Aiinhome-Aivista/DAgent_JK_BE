@@ -1,4 +1,6 @@
 import datetime
+import re
+import html as html_lib
 from database.db_connection import get_db_connection
 from database.config import MAIL_SERVER, MAIL_PORT, MAIL_USE_TLS, MAIL_USERNAME, MAIL_PASSWORD
 import os
@@ -103,8 +105,106 @@ def generate_excel_report(report_ids_json, workspace_db):
         if 'cursor' in locals(): cursor.close()
         if 'conn' in locals(): conn.close()
 
-def build_html_table(report_name, data, recipient_name=""):
-    """Builds a professional HTML table for the email body."""
+def _fetch_session_analysis_summary(conn, session_id: str) -> str:
+    """Fetches the latest Executive Analysis Summary markdown from session_analysis_cache."""
+    if not conn or not session_id:
+        return ""
+    cur = None
+    try:
+        cur = conn.cursor(dictionary=True) if hasattr(conn, "cursor") else conn.cursor()
+        cur.execute(
+            "SELECT report FROM session_analysis_cache WHERE session_id = %s ORDER BY id DESC LIMIT 1",
+            (session_id,)
+        )
+        row = cur.fetchone()
+        raw = row.get("report") if isinstance(row, dict) else (row[0] if row else "")
+        if not raw:
+            return ""
+        text = str(raw).strip()
+        # Strip Coverage Gaps / Strategic Conclusion if present (matching UI filter)
+        text = re.sub(
+            r'(?:^|\n)\s*(?:###\s*|\*\*)?(?:\d+\.\s*)?Coverage\s+Gaps\b[^\n]*(?:\*\*)?:?[\s\S]*?(?=(?:\n\s*(?:###|\*\*\d+\.|\*\*Business Risks|\*\*Actionable Recommendations))|$)',
+            '\n',
+            text,
+            flags=re.IGNORECASE,
+        )
+        text = re.sub(
+            r'(?:^|\n)\s*(?:###\s*|\*\*)?Strategic\s+Conclusion(?:\*\*)?:?[\s\S]*?(?=(?:\n\s*###|$))',
+            '\n',
+            text,
+            flags=re.IGNORECASE,
+        )
+        return text.strip()
+    except Exception as e:
+        print(f"[Mailer] Could not fetch session analysis summary: {e}", flush=True)
+        return ""
+    finally:
+        if cur:
+            try:
+                cur.close()
+            except Exception:
+                pass
+
+
+def _format_summary_to_email_html(report_text: str) -> str:
+    """Converts the analysis summary markdown into clean inline-styled HTML for emails."""
+    if not report_text:
+        return ""
+
+    def fmt_inline(line: str) -> str:
+        s = html_lib.escape(line, quote=False)
+        # Protect literal asterisks inside SKUs/identifiers (e.g. E2_***_TL)
+        s = re.sub(r'([A-Za-z0-9_])(\*+)(?=[A-Za-z0-9_])', lambda m: m.group(1) + '&#42;' * len(m.group(2)), s)
+        s = re.sub(r'_(\*{3,})', lambda m: '_' + '&#42;' * len(m.group(1)), s)
+        s = re.sub(r'\*\*([^\s*](?:[^*\n]*?[^\s*])?)\*\*', r'<strong style="color:#0f172a;">\1</strong>', s)
+        s = re.sub(r'\*([^\s*](?:[^*\n]*?[^\s*])?)\*', r'<em>\1</em>', s)
+        return s
+
+    parts = ['<div style="margin-top:24px;padding-top:20px;border-top:1px solid #e2e8f0;color:#334155;font-size:14px;line-height:1.6;">']
+    in_list = False
+
+    def close_list():
+        nonlocal in_list
+        if in_list:
+            parts.append('</ul>')
+            in_list = False
+
+    for raw_line in report_text.split('\n'):
+        t = raw_line.strip()
+        if not t:
+            close_list()
+            continue
+
+        if t.upper().startswith('TITLE:'):
+            close_list()
+            title_txt = fmt_inline(t[6:].strip())
+            parts.append(f'<h2 style="margin:0 0 12px 0;font-size:18px;color:#0f172a;">{title_txt}</h2>')
+        elif t.startswith('#### '):
+            close_list()
+            parts.append(f'<h4 style="margin:14px 0 6px 0;font-size:14px;color:#1e293b;">{fmt_inline(t[5:])}</h4>')
+        elif t.startswith('### '):
+            close_list()
+            parts.append(f'<h3 style="margin:18px 0 8px 0;font-size:16px;color:#0f172a;border-bottom:1px solid #f1f5f9;padding-bottom:4px;">{fmt_inline(t[4:])}</h3>')
+        elif t.startswith('## ') or t.startswith('# '):
+            close_list()
+            heading = t.lstrip('#').strip()
+            parts.append(f'<h3 style="margin:18px 0 8px 0;font-size:16px;color:#0f172a;">{fmt_inline(heading)}</h3>')
+        elif t.startswith('- ') or t.startswith('* ') or t.startswith('• '):
+            if not in_list:
+                parts.append('<ul style="margin:6px 0 10px 0;padding-left:20px;">')
+                in_list = True
+            parts.append(f'<li style="margin-bottom:4px;">{fmt_inline(t[2:].strip())}</li>')
+        else:
+            close_list()
+            parts.append(f'<p style="margin:8px 0;">{fmt_inline(t)}</p>')
+
+    close_list()
+    parts.append('</div>')
+    return '\n'.join(parts)
+
+
+def build_html_table(report_name, data, recipient_name="", summary_html=""):
+    """Builds a professional HTML table and optional Executive Analysis Summary for the email body."""
     
     rows = ""
     for item in data:
@@ -124,6 +224,7 @@ def build_html_table(report_name, data, recipient_name=""):
     <!DOCTYPE html>
     <html>
     <head>
+      <meta charset="UTF-8" />
       <style>
         body {{ font-family: Arial, sans-serif; background-color: #f8f9fa; padding: 20px; }}
         .container {{ max-width: 800px; margin: 0 auto; background-color: #fff; padding: 30px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }}
@@ -135,8 +236,8 @@ def build_html_table(report_name, data, recipient_name=""):
     <body>
       <div class="container">
         <h2>Hi {recipient_name},</h2>
-        <p>Your scheduled Dashboard Report is ready. Please find the attached PDF containing the latest KPIs and Visual Analytics.</p>
-        
+        <p>Your scheduled Dashboard Report is ready. Please find the attached files containing the latest KPIs and Visual Analytics.</p>
+        {summary_html}
         <div class="footer">
           <p>This is an automatically generated email from DAgent AI.</p>
         </div>
@@ -146,8 +247,8 @@ def build_html_table(report_name, data, recipient_name=""):
     """
     return html
 
-def send_report_email(to_email, attachment_paths, recipient_name=""):
-    """Sends the actual email with attachments."""
+def send_report_email(to_email, attachment_paths, recipient_name="", summary_html=""):
+    """Sends the actual email with attachments and optional inline analysis summary."""
     try:
         from_email = MAIL_USERNAME or os.getenv("NOREPLY_EMAIL", "test@test.com")
         password = MAIL_PASSWORD or os.getenv("NOREPLY_PASSWORD", "")
@@ -157,8 +258,8 @@ def send_report_email(to_email, attachment_paths, recipient_name=""):
         msg["To"] = to_email
         msg["Subject"] = f"Automated Scheduled Report - Visual Analytics"
 
-        body = build_html_table(report_name="Dashboard Report", data=[], recipient_name=recipient_name)
-        msg.attach(MIMEText(body, "html"))
+        body = build_html_table(report_name="Dashboard Report", data=[], recipient_name=recipient_name, summary_html=summary_html)
+        msg.attach(MIMEText(body, "html", "utf-8"))
 
         # Attach files
         for attachment_path in attachment_paths:
@@ -267,53 +368,81 @@ def check_and_send_scheduled_reports():
         print(f"[Mailer] Found {len(due_reports)} report(s) scheduled for {current_day} at {current_time}. Sending...", flush=True)
         
         for schedule in due_reports:
-            print(f"[Mailer] Generating PDF report for {schedule['email']}...", flush=True)
-            # 1. Generate PDF Report
-            pdf_path = generate_pdf_report(
-                db_conn=conn, 
-                workspace_name=schedule['workspace_name'],
-                session_id=schedule['session_id'],
-                report_ids=schedule['report_ids']
-            )
-            
-            if not pdf_path:
-                print(f"[Mailer] Failed to generate PDF for {schedule['email']}", flush=True)
+            raw_rids = schedule.get('report_ids')
+            if isinstance(raw_rids, str):
+                try:
+                    parsed_rids = [str(x) for x in json.loads(raw_rids)]
+                except Exception:
+                    parsed_rids = []
+            elif isinstance(raw_rids, list):
+                parsed_rids = [str(x) for x in raw_rids]
             else:
-                print(f"[Mailer] PDF generated successfully at {pdf_path}", flush=True)
+                parsed_rids = []
+
+            # Always include Executive Analysis Summary in the email body
+            print(f"[Mailer] Fetching Executive Analysis Summary for {schedule['email']}...", flush=True)
+            summary_conn = get_db_connection()
+            summary_md = _fetch_session_analysis_summary(summary_conn, schedule['session_id'])
+            if summary_conn:
+                try:
+                    summary_conn.close()
+                except Exception:
+                    pass
+            summary_html = _format_summary_to_email_html(summary_md)
+
+            pdf_path = None
+            should_gen_pdf = (not parsed_rids) or any(rid in parsed_rids for rid in ('1', '2', '3', '4', '5', '6', '7', '8', '11'))
+            if should_gen_pdf:
+                print(f"[Mailer] Generating PDF report for {schedule['email']}...", flush=True)
+                # 1. Generate PDF Report
+                pdf_path = generate_pdf_report(
+                    db_conn=conn, 
+                    workspace_name=schedule['workspace_name'],
+                    session_id=schedule['session_id'],
+                    report_ids=schedule['report_ids']
+                )
+                if not pdf_path:
+                    print(f"[Mailer] Failed to generate PDF for {schedule['email']}", flush=True)
+                else:
+                    print(f"[Mailer] PDF generated successfully at {pdf_path}", flush=True)
+
+            excel_path = None
+            should_gen_excel = (not parsed_rids) or ('9' in parsed_rids)
+            if should_gen_excel:
+                print(f"[Mailer] Generating Excel report for {schedule['email']}...", flush=True)
+                # 1b. Generate Excel Report
+                from controllers.export_report_controller import generate_domestic_sales_excel
+                now = datetime.datetime.now()
+                excel_conn = get_db_connection()
+                excel_path = generate_domestic_sales_excel(
+                    conn=excel_conn, 
+                    session_id=schedule['session_id'],
+                    year=now.year,
+                    month=now.month,
+                    day=now.day
+                )
+                if excel_conn:
+                    excel_conn.close()
                 
-            print(f"[Mailer] Generating Excel report for {schedule['email']}...", flush=True)
-            # 1b. Generate Excel Report
-            from controllers.export_report_controller import generate_domestic_sales_excel
-            now = datetime.datetime.now()
-            excel_conn = get_db_connection()
-            excel_path = generate_domestic_sales_excel(
-                conn=excel_conn, 
-                session_id=schedule['session_id'],
-                year=now.year,
-                month=now.month,
-                day=now.day
-            )
-            if excel_conn:
-                excel_conn.close()
-            
-            if not excel_path:
-                print(f"[Mailer] Failed to generate Excel for {schedule['email']}", flush=True)
-            else:
-                print(f"[Mailer] Excel generated successfully at {excel_path}", flush=True)
+                if not excel_path:
+                    print(f"[Mailer] Failed to generate Excel for {schedule['email']}", flush=True)
+                else:
+                    print(f"[Mailer] Excel generated successfully at {excel_path}", flush=True)
                 
             attachments = []
             if pdf_path: attachments.append(pdf_path)
             if excel_path: attachments.append(excel_path)
             
-            if not attachments:
-                print(f"[Mailer] No attachments generated for {schedule['email']}, skipping email.", flush=True)
+            if not attachments and not summary_html:
+                print(f"[Mailer] No attachments or summary generated for {schedule['email']}, skipping email.", flush=True)
                 continue
 
             # 2. Send the Email
             send_report_email(
                 to_email=schedule['email'],
                 attachment_paths=attachments,
-                recipient_name=schedule['name']
+                recipient_name=schedule['name'],
+                summary_html=summary_html
             )
             
             # 3. Cleanup temp files

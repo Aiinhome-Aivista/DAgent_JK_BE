@@ -24,30 +24,79 @@ from controllers.sales_dashboard import (
 )
 from controllers.category_sales import get_category_sales_controller
 
-def draw_data_table(pdf, title, data, col1_header, col2_header):
-    if not data: return
-    # Add page if not enough space
-    if pdf.get_y() > 250:
+def _fmt_sales_val(val) -> str:
+    """Formats numeric sales values cleanly (converting raw Rupees >= 1 Cr to 'Rs. X.XX Cr')."""
+    try:
+        num = float(val)
+    except (ValueError, TypeError):
+        return str(val)
+    if abs(num) >= 10000000:
+        return f"Rs. {num / 10000000.0:,.2f} Cr"
+    return f"{num:,.2f}"
+
+
+def draw_multi_col_table(pdf, title, headers, rows, col_widths=None, alignments=None):
+    """Renders a clean, readable, zebra-striped PDF table with automatic page breaks."""
+    if not rows or not headers:
+        return
+
+    num_cols = len(headers)
+    if not col_widths:
+        w = 190.0 / num_cols
+        col_widths = [w] * num_cols
+    if not alignments:
+        alignments = ['L'] + ['R'] * (num_cols - 1)
+
+    if pdf.get_y() > 240:
         pdf.add_page()
-        
-    pdf.set_font("Arial", 'B', 10)
-    pdf.set_text_color(30, 41, 59)
+
+    pdf.set_font("Arial", 'B', 11)
+    pdf.set_text_color(15, 23, 42)
     pdf.cell(0, 8, title.upper(), ln=True)
-    
-    # Table Header
-    pdf.set_font("Arial", 'B', 9)
-    pdf.set_fill_color(226, 232, 240)
-    pdf.cell(90, 8, col1_header.upper(), border=1, fill=True)
-    pdf.cell(90, 8, col2_header.upper(), border=1, fill=True, ln=True)
-    
-    # Table Rows
-    pdf.set_font("Arial", '', 9)
-    
-    # Handle both dict and list formats
+    pdf.ln(1)
+
+    def _draw_header():
+        pdf.set_font("Arial", 'B', 8.5)
+        pdf.set_fill_color(30, 41, 59)       # Slate-800
+        pdf.set_text_color(255, 255, 255)    # White
+        pdf.set_draw_color(203, 213, 225)    # Slate-300
+        for idx, h in enumerate(headers):
+            ln_flag = 1 if idx == num_cols - 1 else 0
+            pdf.cell(col_widths[idx], 8, f" {str(h).upper()} ", border=1, align=alignments[idx], fill=True, ln=ln_flag)
+
+    _draw_header()
+
+    pdf.set_font("Arial", '', 8.5)
+    pdf.set_draw_color(226, 232, 240)        # Slate-200
+    for r_idx, row in enumerate(rows):
+        if pdf.get_y() > 268:
+            pdf.add_page()
+            _draw_header()
+            pdf.set_font("Arial", '', 8.5)
+            pdf.set_draw_color(226, 232, 240)
+
+        if r_idx % 2 == 0:
+            pdf.set_fill_color(255, 255, 255)
+        else:
+            pdf.set_fill_color(248, 250, 252)  # Slate-50
+        pdf.set_text_color(30, 41, 59)
+
+        for c_idx in range(num_cols):
+            cell_val = str(row[c_idx]) if c_idx < len(row) else ""
+            safe_val = cell_val.replace("₹", "Rs. ").encode("latin-1", "replace").decode("latin-1")[:42]
+            ln_flag = 1 if c_idx == num_cols - 1 else 0
+            pdf.cell(col_widths[c_idx], 7, f" {safe_val} ", border=1, align=alignments[c_idx], fill=True, ln=ln_flag)
+
+    pdf.ln(5)
+
+
+def draw_data_table(pdf, title, data, col1_header, col2_header):
+    """Renders a 2-column summary table using the clean zebra-striped design."""
+    if not data:
+        return
     if isinstance(data, dict):
-        items = data.items()
+        items = list(data.items())
     else:
-        # Convert list of dicts to key-val pairs (taking first two columns)
         items = []
         for item in data:
             if isinstance(item, dict):
@@ -55,11 +104,16 @@ def draw_data_table(pdf, title, data, col1_header, col2_header):
                 k = vals[0] if len(vals) > 0 else ""
                 v = vals[1] if len(vals) > 1 else ""
                 items.append((k, v))
-            
-    for key, val in items:
-        pdf.cell(90, 8, str(key)[:40], border=1)
-        pdf.cell(90, 8, str(val)[:40], border=1, ln=True)
-    pdf.ln(5)
+
+    rows = [[str(k), _fmt_sales_val(v)] for k, v in items]
+    draw_multi_col_table(
+        pdf,
+        title,
+        [col1_header, col2_header],
+        rows,
+        col_widths=[110, 80],
+        alignments=['L', 'R']
+    )
 
 def extract_response(r):
     if isinstance(r, tuple):
@@ -84,8 +138,10 @@ def generate_pdf_report(db_conn, workspace_name, session_id, report_ids=None):
             report_ids = []
     
     if not report_ids:
-        # If no specific reports are selected, render all default ones
-        report_ids = ['1', '2', '3', '8', '9', '10', '11']
+        # If no specific reports are selected, render the 7 core default sections
+        report_ids = ['1', '2', '3', '4', '8', '9', '11']
+    else:
+        report_ids = [str(r) for r in report_ids]
         
     cursor = db_conn.cursor()
     
@@ -134,24 +190,29 @@ def generate_pdf_report(db_conn, workspace_name, session_id, report_ids=None):
         print(f"Error fetching KPIs: {e}")
 
     chart_data_1 = {}
-    # Chart 1: Year-wise Sales Comparison
+    current_year_num = datetime.datetime.now().year
+    # Chart 1: Year-wise Sales Comparison (Current Year Only)
     try:
-        print("[PDF Generation] Fetching Chart 1 data...", flush=True)
-        with app.test_request_context(method="POST", json=payload):
+        print(f"[PDF Generation] Fetching Chart 1 data (Year {current_year_num} only)...", flush=True)
+        chart1_payload = {"session_id": session_id, "selected_years": [current_year_num]}
+        with app.test_request_context(method="POST", json=chart1_payload):
             res_json = extract_response(year_wise_sales_comparison_controller(get_db_connection))
             vis_data = res_json.get("visualization", [])
             if vis_data:
-                chart_data_1 = {item.get('month', f"M{i}")[:3].upper(): float(item.get('sales_value', 0)) for i, item in enumerate(vis_data)}
+                filtered_vis = [item for item in vis_data if str(item.get("year", current_year_num)) == str(current_year_num)]
+                target_vis = filtered_vis if filtered_vis else vis_data
+                chart_data_1 = {item.get('month', f"M{i}")[:3].upper(): float(item.get('sales_value', 0)) for i, item in enumerate(target_vis)}
         print("[PDF Generation] Chart 1 data fetched successfully.", flush=True)
     except Exception as e:
         print(f"Chart 1 Controller Exception: {e}")
         chart_data_1 = {}
 
     chart_data_2 = {}
-    # Chart 2: Sales by Zone
+    # Chart 2: Sales by Zone (Current Year Only)
     try:
-        print("[PDF Generation] Fetching Chart 2 data...", flush=True)
-        with app.test_request_context(method="POST", json=payload):
+        print(f"[PDF Generation] Fetching Chart 2 data (Year {current_year_num} only)...", flush=True)
+        chart2_payload = {"session_id": session_id, "years": [current_year_num]}
+        with app.test_request_context(method="POST", json=chart2_payload):
             res_json = extract_response(sales_by_zone_data_controller(get_db_connection))
             vis_data = res_json.get("visualizations", [])
             if vis_data and "data" in vis_data[0]:
@@ -163,10 +224,11 @@ def generate_pdf_report(db_conn, workspace_name, session_id, report_ids=None):
         chart_data_2 = {}
 
     chart_data_3 = {}
-    # Chart 3: Top Tyre Types
+    # Chart 3: Top Tyre Types (Current Year Only)
     try:
-        print("[PDF Generation] Fetching Chart 3 data...", flush=True)
-        with app.test_request_context(method="POST", json=payload):
+        print(f"[PDF Generation] Fetching Chart 3 data (Year {current_year_num} only)...", flush=True)
+        chart3_payload = {"session_id": session_id, "year": [current_year_num]}
+        with app.test_request_context(method="POST", json=chart3_payload):
             res_json = extract_response(tyre_sales_data_controller(get_db_connection))
             vis_data = res_json.get("visualizations", [])
             if vis_data and "data" in vis_data[0]:
@@ -314,7 +376,7 @@ def generate_pdf_report(db_conn, workspace_name, session_id, report_ids=None):
     bars1 = plt.bar(list(chart_data_1.keys()), plot_vals1, color='#EF4444', width=0.15)
     plt.bar_label(bars1, fmt='%.2f', padding=3, fontsize=9)
     
-    plt.title('Year-wise Sales Comparison', fontsize=12, fontweight='bold', loc='left')
+    plt.title(f'Year-wise Sales Comparison ({current_year_num})', fontsize=12, fontweight='bold', loc='left')
     plt.ylabel(f'Sales Value{unit1}')
     plt.grid(axis='y', linestyle='--', alpha=0.3)
     plt.gca().spines['top'].set_visible(False)
@@ -359,7 +421,7 @@ def generate_pdf_report(db_conn, workspace_name, session_id, report_ids=None):
     bars3 = plt.barh(list(chart_data_3.keys())[::-1], plot_vals3[::-1], color=colors3[:len(chart_data_3)])
     plt.bar_label(bars3, fmt='%.2f', padding=5, fontsize=9)
     
-    plt.title('Top 10 Tyre Types by Sales', fontsize=12, fontweight='bold', loc='left')
+    plt.title(f'Top 10 Tyre Types by Sales ({current_year_num})', fontsize=12, fontweight='bold', loc='left')
     plt.xlabel(f'Sales Value{unit3}')
     plt.gca().spines['top'].set_visible(False)
     plt.gca().spines['right'].set_visible(False)
@@ -584,8 +646,10 @@ def generate_pdf_report(db_conn, workspace_name, session_id, report_ids=None):
     pdf.cell(0, 5, f"Created on: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}", ln=True, align='L')
     pdf.ln(10)
     
-    # KPIs Box (Simulating the 4 cards on the right of the UI)
-    if any(kpi_id in report_ids for kpi_id in ['8', '9', '10', '11', '4', '5', '6', '7']):
+    # 1. Key Metrics (Report ID '11')
+    if '11' in [str(r) for r in (report_ids or [])]:
+        if pdf.get_y() > 210:
+            pdf.add_page()
         pdf.set_font("Arial", 'B', 12)
         pdf.set_text_color(30, 41, 59)
         pdf.cell(0, 10, "Key Metrics", ln=True)
@@ -629,52 +693,85 @@ def generate_pdf_report(db_conn, workspace_name, session_id, report_ids=None):
             pdf.cell(col_width - 4, 8, str(kpi['value']), ln=True, align='L')
             
         pdf.set_y(current_y + 35)
-    
-    # Insert Chart 1 (Year-wise)
+
+    # 3. Sales Revenue (Cr) - Report ID '8'
+    if '8' in report_ids and os.path.exists(img4_path):
+        if pdf.get_y() > 180: pdf.add_page()
+        pdf.set_font("Arial", 'B', 12)
+        pdf.set_text_color(30, 41, 59)
+        pdf.cell(0, 10, f"SALES REVENUE (CR) - {current_year_num} YTD", ln=True)
+        pdf.image(img4_path, x=10, w=190)
+        pdf.ln(3)
+        if chart_data_4:
+            zone_map_tbl = {
+                "CZ": "Central Zone", "WZ": "West Zone", "NP": "Nepal",
+                "NZ": "North Zone", "TZ": "South Zone - II", "SZ": "South Zone", "EZ": "East Zone"
+            }
+            rev_rows = []
+            for item in chart_data_4:
+                lbl, nums, _ = extract_label_and_numbers(item)
+                z_name = zone_map_tbl.get(lbl.upper(), lbl)
+                ach_v = nums[0] if len(nums) > 0 else 0.0
+                pln_v = nums[1] if len(nums) > 1 else 0.0
+                sle_v = nums[2] if len(nums) > 2 else 0.0
+                rev_rows.append([z_name, f"Rs. {sle_v:,.2f} Cr", f"Rs. {pln_v:,.2f} Cr", f"{ach_v:.2f}%"])
+            draw_multi_col_table(
+                pdf,
+                f"Sales Revenue Summary ({current_year_num} YTD)",
+                ["Zone", "Sale Value", "Plan Value", "Achiev %"],
+                rev_rows,
+                col_widths=[64, 44, 46, 36],
+                alignments=['L', 'R', 'R', 'R']
+            )
+
+    # 4. Year-wise Sales Comparison - Report ID '1'
     if '1' in report_ids and os.path.exists(img1_path):
-        draw_data_table(pdf, "Year-wise Sales Data", chart_data_1, "MONTH", "SALES VALUE")
+        draw_data_table(pdf, f"Year-wise Sales Data ({current_year_num})", chart_data_1, "MONTH", "SALES VALUE")
         if pdf.get_y() > 200: pdf.add_page()
         pdf.image(img1_path, x=10, w=190)
         pdf.ln(5)
     
-    # Insert Chart 2 (Zone)
+    # 5. Sales by Zone - Report ID '2'
     if '2' in report_ids and os.path.exists(img2_path):
-        draw_data_table(pdf, "Sales by Zone Data", chart_data_2, "ZONE", "SALES VALUE")
+        total_z = sum(chart_data_2.values()) if chart_data_2 else 0
+        zone_rows = [
+            [str(k), _fmt_sales_val(v), f"{(v / total_z * 100):.1f}%" if total_z else "0.0%"]
+            for k, v in chart_data_2.items()
+        ]
+        draw_multi_col_table(
+            pdf,
+            f"Sales by Zone Data ({current_year_num})",
+            ["Zone", "Sales Value", "Share %"],
+            zone_rows,
+            col_widths=[80, 70, 40],
+            alignments=['L', 'R', 'R']
+        )
         if pdf.get_y() > 200: pdf.add_page()
         pdf.image(img2_path, x=50, w=110)
         pdf.ln(5)
     
-    # Insert Chart 3 (Tyre Types)
+    # 6. Top 10 Tyre Types by Sales - Report ID '3'
     if '3' in report_ids and os.path.exists(img3_path):
-        draw_data_table(pdf, "Top Tyre Types Data", chart_data_3, "TYRE TYPE", "SALES VALUE")
+        draw_data_table(pdf, f"Top 10 Tyre Types by Sales ({current_year_num})", chart_data_3, "TYRE TYPE", "SALES VALUE")
         if pdf.get_y() > 200: pdf.add_page()
         pdf.image(img3_path, x=10, w=190)
         pdf.ln(5)
-        
-    # Insert Chart 4 (Sales Revenue by Zone)
-    if os.path.exists(img4_path):
-        if pdf.get_y() > 180: pdf.add_page()
-        pdf.set_font("Arial", 'B', 12)
-        pdf.set_text_color(30, 41, 59)
-        pdf.cell(0, 10, "SALES REVENUE (CR)", ln=True)
-        pdf.image(img4_path, x=10, w=190)
-        pdf.ln(5)
 
-    # Insert Chart 5 (Sales by Account Category - CARDS)
-    if chart_data_5_cat or chart_data_5_acc:
+    # 7. Category Sales & Actual Sales by Account Category (Cr) - Report ID '4'
+    if '4' in report_ids and (chart_data_5_cat or chart_data_5_acc):
         if pdf.get_y() > 200: pdf.add_page()
         if chart_data_5_cat:
             draw_pdf_cards(pdf, "CATEGORY SALES", chart_data_5_cat, 0, 1, " Cr", 4, value_on_top=True, bg_color=(248, 250, 252)) # Light Slate
         if chart_data_5_acc:
             draw_pdf_cards(pdf, "ACTUAL SALES BY ACCOUNT CATEGORY (CR)", chart_data_5_acc, 0, 1, "", 3, value_on_top=False, bg_color=(255, 247, 237)) # Light Orange
 
-    # Insert Chart 6 (Non Billed Accounts - CARDS)
-    if chart_data_6:
+    # Insert Chart 6 (Non Billed Accounts - CARDS) - Report ID '5'
+    if '5' in report_ids and chart_data_6:
         if pdf.get_y() > 230: pdf.add_page()
         draw_pdf_cards(pdf, "NON BILLED ACCOUNTS %", chart_data_6, 0, 1, "%", 4, value_on_top=False, bg_color=(240, 253, 244)) # Light Mint
 
-    # Insert Chart 7 (Overdue Pct)
-    if os.path.exists(img7_path):
+    # Insert Chart 7 (Overdue Pct) - Report ID '6'
+    if '6' in report_ids and os.path.exists(img7_path):
         if pdf.get_y() > 200: pdf.add_page()
         pdf.set_font("Arial", 'B', 12)
         pdf.set_text_color(30, 41, 59)
@@ -682,8 +779,8 @@ def generate_pdf_report(db_conn, workspace_name, session_id, report_ids=None):
         pdf.image(img7_path, x=50, w=110)
         pdf.ln(5)
 
-    # Insert Chart 8 (Exposure Pct)
-    if os.path.exists(img8_path):
+    # Insert Chart 8 (Exposure Pct) - Report ID '7'
+    if '7' in report_ids and os.path.exists(img8_path):
         if pdf.get_y() > 200: pdf.add_page()
         pdf.set_font("Arial", 'B', 12)
         pdf.set_text_color(30, 41, 59)
