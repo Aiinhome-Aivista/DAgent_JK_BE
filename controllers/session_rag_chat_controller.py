@@ -1530,6 +1530,7 @@ CANONICAL DATA MODEL & RELATIONSHIP GRAPH (OFFICIAL):
        or in CTE: WHERE dms.month = (SELECT MAX(m.month) FROM dealer_monthly_sales m)
    - RESULT SET BOUNDING & ACTIONABLE LIMITS:
      * When generating granular reports across multiple dimensions (e.g. region + territory + category + month) without narrow user filters, ALWAYS append an appropriate ORDER BY ... DESC LIMIT 100 (or LIMIT 50) to keep results actionable, fast, and UI-friendly.
+     * EXCEPTION: When the user explicitly asks to "List all ..." (e.g. all active customers in a specific Account Group / KTOKD), do NOT add a LIMIT clause so the complete dataset can be exported to CSV when it exceeds the display threshold.
 4. CANONICAL EXAMPLES:
    - Top N Customers in a Region / Territory / Zone (e.g. Jaipur):
      SELECT 
@@ -4097,6 +4098,7 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
         "chat_id":             active_chat_id,
         "visit_number":        actual_visit
     }), 200
+
 
 
 
