@@ -1510,14 +1510,15 @@ def _compute_core_kpis(cursor) -> dict:
         if reg_tbl:
             run("top_region", f"""
                 SELECT
-                    COALESCE(rm.region_name, cm.REGIO, 'Unmapped Region') AS region_name,
+                    rm.region_name AS region_name,
                     ROUND(SUM(sd.{col_revenue})/10000000, 2) AS Revenue
                 FROM `{sales_tbl}` sd
                 JOIN `{cust_tbl}` cm ON (sd.{col_cust} = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(sd.{col_cust} AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))
                 {join_terr}
                 {join_reg}
                 {sales_where}
-                GROUP BY region_name
+                AND rm.region_name IS NOT NULL AND TRIM(rm.region_name) <> ''
+                GROUP BY rm.region_name
                 ORDER BY Revenue DESC
                 LIMIT 1
             """, required_tables=[sales_tbl, cust_tbl, reg_tbl])
@@ -1525,7 +1526,7 @@ def _compute_core_kpis(cursor) -> dict:
 
             run("region_contribution_pct", f"""
                 SELECT
-                    COALESCE(rm.region_name, cm.REGIO, 'Unmapped Region') AS region_name,
+                    rm.region_name AS region_name,
                     ROUND(SUM(sd.{col_revenue})/10000000, 2) AS Revenue,
                     ROUND(SUM(sd.{col_revenue}) * 100 / NULLIF((SELECT SUM({col_revenue}) FROM `{sales_tbl}` sd2 {sales_where.replace('sd.', 'sd2.')}), 0), 2) AS Contribution_Percentage
                 FROM `{sales_tbl}` sd
@@ -1533,7 +1534,8 @@ def _compute_core_kpis(cursor) -> dict:
                 {join_terr}
                 {join_reg}
                 {sales_where}
-                GROUP BY region_name
+                AND rm.region_name IS NOT NULL AND TRIM(rm.region_name) <> ''
+                GROUP BY rm.region_name
                 ORDER BY Revenue DESC
                 LIMIT 5
             """, required_tables=[sales_tbl, cust_tbl, reg_tbl])
@@ -1619,7 +1621,7 @@ def _compute_core_kpis(cursor) -> dict:
             if reg_tbl:
                 run("top_5_regions_30d", f"""
                     SELECT
-                        COALESCE(rm.region_name, cm.REGIO, 'Unmapped Region') AS region_name,
+                        rm.region_name AS region_name,
                         ROUND(SUM(sd.{col_revenue})/10000000, 2) AS revenue_cr
                     FROM `{sales_tbl}` sd
                     JOIN `{cust_tbl}` cm ON (sd.{col_cust} = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(sd.{col_cust} AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))
@@ -1627,15 +1629,16 @@ def _compute_core_kpis(cursor) -> dict:
                     {join_reg}
                     CROSS JOIN (SELECT MAX(sd_max.{col_date}) AS max_dt FROM `{sales_tbl}` sd_max) md
                     {sales_where}
+                    AND rm.region_name IS NOT NULL AND TRIM(rm.region_name) <> ''
                     AND sd.{col_date} BETWEEN DATE_SUB(md.max_dt, INTERVAL 29 DAY) AND md.max_dt
-                    GROUP BY region_name
+                    GROUP BY rm.region_name
                     ORDER BY revenue_cr DESC
                     LIMIT 5
                 """, required_tables=[sales_tbl, cust_tbl, reg_tbl])
 
                 run("worst_5_regions_30d", f"""
                     SELECT
-                        COALESCE(rm.region_name, cm.REGIO, 'Unmapped Region') AS region_name,
+                        rm.region_name AS region_name,
                         SUM(sd.{col_revenue}) AS revenue_raw,
                         ROUND(SUM(sd.{col_revenue})/10000000, 4) AS revenue_cr
                     FROM `{sales_tbl}` sd
@@ -1644,9 +1647,10 @@ def _compute_core_kpis(cursor) -> dict:
                     {join_reg}
                     CROSS JOIN (SELECT MAX(sd_max.{col_date}) AS max_dt FROM `{sales_tbl}` sd_max) md
                     {sales_where}
+                    AND rm.region_name IS NOT NULL AND TRIM(rm.region_name) <> ''
                     AND sd.{col_date} BETWEEN DATE_SUB(md.max_dt, INTERVAL 29 DAY) AND md.max_dt
-                    GROUP BY region_name
-                    HAVING SUM(sd.{col_revenue}) >= 0
+                    GROUP BY rm.region_name
+                    HAVING SUM(sd.{col_revenue}) > 0
                     ORDER BY SUM(sd.{col_revenue}) ASC
                     LIMIT 5
                 """, required_tables=[sales_tbl, cust_tbl, reg_tbl])
@@ -2253,26 +2257,29 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
     if sku_view and cat_view:
         run("top_category", f"""
             SELECT
-                COALESCE(NULLIF(TRIM(cat."CAT_DESC"), ''), NULLIF(TRIM(cat."SHORT_DESC"), ''), 'Unmapped Category') AS category_name,
+                cat."CAT_DESC" AS category_name,
                 ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue
             FROM {sales_source} s
             INNER JOIN "{schema}"."{sku_view}" sk ON TRIM(s."SKU") = TRIM(sk."MATNR")
-            LEFT JOIN "{schema}"."{cat_view}" cat ON TRIM(sk."CAT_CODE") = TRIM(cat."CAT_CODE")
+            INNER JOIN "{schema}"."{cat_view}" cat ON TRIM(sk."CAT_CODE") = TRIM(cat."CAT_CODE")
             {sales_where}
-            GROUP BY COALESCE(NULLIF(TRIM(cat."CAT_DESC"), ''), NULLIF(TRIM(cat."SHORT_DESC"), ''), 'Unmapped Category')
+            AND cat."CAT_DESC" IS NOT NULL AND TRIM(cat."CAT_DESC") <> ''
+            GROUP BY cat."CAT_DESC"
             ORDER BY revenue DESC
             LIMIT 1
         """)
 
         run("lowest_category", f"""
             SELECT
-                COALESCE(NULLIF(TRIM(cat."CAT_DESC"), ''), NULLIF(TRIM(cat."SHORT_DESC"), ''), 'Unmapped Category') AS category_name,
+                cat."CAT_DESC" AS category_name,
                 ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue
             FROM {sales_source} s
             INNER JOIN "{schema}"."{sku_view}" sk ON TRIM(s."SKU") = TRIM(sk."MATNR")
-            LEFT JOIN "{schema}"."{cat_view}" cat ON TRIM(sk."CAT_CODE") = TRIM(cat."CAT_CODE")
+            INNER JOIN "{schema}"."{cat_view}" cat ON TRIM(sk."CAT_CODE") = TRIM(cat."CAT_CODE")
             {sales_where}
-            GROUP BY COALESCE(NULLIF(TRIM(cat."CAT_DESC"), ''), NULLIF(TRIM(cat."SHORT_DESC"), ''), 'Unmapped Category')
+            AND cat."CAT_DESC" IS NOT NULL AND TRIM(cat."CAT_DESC") <> ''
+            GROUP BY cat."CAT_DESC"
+            HAVING SUM(COALESCE(s."invoice_value", 0)) > 0
             ORDER BY revenue ASC
             LIMIT 1
         """)
@@ -2340,15 +2347,16 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
             run("top_skus_by_category", f"""
                 WITH CatSKU AS (
                     SELECT 
-                        COALESCE(NULLIF(TRIM(cat."CAT_DESC"), ''), 'Other Category') AS category_name,
+                        cat."CAT_DESC" AS category_name,
                         COALESCE(NULLIF(TRIM(sk."MAKTX"), ''), NULLIF(TRIM(sk."PROD_TITLE"), ''), TRIM(s."SKU")) AS sku_title,
                         SUM(COALESCE(s."invoice_value", 0)) AS sku_rev
                     FROM {sales_source_30d} s
                     INNER JOIN "{schema}"."{sku_view}" sk ON TRIM(s."SKU") = TRIM(sk."MATNR")
-                    LEFT JOIN "{schema}"."{cat_view}" cat ON TRIM(sk."CAT_CODE") = TRIM(cat."CAT_CODE")
+                    INNER JOIN "{schema}"."{cat_view}" cat ON TRIM(sk."CAT_CODE") = TRIM(cat."CAT_CODE")
                     {sales_where}
+                    AND cat."CAT_DESC" IS NOT NULL AND TRIM(cat."CAT_DESC") <> ''
                     AND s."invoice_date" BETWEEN '{dt_30d_str}' AND '{max_dt_str}'
-                    GROUP BY COALESCE(NULLIF(TRIM(cat."CAT_DESC"), ''), 'Other Category'), COALESCE(NULLIF(TRIM(sk."MAKTX"), ''), NULLIF(TRIM(sk."PROD_TITLE"), ''), TRIM(s."SKU"))
+                    GROUP BY cat."CAT_DESC", COALESCE(NULLIF(TRIM(sk."MAKTX"), ''), NULLIF(TRIM(sk."PROD_TITLE"), ''), TRIM(s."SKU"))
                 ),
                 CatTotals AS (
                     SELECT 
@@ -2381,7 +2389,7 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
         cust_join = f"""
             INNER JOIN "{schema}"."{cust_view}" cm ON (
                 (s."dealer_code" = cm."KUNNR" OR
-                 LPAD(TRIM(s."dealer_code"), 10, '0') = cm."KUNNR" OR
+                 TRIM(LEADING '0' FROM cm."KUNNR") = TRIM(LEADING '0' FROM s."dealer_code") OR
                  LTRIM(s."dealer_code", '0') = LTRIM(cm."KUNNR", '0'))
                 AND (cm."KLABC" IS NULL OR cm."KLABC" <> 'X')
             )
@@ -2389,7 +2397,7 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
         cust_join_left = f"""
             LEFT JOIN "{schema}"."{cust_view}" cm ON (
                 (s."dealer_code" = cm."KUNNR" OR
-                 LPAD(TRIM(s."dealer_code"), 10, '0') = cm."KUNNR" OR
+                 TRIM(LEADING '0' FROM cm."KUNNR") = TRIM(LEADING '0' FROM s."dealer_code") OR
                  LTRIM(s."dealer_code", '0') = LTRIM(cm."KUNNR", '0'))
                 AND (cm."KLABC" IS NULL OR cm."KLABC" <> 'X')
             )
@@ -2656,13 +2664,13 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
 
     # ---------- 5. Geography ----------
     if cust_view and (terr_view or reg_view or zone_view):
-        terr_join = f'LEFT JOIN "{schema}"."{terr_view}" tm ON (cm."BZIRK" = tm."BZIRK" OR TRIM(cm."BZIRK") = TRIM(tm."BZIRK"))' if terr_view else ''
-        reg_join = f'LEFT JOIN "{schema}"."{reg_view}" rm ON (tm."REGIO" = rm."region_code" OR TRIM(tm."REGIO") = TRIM(rm."region_code"))' if (terr_view and reg_view) else ''
-        zone_join = f'LEFT JOIN "{schema}"."{zone_view}" zm ON (COALESCE(tm."P_ZONE", rm."zone_code") = zm."P_ZONE")' if (zone_view and terr_view and reg_view) else ''
+        terr_join = f'LEFT JOIN "{schema}"."{terr_view}" tm ON TRIM(tm."BZIRK") = TRIM(cm."BZIRK")' if terr_view else ''
+        reg_join = f'LEFT JOIN "{schema}"."{reg_view}" rm ON TRIM(rm."region_code") = TRIM(tm."REGIO")' if (terr_view and reg_view) else ''
+        zone_join = f'LEFT JOIN "{schema}"."{zone_view}" zm ON TRIM(zm."P_ZONE") = TRIM(rm."zone_code")' if (zone_view and terr_view and reg_view) else ''
 
         run("top_zone", f"""
             SELECT
-                COALESCE(NULLIF(TRIM(zm."NAME"), ''), NULLIF(TRIM(zm."P_ZONE"), ''), NULLIF(TRIM(tm."P_ZONE"), ''), 'Unknown') AS zone_name,
+                COALESCE(NULLIF(TRIM(zm."NAME"), ''), NULLIF(TRIM(zm."P_ZONE"), ''), NULLIF(TRIM(rm."zone_code"), '')) AS zone_name,
                 ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue
             FROM {sales_source} s
             {cust_join}
@@ -2670,47 +2678,51 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
             {reg_join}
             {zone_join}
             {sales_where}
-            GROUP BY COALESCE(NULLIF(TRIM(zm."NAME"), ''), NULLIF(TRIM(zm."P_ZONE"), ''), NULLIF(TRIM(tm."P_ZONE"), ''), 'Unknown')
+            AND (zm."NAME" IS NOT NULL OR rm."zone_code" IS NOT NULL)
+            GROUP BY COALESCE(NULLIF(TRIM(zm."NAME"), ''), NULLIF(TRIM(zm."P_ZONE"), ''), NULLIF(TRIM(rm."zone_code"), ''))
             ORDER BY revenue DESC
             LIMIT 1
         """)
 
         run("top_region", f"""
             SELECT
-                COALESCE(NULLIF(TRIM(rm."region_name"), ''), NULLIF(TRIM(rm."region_code"), ''), 'Unknown') AS region_name,
+                rm."region_name" AS region_name,
                 ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue
             FROM {sales_source} s
             {cust_join}
             {terr_join}
             {reg_join}
             {sales_where}
-            GROUP BY COALESCE(NULLIF(TRIM(rm."region_name"), ''), NULLIF(TRIM(rm."region_code"), ''), 'Unknown')
+            AND rm."region_name" IS NOT NULL AND TRIM(rm."region_name") <> ''
+            GROUP BY rm."region_name"
             ORDER BY revenue DESC
             LIMIT 1
         """)
 
         run("top_territory", f"""
             SELECT
-                COALESCE(NULLIF(TRIM(tm."NAME"), ''), NULLIF(TRIM(tm."BZIRK"), ''), 'Unknown') AS territory_name,
+                tm."NAME" AS territory_name,
                 ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue
             FROM {sales_source} s
             {cust_join}
             {terr_join}
             {sales_where}
-            GROUP BY COALESCE(NULLIF(TRIM(tm."NAME"), ''), NULLIF(TRIM(tm."BZIRK"), ''), 'Unknown')
+            AND tm."NAME" IS NOT NULL AND TRIM(tm."NAME") <> ''
+            GROUP BY tm."NAME"
             ORDER BY revenue DESC
             LIMIT 1
         """)
 
         run("lowest_territory", f"""
             SELECT
-                COALESCE(NULLIF(TRIM(tm."NAME"), ''), NULLIF(TRIM(tm."BZIRK"), ''), 'Unknown') AS territory_name,
+                tm."NAME" AS territory_name,
                 ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue
             FROM {sales_source} s
             {cust_join}
             {terr_join}
             {sales_where}
-            GROUP BY COALESCE(NULLIF(TRIM(tm."NAME"), ''), NULLIF(TRIM(tm."BZIRK"), ''), 'Unknown')
+            AND tm."NAME" IS NOT NULL AND TRIM(tm."NAME") <> ''
+            GROUP BY tm."NAME"
             ORDER BY revenue ASC
             LIMIT 1
         """)
@@ -2718,29 +2730,31 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
         # ---------- Last 30 Days Geography Performance ----------
         run("top_5_territories_30d", f"""
             SELECT
-                COALESCE(NULLIF(TRIM(tm."NAME"), ''), NULLIF(TRIM(tm."BZIRK"), ''), 'Unknown') AS territory_name,
+                tm."NAME" AS territory_name,
                 ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue_cr
             FROM {sales_source_30d} s
             {cust_join}
             {terr_join}
             {sales_where}
+            AND tm."NAME" IS NOT NULL AND TRIM(tm."NAME") <> ''
             AND s."invoice_date" BETWEEN '{dt_30d_str}' AND '{max_dt_str}'
-            GROUP BY COALESCE(NULLIF(TRIM(tm."NAME"), ''), NULLIF(TRIM(tm."BZIRK"), ''), 'Unknown')
+            GROUP BY tm."NAME"
             ORDER BY revenue_cr DESC
             LIMIT 5
         """)
 
         run("worst_5_territories_30d", f"""
             SELECT
-                COALESCE(NULLIF(TRIM(tm."NAME"), ''), NULLIF(TRIM(tm."BZIRK"), ''), 'Unknown') AS territory_name,
+                tm."NAME" AS territory_name,
                 SUM(COALESCE(s."invoice_value", 0)) AS revenue_raw,
                 ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 4) AS revenue_cr
             FROM {sales_source_30d} s
             {cust_join}
             {terr_join}
             {sales_where}
+            AND tm."NAME" IS NOT NULL AND TRIM(tm."NAME") <> ''
             AND s."invoice_date" BETWEEN '{dt_30d_str}' AND '{max_dt_str}'
-            GROUP BY COALESCE(NULLIF(TRIM(tm."NAME"), ''), NULLIF(TRIM(tm."BZIRK"), ''), 'Unknown')
+            GROUP BY tm."NAME"
             HAVING SUM(COALESCE(s."invoice_value", 0)) > 0
             ORDER BY SUM(COALESCE(s."invoice_value", 0)) ASC
             LIMIT 5
@@ -2749,22 +2763,23 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
         if reg_view:
             run("top_5_regions_30d", f"""
                 SELECT
-                    COALESCE(NULLIF(TRIM(rm."region_name"), ''), NULLIF(TRIM(rm."region_code"), ''), 'Unknown') AS region_name,
+                    rm."region_name" AS region_name,
                     ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue_cr
                 FROM {sales_source_30d} s
                 {cust_join}
                 {terr_join}
                 {reg_join}
                 {sales_where}
+                AND rm."region_name" IS NOT NULL AND TRIM(rm."region_name") <> ''
                 AND s."invoice_date" BETWEEN '{dt_30d_str}' AND '{max_dt_str}'
-                GROUP BY COALESCE(NULLIF(TRIM(rm."region_name"), ''), NULLIF(TRIM(rm."region_code"), ''), 'Unknown')
+                GROUP BY rm."region_name"
                 ORDER BY revenue_cr DESC
                 LIMIT 5
             """)
 
             run("worst_5_regions_30d", f"""
                 SELECT
-                    COALESCE(NULLIF(TRIM(rm."region_name"), ''), NULLIF(TRIM(rm."region_code"), ''), 'Unknown') AS region_name,
+                    rm."region_name" AS region_name,
                     SUM(COALESCE(s."invoice_value", 0)) AS revenue_raw,
                     ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 4) AS revenue_cr
                 FROM {sales_source_30d} s
@@ -2772,9 +2787,10 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
                 {terr_join}
                 {reg_join}
                 {sales_where}
+                AND rm."region_name" IS NOT NULL AND TRIM(rm."region_name") <> ''
                 AND s."invoice_date" BETWEEN '{dt_30d_str}' AND '{max_dt_str}'
-                GROUP BY COALESCE(NULLIF(TRIM(rm."region_name"), ''), NULLIF(TRIM(rm."region_code"), ''), 'Unknown')
-                HAVING SUM(COALESCE(s."invoice_value", 0)) >= 0
+                GROUP BY rm."region_name"
+                HAVING SUM(COALESCE(s."invoice_value", 0)) > 0
                 ORDER BY SUM(COALESCE(s."invoice_value", 0)) ASC
                 LIMIT 5
             """)
@@ -2876,13 +2892,13 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
         if terr_view and cust_view:
             run("territory_target_shortfall", f"""
                 SELECT
-                    COALESCE(NULLIF(TRIM(tm."NAME"), ''), NULLIF(TRIM(st."TERR_CODE"), ''), 'Unmapped Territory') AS territory_name,
+                    tm."NAME" AS territory_name,
                     ROUND(SUM({tgt_val_col}) / 10000000.0, 2) AS Target_Value,
                     ROUND(COALESCE(act.actual_revenue, 0) / 10000000.0, 2) AS Actual_Revenue,
                     ROUND((COALESCE(act.actual_revenue, 0) * 100.0) / NULLIF(SUM({tgt_val_col}), 0), 2) AS Achievement_Percentage,
                     ROUND((SUM({tgt_val_col}) - COALESCE(act.actual_revenue, 0)) / 10000000.0, 2) AS Shortfall_Value
                 FROM "{schema}"."{target_view}" st
-                LEFT JOIN "{schema}"."{terr_view}" tm ON TRIM(st."TERR_CODE") = TRIM(tm."BZIRK")
+                INNER JOIN "{schema}"."{terr_view}" tm ON TRIM(st."TERR_CODE") = TRIM(tm."BZIRK")
                 LEFT JOIN (
                     SELECT cm."BZIRK", SUM(COALESCE(sd."invoice_value", 0)) AS actual_revenue
                     FROM {sales_source} sd
@@ -2891,19 +2907,21 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
                     GROUP BY cm."BZIRK"
                 ) act ON TRIM(st."TERR_CODE") = TRIM(act."BZIRK")
                 {tgt_period_filter}
-                GROUP BY COALESCE(NULLIF(TRIM(tm."NAME"), ''), NULLIF(TRIM(st."TERR_CODE"), ''), 'Unmapped Territory'), act.actual_revenue
+                AND tm."NAME" IS NOT NULL AND TRIM(tm."NAME") <> ''
+                GROUP BY tm."NAME", act.actual_revenue
                 ORDER BY Shortfall_Value DESC
                 LIMIT 5
             """)
         elif terr_view:
             run("territory_target_shortfall", f"""
                 SELECT
-                    COALESCE(NULLIF(TRIM(tm."NAME"), ''), NULLIF(TRIM(st."TERR_CODE"), ''), 'Unmapped Territory') AS territory_name,
+                    tm."NAME" AS territory_name,
                     ROUND(SUM({tgt_val_col}) / 10000000.0, 2) AS Target_Value
                 FROM "{schema}"."{target_view}" st
-                LEFT JOIN "{schema}"."{terr_view}" tm ON TRIM(st."TERR_CODE") = TRIM(tm."BZIRK")
+                INNER JOIN "{schema}"."{terr_view}" tm ON TRIM(st."TERR_CODE") = TRIM(tm."BZIRK")
                 {tgt_period_filter}
-                GROUP BY COALESCE(NULLIF(TRIM(tm."NAME"), ''), NULLIF(TRIM(st."TERR_CODE"), ''), 'Unmapped Territory')
+                AND tm."NAME" IS NOT NULL AND TRIM(tm."NAME") <> ''
+                GROUP BY tm."NAME"
                 ORDER BY Target_Value DESC
                 LIMIT 5
             """)

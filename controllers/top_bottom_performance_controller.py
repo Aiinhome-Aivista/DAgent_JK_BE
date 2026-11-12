@@ -128,30 +128,22 @@ def _compute_top_bottom_slice_hana(cursor, schema, dimension: str, days: int):
         select_expr = f'{entity_expr} AS entity_name'
         group_by = entity_expr
     elif dimension == "Territories":
-        entity_expr = f'COALESCE(NULLIF(TRIM(tm."NAME"), \'\'), NULLIF(TRIM(tm."BZIRK"), \'\'), \'Unmapped Territory\')'
+        entity_expr = 'tm."NAME"'
         joins = f"""
-            JOIN "{schema}"."{cust_view}" cm ON (
-                s."dealer_code" = cm."KUNNR"
-                OR LPAD(TRIM(TO_VARCHAR(s."dealer_code")), 10, '0') = cm."KUNNR"
-                OR LTRIM(TO_VARCHAR(s."dealer_code"), '0') = LTRIM(cm."KUNNR", '0')
-            )
-            JOIN "{schema}"."{terr_view}" tm ON (cm."BZIRK" = tm."BZIRK" OR TRIM(cm."BZIRK") = TRIM(tm."BZIRK"))
+            JOIN "{schema}"."{cust_view}" cm ON TRIM(LEADING '0' FROM cm."KUNNR") = TRIM(LEADING '0' FROM TO_VARCHAR(s."dealer_code"))
+            JOIN "{schema}"."{terr_view}" tm ON TRIM(cm."BZIRK") = TRIM(tm."BZIRK")
         """
-        extra_filter = 'AND (cm."KLABC" IS NULL OR cm."KLABC" <> \'X\')'
+        extra_filter = 'AND (cm."KLABC" IS NULL OR cm."KLABC" <> \'X\') AND tm."NAME" IS NOT NULL AND TRIM(tm."NAME") <> \'\''
         select_expr = f'{entity_expr} AS entity_name'
         group_by = entity_expr
     elif dimension == "Regions":
-        entity_expr = f'COALESCE(NULLIF(TRIM(rm."region_name"), \'\'), NULLIF(TRIM(rm."region_code"), \'\'), \'Unmapped Region\')'
+        entity_expr = 'rm."region_name"'
         joins = f"""
-            JOIN "{schema}"."{cust_view}" cm ON (
-                s."dealer_code" = cm."KUNNR"
-                OR LPAD(TRIM(TO_VARCHAR(s."dealer_code")), 10, '0') = cm."KUNNR"
-                OR LTRIM(TO_VARCHAR(s."dealer_code"), '0') = LTRIM(cm."KUNNR", '0')
-            )
-            JOIN "{schema}"."{terr_view}" tm ON (cm."BZIRK" = tm."BZIRK" OR TRIM(cm."BZIRK") = TRIM(tm."BZIRK"))
-            JOIN "{schema}"."{reg_view}" rm ON (tm."REGIO" = rm."region_code" OR TRIM(tm."REGIO") = TRIM(rm."region_code"))
+            JOIN "{schema}"."{cust_view}" cm ON TRIM(LEADING '0' FROM cm."KUNNR") = TRIM(LEADING '0' FROM TO_VARCHAR(s."dealer_code"))
+            JOIN "{schema}"."{terr_view}" tm ON TRIM(cm."BZIRK") = TRIM(tm."BZIRK")
+            JOIN "{schema}"."{reg_view}" rm ON TRIM(tm."REGIO") = TRIM(rm."region_code")
         """
-        extra_filter = 'AND (cm."KLABC" IS NULL OR cm."KLABC" <> \'X\')'
+        extra_filter = 'AND (cm."KLABC" IS NULL OR cm."KLABC" <> \'X\') AND rm."region_name" IS NOT NULL AND TRIM(rm."region_name") <> \'\''
         select_expr = f'{entity_expr} AS entity_name'
         group_by = entity_expr
     elif dimension in ("Tyres", "Tyre Types"):
@@ -242,22 +234,22 @@ def _compute_top_bottom_slice_mysql(cursor, user_db: str, dimension: str, days: 
         select_expr = f"{cust_name_expr} AS entity_name"
         group_by = f"TRIM(LEADING '0' FROM CAST(sd.dealer_code AS CHAR)), {cust_name_expr}"
     elif dimension == "Territories":
-        entity_expr = "COALESCE(NULLIF(TRIM(tm.NAME), ''), NULLIF(TRIM(cm.BZIRK), ''), 'Unmapped Territory')"
+        entity_expr = "tm.NAME"
         joins = f"""
             JOIN {cust_tbl} cm ON (sd.dealer_code = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(sd.dealer_code AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))
             JOIN {terr_tbl} tm ON cm.BZIRK = tm.BZIRK
         """
-        extra_filter = "AND (cm.KLABC IS NULL OR cm.KLABC <> 'X')"
+        extra_filter = "AND (cm.KLABC IS NULL OR cm.KLABC <> 'X') AND tm.NAME IS NOT NULL AND TRIM(tm.NAME) <> ''"
         select_expr = f"{entity_expr} AS entity_name"
         group_by = entity_expr
     elif dimension == "Regions":
-        entity_expr = "COALESCE(NULLIF(TRIM(rm.region_name), ''), NULLIF(TRIM(rm.region_code), ''), 'Unmapped Region')"
+        entity_expr = "rm.region_name"
         joins = f"""
             JOIN {cust_tbl} cm ON (sd.dealer_code = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(sd.dealer_code AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))
             JOIN {terr_tbl} tm ON cm.BZIRK = tm.BZIRK
             JOIN {reg_tbl} rm ON tm.REGIO = rm.region_code
         """
-        extra_filter = "AND (cm.KLABC IS NULL OR cm.KLABC <> 'X')"
+        extra_filter = "AND (cm.KLABC IS NULL OR cm.KLABC <> 'X') AND rm.region_name IS NOT NULL AND TRIM(rm.region_name) <> ''"
         select_expr = f"{entity_expr} AS entity_name"
         group_by = entity_expr
     elif dimension in ("Tyres", "Tyre Types"):
