@@ -2590,7 +2590,7 @@ def _resolve_canonical_churn_sql(question: str):
                 '    FROM sales_source s\n'
                 '    CROSS JOIN max_d md\n'
                 '    WHERE s."invoice_date" IS NOT NULL \n'
-                '      AND (s."distribution_channel" = \'10\' OR s."distribution_channel" = 10) \n'
+                '      AND s."distribution_channel" = \'10\'\n'
                 '      AND (s."indicator_cancel" IS NULL OR s."indicator_cancel" NOT IN (\'X\', \'Y\', \'1\'))\n'
                 '    GROUP BY s."dealer_code"\n'
                 '    HAVING SUM(CASE WHEN s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -29) AND md.max_dt THEN COALESCE(s."Tyre_Quantity", 0) ELSE 0 END) = 0\n'
@@ -2635,7 +2635,7 @@ def _resolve_canonical_churn_sql(question: str):
                 '    FROM sales_source_60d s\n'
                 '    CROSS JOIN max_d md\n'
                 '    WHERE s."invoice_date" IS NOT NULL \n'
-                '      AND (s."distribution_channel" = \'10\' OR s."distribution_channel" = 10) \n'
+                '      AND s."distribution_channel" = \'10\'\n'
                 '      AND (s."indicator_cancel" IS NULL OR s."indicator_cancel" NOT IN (\'X\', \'Y\', \'1\'))\n'
                 '      AND s."invoice_date" >= ADD_DAYS(md.max_dt, -59)\n'
                 '    GROUP BY s."dealer_code"\n'
@@ -2690,7 +2690,7 @@ def _resolve_canonical_churn_sql(question: str):
                 '    FROM sales_source_60d s\n'
                 '    CROSS JOIN max_d md\n'
                 '    WHERE s."invoice_date" IS NOT NULL \n'
-                '      AND (s."distribution_channel" = \'10\' OR s."distribution_channel" = 10) \n'
+                '      AND s."distribution_channel" = \'10\'\n'
                 '      AND (s."indicator_cancel" IS NULL OR s."indicator_cancel" NOT IN (\'X\', \'Y\', \'1\'))\n'
                 '      AND s."invoice_date" >= ADD_DAYS(md.max_dt, -59)\n'
                 '    GROUP BY s."dealer_code"\n'
@@ -2747,7 +2747,7 @@ def _resolve_canonical_churn_sql(question: str):
                 '    FROM sales_source s\n'
                 '    CROSS JOIN max_d md\n'
                 '    WHERE s."invoice_date" IS NOT NULL \n'
-                '      AND (s."distribution_channel" = \'10\' OR s."distribution_channel" = 10) \n'
+                '      AND s."distribution_channel" = \'10\'\n'
                 '      AND (s."indicator_cancel" IS NULL OR s."indicator_cancel" NOT IN (\'X\', \'Y\', \'1\'))\n'
                 '    GROUP BY s."dealer_code"\n'
                 '    HAVING SUM(CASE WHEN s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -29) AND md.max_dt THEN COALESCE(s."invoice_value", 0) ELSE 0 END) = 0\n'
@@ -2792,7 +2792,7 @@ def _resolve_canonical_churn_sql(question: str):
                 '    FROM sales_source_60d s\n'
                 '    CROSS JOIN max_d md\n'
                 '    WHERE s."invoice_date" IS NOT NULL \n'
-                '      AND (s."distribution_channel" = \'10\' OR s."distribution_channel" = 10) \n'
+                '      AND s."distribution_channel" = \'10\'\n'
                 '      AND (s."indicator_cancel" IS NULL OR s."indicator_cancel" NOT IN (\'X\', \'Y\', \'1\'))\n'
                 '      AND s."invoice_date" >= ADD_DAYS(md.max_dt, -59)\n'
                 '    GROUP BY s."dealer_code"\n'
@@ -2821,6 +2821,53 @@ def _resolve_canonical_churn_sql(question: str):
             ),
             "reasoning": "Exact canonical query for Steepest Sales Decline Accounts matching Executive Summary calculation."
         }
+
+    # 6. Account Group Active Customers Drill-down (e.g. "Active Customers in Dealers / Trade Network (Z001)" or "Govt Special Accounts (Z010)")
+    m_grp = re.search(r'\b(Z0\d{2})\b', question, re.I)
+    if m_grp or "account group" in q:
+        grp_code = m_grp.group(1).upper() if m_grp else None
+        if not grp_code:
+            if "dealer" in q: grp_code = "Z001"
+            elif "institutional" in q: grp_code = "Z004"
+            elif "fleet" in q: grp_code = "Z009"
+            elif "trader" in q or "retailer" in q: grp_code = "Z015"
+            elif "special" in q: grp_code = "Z010"
+            elif "government" in q or "psu" in q: grp_code = "Z006"
+            elif "heavy" in q or "otr" in q: grp_code = "Z007"
+            elif "export" in q or "overseas" in q: grp_code = "Z003"
+            elif "undertaking" in q or "stu" in q: grp_code = "Z005"
+            elif "defense" in q: grp_code = "Z008"
+
+        if grp_code:
+            return {
+                "db": "SAP_S4",
+                "sql": (
+                    'SELECT \n'
+                    '    COALESCE(NULLIF(TRIM(cm."NAME1"), \'\'), NULLIF(TRIM(cm."BNAME"), \'\'), s."dealer_code") AS customer_name,\n'
+                    '    s."dealer_code" AS customer_code,\n'
+                    '    ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 4) AS sales_value_cr,\n'
+                    '    ROUND(SUM(COALESCE(s."Tyre_Quantity", 0)), 0) AS total_units\n'
+                    'FROM (\n'
+                    '    SELECT "dealer_code", "invoice_date", "invoice_value", "Tyre_Quantity", "distribution_channel", "indicator_cancel"\n'
+                    '    FROM "SAP_S4"."ZPVF_SD_CurrentSales_01_TR"\n'
+                    '    WHERE "invoice_date" >= \'2026-01-01\'\n'
+                    '    UNION ALL\n'
+                    '    SELECT "dealer_code", "invoice_date", "invoice_value", "Tyre_Quantity", "distribution_channel", "indicator_cancel"\n'
+                    '    FROM "SAP_S4"."ZPVF_SD_SalesHistory_01_TR"\n'
+                    '    WHERE "invoice_date" >= \'2026-01-01\'\n'
+                    ') s\n'
+                    'JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm \n'
+                    '    ON (s."dealer_code" = cm."KUNNR" OR LTRIM(s."dealer_code", \'0\') = LTRIM(cm."KUNNR", \'0\'))\n'
+                    'WHERE s."invoice_date" IS NOT NULL\n'
+                    '  AND s."distribution_channel" = \'10\'\n'
+                    '  AND (s."indicator_cancel" IS NULL OR s."indicator_cancel" NOT IN (\'X\', \'Y\', \'1\'))\n'
+                    '  AND (cm."KLABC" IS NULL OR cm."KLABC" <> \'X\')\n'
+                    f'  AND (TRIM(cm."KTOKD") = \'{grp_code}\')\n'
+                    'GROUP BY s."dealer_code", COALESCE(NULLIF(TRIM(cm."NAME1"), \'\'), NULLIF(TRIM(cm."BNAME"), \'\'), s."dealer_code")\n'
+                    'ORDER BY sales_value_cr DESC'
+                ),
+                "reasoning": f"Exact canonical drill-down for active customers in Account Group {grp_code} matching Executive Summary calculation."
+            }
 
     return None
 
@@ -3410,8 +3457,10 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                 run_query = re.sub(r'(?:\"SAP_S4\"\.)+', '"SAP_S4".', run_query, flags=re.IGNORECASE)
 
                                 # Standardize distribution_channel filter to string '10' (avoid implicit type conversion on NVARCHAR)
-                                run_query = re.sub(r'\"distribution_channel\"\s*=\s*10\b', r'"distribution_channel" = \'10\'', run_query)
-                                run_query = re.sub(r'\bdistribution_channel\s*=\s*10\b', r'"distribution_channel" = \'10\'', run_query)
+                                run_query = re.sub(r'\"distribution_channel\"\s*=\s*10\b', '"distribution_channel" = \'10\'', run_query)
+                                run_query = re.sub(r'\bdistribution_channel\s*=\s*10\b', '"distribution_channel" = \'10\'', run_query)
+                                # Sanitize any accidental escaped quotes e.g. \'10\' -> '10'
+                                run_query = run_query.replace("\\'10\\'", "'10'").replace("\\'", "'")
 
                                 # Ensure subquery alias has AS keyword for strict HANA parser: ") fact" -> ") AS fact"
                                 run_query = re.sub(r'\)\s+(fact|sub|cs|sh|t)\b', r') AS \1', run_query, flags=re.IGNORECASE)
@@ -4288,7 +4337,10 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                     y_key = v.get("yKey")
                     v_title = str(v.get("title") or "")
                     if x_key not in keys:
-                        cand_x = next((k for k in keys if any(m in k.lower() for m in ("name", "title", "code", "desc", "month", "year", "date"))), keys[0] if keys else "")
+                        # Prefer human-readable name over code
+                        cand_x = next((k for k in keys if "name" in k.lower() or "title" in k.lower() or "desc" in k.lower()), None)
+                        if not cand_x:
+                            cand_x = next((k for k in keys if any(m in k.lower() for m in ("month", "year", "date", "code"))), keys[0] if keys else "")
                         v["xKey"] = cand_x
                     if y_key not in keys:
                         cand_y = next((k for k in keys if any(m in k.lower() for m in ("sales", "value", "qty", "quantity", "total", "count", "achv", "pct"))), keys[-1] if keys else "")
@@ -4363,8 +4415,7 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
     if total_sql_count > _conf_th:
         is_csv_export = True
         csv_filename = generate_relevant_filename(question)
-        # Suppress table from chat when exceeding threshold
-        visualizations = [v for v in visualizations if v.get("type") != "table"]
+        # Suppress all in-chat charts/tables when exceeding threshold - only show clean CSV export
         csv_vis = {
             "type": "csv_export",
             "title": f"Data Export ({total_sql_count:,} records)",
@@ -4374,8 +4425,11 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
             "sql_query": sql_query,
             "session_id": session_id
         }
-        visualizations.append(csv_vis)
+        visualizations = [csv_vis]
         clean_answer = f"Total {total_sql_count:,} records found matching your query. The complete dataset is available for download as a CSV file below."
+    elif canonical_churn_sql:
+        # For canonical drill-down lists below threshold, show only the structured table
+        visualizations = [table_vis] if table_vis else []
 
     _advance_turn(session_id)
     actual_visit = _save_history(get_connection_func, session_id, user_id,
