@@ -4002,20 +4002,43 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                 }
             
             # Align and sanitize chart xKey, yKey, and data against actual SQL keys
-            # Charts display top 25 data points to guarantee clean readability and instant DOM rendering
+            # Charts display up to 25 data points, or the exact Top/Bottom N count from the chart title (e.g. "Top 10")
             MAX_CHART_POINTS = 25
-            chart_data = sql_results[:MAX_CHART_POINTS]
             for v in visualizations:
                 if v.get("type") in ("bar_chart", "line_chart"):
                     x_key = v.get("xKey")
                     y_key = v.get("yKey")
+                    v_title = str(v.get("title") or "")
                     if x_key not in keys:
                         cand_x = next((k for k in keys if any(m in k.lower() for m in ("name", "title", "code", "desc", "month", "year", "date"))), keys[0] if keys else "")
                         v["xKey"] = cand_x
                     if y_key not in keys:
                         cand_y = next((k for k in keys if any(m in k.lower() for m in ("sales", "value", "qty", "quantity", "total", "count", "achv", "pct"))), keys[-1] if keys else "")
                         v["yKey"] = cand_y
-                    v["data"] = chart_data
+
+                    # If chart title explicitly mentions units/quantity (and not value/revenue), prefer the quantity column
+                    if re.search(r'\b(units?|qty|quantity)\b', v_title, re.IGNORECASE) and not re.search(r'\b(value|revenue|sales\s+value)\b', v_title, re.IGNORECASE):
+                        unit_key = next((k for k in keys if any(u in k.lower() for u in ("unit", "qty", "quantity"))), None)
+                        if unit_key:
+                            v["yKey"] = unit_key
+
+                    limit_match = re.search(r'\b(?:top|bottom)\s+(\d+)\b', v_title, re.IGNORECASE)
+                    chart_limit = min(max(1, int(limit_match.group(1))), MAX_CHART_POINTS) if limit_match else MAX_CHART_POINTS
+
+                    active_y = v.get("yKey")
+                    chart_rows = sql_results
+                    if active_y and active_y in keys and not has_time:
+                        reverse_sort = not bool(re.search(r'\b(?:bottom|lowest|worst)\b', v_title, re.IGNORECASE))
+                        try:
+                            chart_rows = sorted(
+                                sql_results,
+                                key=lambda r: float(r.get(active_y) or 0),
+                                reverse=reverse_sort,
+                            )
+                        except Exception:
+                            chart_rows = sql_results
+
+                    v["data"] = chart_rows[:chart_limit]
 
             if not has_time:
                 # Keep only bar_charts; drop hallucinated line/pie charts
