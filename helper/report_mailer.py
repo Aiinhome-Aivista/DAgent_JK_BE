@@ -170,28 +170,55 @@ def send_report_email(to_email, attachment_paths, recipient_name=""):
             else:
                 print(f"[Mailer Error] Could not attach file: {attachment_path} not found.")
 
-        # Resolve IPv4 host to prevent [Errno 101] Network is unreachable when IPv6 is unrouted on AWS
-        import socket
-        smtp_host = MAIL_SERVER
-        try:
-            addr_info = socket.getaddrinfo(MAIL_SERVER, MAIL_PORT, socket.AF_INET, socket.SOCK_STREAM)
-            if addr_info and addr_info[0] and addr_info[0][4]:
-                smtp_host = addr_info[0][4][0]
-        except Exception:
-            smtp_host = MAIL_SERVER
+        # Connection parameters directly from .env config
+        port = int(MAIL_PORT or 25)
+        host = MAIL_SERVER
+        print(f"[Mailer] Connecting to SMTP server {host}:{port} (TLS={MAIL_USE_TLS})...", flush=True)
 
-        # Send using the dynamic SMTP server from config
-        if MAIL_USE_TLS or MAIL_PORT == 587:
-            with smtplib.SMTP(smtp_host, MAIL_PORT, timeout=25) as server:
-                server.ehlo()
-                server.starttls()
-                server.ehlo()
-                server.login(from_email, password)
-                server.send_message(msg)
-        else:
-            with smtplib.SMTP_SSL(smtp_host, MAIL_PORT, timeout=25) as server:
-                server.login(from_email, password)
-                server.send_message(msg)
+        # Resolve IPv4 host fallback if needed
+        import socket
+        resolved_ipv4 = None
+        try:
+            addr_info = socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_STREAM)
+            if addr_info and addr_info[0] and addr_info[0][4]:
+                resolved_ipv4 = addr_info[0][4][0]
+        except Exception:
+            pass
+
+        target_host = host
+
+        def _connect_and_send(target):
+            if port == 465:
+                # Explicit SSL (SMTPS)
+                with smtplib.SMTP_SSL(target, port, timeout=30) as server:
+                    if password:
+                        server.login(from_email, password)
+                    server.send_message(msg)
+            else:
+                # Port 25 (Standard SMTP), 587 (Submission), or any other port
+                with smtplib.SMTP(target, port, timeout=30) as server:
+                    server.ehlo()
+                    if MAIL_USE_TLS or port == 587:
+                        try:
+                            server.starttls()
+                            server.ehlo()
+                        except Exception as tls_err:
+                            print(f"[Mailer] STARTTLS note (continuing plain): {tls_err}", flush=True)
+                    if password:
+                        try:
+                            server.login(from_email, password)
+                        except Exception as auth_err:
+                            print(f"[Mailer] SMTP Auth note (continuing): {auth_err}", flush=True)
+                    server.send_message(msg)
+
+        try:
+            _connect_and_send(target_host)
+        except Exception as conn_err:
+            if resolved_ipv4 and resolved_ipv4 != target_host:
+                print(f"[Mailer] Retrying connection via resolved IPv4 ({resolved_ipv4})...", flush=True)
+                _connect_and_send(resolved_ipv4)
+            else:
+                raise conn_err
             
         print(f"[Mailer] Successfully sent report to {to_email}")
         return True
