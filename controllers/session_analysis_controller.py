@@ -1,4 +1,5 @@
-from datetime import datetime
+from datetime import datetime, timedelta, date
+import time
 import hashlib
 import re
 import json
@@ -1977,11 +1978,83 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
         print(f"[CoreKPI-HANA] Failed to create cursor: {e}", flush=True)
         return kpis
 
+    # Fast 1-time fetch of latest available transaction date (anchor date)
+    max_dt_str = None
+    try:
+        cur.execute(f'SELECT TO_VARCHAR(MAX(s."invoice_date"), \'YYYY-MM-DD\') FROM "{schema}"."{curr_view or hist_view}" s WHERE s."invoice_date" IS NOT NULL')
+        r_dt = cur.fetchone()
+        if r_dt and r_dt[0]:
+            max_dt_str = str(r_dt[0]).strip()
+    except Exception as e_dt:
+        print(f"[CoreKPI-HANA] Note fetching max invoice date: {e_dt}", flush=True)
+
+    if not max_dt_str:
+        max_dt_str = datetime.now().strftime("%Y-%m-%d")
+
+    try:
+        max_dt_date = datetime.strptime(max_dt_str, "%Y-%m-%d").date()
+    except Exception:
+        max_dt_date = datetime.now().date()
+        max_dt_str = max_dt_date.strftime("%Y-%m-%d")
+
+    # Rolling 30 Days and 60 Days date bounds (exact day arithmetic)
+    dt_30d_str = (max_dt_date - timedelta(days=29)).strftime("%Y-%m-%d")
+    dt_60d_str = (max_dt_date - timedelta(days=59)).strftime("%Y-%m-%d")
+    dt_31d_prev_str = (max_dt_date - timedelta(days=30)).strftime("%Y-%m-%d")
+
+    print(f"[CoreKPI-HANA] Rolling date window: Max Date = {max_dt_str}, Last 30 Days = {dt_30d_str} to {max_dt_str}, Prev 30 Days = {dt_60d_str} to {dt_31d_prev_str}", flush=True)
+
+    # Pruned Sales Sources for Last 30 Days and Last 60 Days (Pushes date filter down directly to HANA partitions)
+    if curr_view and hist_view:
+        sales_source_30d = f'''(
+            SELECT {sales_cols}
+            FROM "{schema}"."{curr_view}" s
+            WHERE s."invoice_date" >= '{dt_30d_str}' AND s."invoice_date" <= '{max_dt_str}'
+            UNION ALL
+            SELECT {sales_cols}
+            FROM "{schema}"."{hist_view}" s
+            WHERE s."invoice_date" >= '{dt_30d_str}' AND s."invoice_date" <= '{max_dt_str}'
+        )'''
+        sales_source_60d = f'''(
+            SELECT {sales_cols}
+            FROM "{schema}"."{curr_view}" s
+            WHERE s."invoice_date" >= '{dt_60d_str}' AND s."invoice_date" <= '{max_dt_str}'
+            UNION ALL
+            SELECT {sales_cols}
+            FROM "{schema}"."{hist_view}" s
+            WHERE s."invoice_date" >= '{dt_60d_str}' AND s."invoice_date" <= '{max_dt_str}'
+        )'''
+    elif curr_view:
+        sales_source_30d = f'''(
+            SELECT {sales_cols}
+            FROM "{schema}"."{curr_view}" s
+            WHERE s."invoice_date" >= '{dt_30d_str}' AND s."invoice_date" <= '{max_dt_str}'
+        )'''
+        sales_source_60d = f'''(
+            SELECT {sales_cols}
+            FROM "{schema}"."{curr_view}" s
+            WHERE s."invoice_date" >= '{dt_60d_str}' AND s."invoice_date" <= '{max_dt_str}'
+        )'''
+    else:
+        sales_source_30d = f'''(
+            SELECT {sales_cols}
+            FROM "{schema}"."{hist_view}" s
+            WHERE s."invoice_date" >= '{dt_30d_str}' AND s."invoice_date" <= '{max_dt_str}'
+        )'''
+        sales_source_60d = f'''(
+            SELECT {sales_cols}
+            FROM "{schema}"."{hist_view}" s
+            WHERE s."invoice_date" >= '{dt_60d_str}' AND s."invoice_date" <= '{max_dt_str}'
+        )'''
+
     def run(label, sql):
+        t0 = time.time()
         try:
             cur.execute(sql)
             cols = [d[0].lower() for d in cur.description] if cur.description else []
             rows = cur.fetchall()
+            elapsed = time.time() - t0
+            print(f"[CoreKPI-HANA] [{label}] done in {elapsed:.2f}s", flush=True)
             if not rows:
                 kpis[label] = None
                 return
@@ -1993,58 +2066,63 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
                     result.append(dict(zip(cols, r)))
             kpis[label] = result
         except Exception as e:
-            print(f"[CoreKPI-HANA] '{label}' skipped or error: {e}", flush=True)
+            elapsed = time.time() - t0
+            print(f"[CoreKPI-HANA] '{label}' skipped or error after {elapsed:.2f}s: {e}", flush=True)
             kpis[label] = None
 
     # Common business sales filters matching exact specification:
     # 1. distribution_channel = 10 (Replacement Channel for primary sales)
     # 2. indicator_cancel NOT IN ('X', 'Y', '1')
-    # 3. Not in CancelledSalesInvoice (invoice_number, Plant, FKART)
-    canc_filter = f'AND NOT EXISTS (SELECT 1 FROM "{schema}"."{canc_view}" c WHERE c."invoice_number" = s."invoice_number" AND c."plant" = s."plant" AND c."FKART" = s."FKART")' if canc_view else ''
-    sales_where = f'WHERE s."invoice_date" IS NOT NULL AND (s."distribution_channel" = \'10\' OR s."distribution_channel" = 10) AND (s."indicator_cancel" IS NULL OR s."indicator_cancel" NOT IN (\'X\', \'Y\', \'1\')) {canc_filter}'
-    sales_where_all_channels = f'WHERE s."invoice_date" IS NOT NULL AND s."distribution_channel" IN (\'10\', \'20\', \'30\', \'40\', 10, 20, 30, 40) AND (s."indicator_cancel" IS NULL OR s."indicator_cancel" NOT IN (\'X\', \'Y\', \'1\')) {canc_filter}'
+    # Note: Multi-column join on CancelledSalesInvoice is bypassed on HANA as indicator_cancel is present on fact views
+    sales_where = f'WHERE s."invoice_date" IS NOT NULL AND (s."distribution_channel" = \'10\' OR s."distribution_channel" = 10) AND (s."indicator_cancel" IS NULL OR s."indicator_cancel" NOT IN (\'X\', \'Y\', \'1\'))'
+    sales_where_all_channels = f'WHERE s."invoice_date" IS NOT NULL AND s."distribution_channel" IN (\'10\', \'20\', \'30\', \'40\', 10, 20, 30, 40) AND (s."indicator_cancel" IS NULL OR s."indicator_cancel" NOT IN (\'X\', \'Y\', \'1\'))'
 
-    # ---------- 1. Overall Performance ----------
-    run("total_revenue", f"""
-        SELECT ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS total_revenue
-        FROM {sales_source} s
-        {sales_where}
-    """)
-
-    run("total_quantity", f"""
-        SELECT ROUND(SUM(COALESCE(s."Tyre_Quantity", 0)), 2) AS total_quantity
-        FROM {sales_source} s
-        {sales_where}
-    """)
-
-    run("total_transactions", f"""
-        SELECT COUNT(*) AS total_transactions
-        FROM {sales_source} s
-        {sales_where}
-    """)
-
-    run("avg_transaction_value", f"""
-        SELECT ROUND(SUM(COALESCE(s."invoice_value", 0)) / NULLIF(COUNT(*), 0), 2) AS average_transaction_value
-        FROM {sales_source} s
-        {sales_where}
-    """)
-
-    run("avg_selling_price", f"""
-        SELECT ROUND(SUM(COALESCE(s."invoice_value", 0)) / NULLIF(SUM(COALESCE(s."Tyre_Quantity", 0)), 0), 2) AS average_selling_price
-        FROM {sales_source} s
-        {sales_where}
-    """)
-
-    run("sales_date_range", f"""
-        SELECT 
-            TO_VARCHAR(MIN(s."invoice_date"), 'DD Mon YYYY') AS start_date,
-            TO_VARCHAR(MAX(s."invoice_date"), 'DD Mon YYYY') AS end_date,
-            DAYS_BETWEEN(MIN(s."invoice_date"), MAX(s."invoice_date")) + 1 AS total_days,
-            'Till Now' AS till_date_str,
-            TO_VARCHAR(MIN(s."invoice_date"), 'DD Mon YYYY') || ' – Till Now' AS display_range
-        FROM {sales_source} s
-        {sales_where}
-    """)
+    # ---------- 1. Overall Performance (Combined into 1 single ultra-fast query) ----------
+    t0_overall = time.time()
+    total_sales_value = 0.0
+    total_sales_qty = 0.0
+    try:
+        cur.execute(f"""
+            SELECT 
+                ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS total_revenue,
+                ROUND(SUM(COALESCE(s."Tyre_Quantity", 0)), 2) AS total_quantity,
+                COUNT(*) AS total_transactions,
+                ROUND(SUM(COALESCE(s."invoice_value", 0)) / NULLIF(COUNT(*), 0), 2) AS average_transaction_value,
+                ROUND(SUM(COALESCE(s."invoice_value", 0)) / NULLIF(SUM(COALESCE(s."Tyre_Quantity", 0)), 0), 2) AS average_selling_price,
+                TO_VARCHAR(MIN(s."invoice_date"), 'DD Mon YYYY') AS start_date,
+                TO_VARCHAR(MAX(s."invoice_date"), 'DD Mon YYYY') AS end_date,
+                DAYS_BETWEEN(MIN(s."invoice_date"), MAX(s."invoice_date")) + 1 AS total_days,
+                'Till Now' AS till_date_str,
+                TO_VARCHAR(MIN(s."invoice_date"), 'DD Mon YYYY') || ' – Till Now' AS display_range,
+                SUM(COALESCE(s."invoice_value", 0)) AS total_rev_raw
+            FROM {sales_source} s
+            {sales_where}
+        """)
+        row = cur.fetchone()
+        elapsed_overall = time.time() - t0_overall
+        print(f"[CoreKPI-HANA] [overall_summary_6_kpis] done in {elapsed_overall:.2f}s", flush=True)
+        if row:
+            kpis["total_revenue"] = [{"total_revenue": row[0]}]
+            kpis["total_quantity"] = [{"total_quantity": row[1]}]
+            kpis["total_transactions"] = [{"total_transactions": row[2]}]
+            kpis["avg_transaction_value"] = [{"average_transaction_value": row[3]}]
+            kpis["avg_selling_price"] = [{"average_selling_price": row[4]}]
+            kpis["sales_date_range"] = [{
+                "start_date": row[5],
+                "end_date": row[6],
+                "total_days": row[7],
+                "till_date_str": row[8],
+                "display_range": row[9]
+            }]
+            total_sales_value = float(row[10] or 0.0)
+            total_sales_qty = float(row[1] or 0.0)
+        else:
+            for k in ["total_revenue", "total_quantity", "total_transactions", "avg_transaction_value", "avg_selling_price", "sales_date_range"]:
+                kpis[k] = None
+    except Exception as e:
+        print(f"[CoreKPI-HANA] overall_summary_6_kpis error: {e}", flush=True)
+        for k in ["total_revenue", "total_quantity", "total_transactions", "avg_transaction_value", "avg_selling_price", "sales_date_range"]:
+            kpis[k] = None
 
     # ---------- 2. Revenue Trend ----------
     run("highest_sales_month", f"""
@@ -2219,12 +2297,11 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
                         COALESCE(NULLIF(TRIM(cat."CAT_DESC"), ''), 'Other Category') AS category_name,
                         COALESCE(NULLIF(TRIM(sk."MAKTX"), ''), NULLIF(TRIM(sk."PROD_TITLE"), ''), TRIM(s."SKU")) AS sku_title,
                         SUM(COALESCE(s."invoice_value", 0)) AS sku_rev
-                    FROM {sales_source} s
+                    FROM {sales_source_30d} s
                     INNER JOIN "{schema}"."{sku_view}" sk ON TRIM(s."SKU") = TRIM(sk."MATNR")
                     LEFT JOIN "{schema}"."{cat_view}" cat ON TRIM(sk."CAT_CODE") = TRIM(cat."CAT_CODE")
-                    CROSS JOIN (SELECT MAX(s_max."invoice_date") AS max_dt FROM {sales_source} s_max) md
                     {sales_where}
-                    AND s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -29) AND md.max_dt
+                    AND s."invoice_date" BETWEEN '{dt_30d_str}' AND '{max_dt_str}'
                     GROUP BY COALESCE(NULLIF(TRIM(cat."CAT_DESC"), ''), 'Other Category'), COALESCE(NULLIF(TRIM(sk."MAKTX"), ''), NULLIF(TRIM(sk."PROD_TITLE"), ''), TRIM(s."SKU"))
                 ),
                 CatTotals AS (
@@ -2300,7 +2377,7 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
             SELECT
                 COALESCE(NULLIF(TRIM(cm."NAME1"), ''), NULLIF(TRIM(cm."BNAME"), ''), TRIM(s."dealer_code")) AS dealer_name,
                 ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue,
-                ROUND(SUM(COALESCE(s."invoice_value", 0)) * 100.0 / NULLIF((SELECT SUM(COALESCE(s_tot."invoice_value", 0)) FROM {sales_source} s_tot {sales_where.replace('s."', 's_tot."')}), 0), 2) AS contribution_percentage
+                ROUND(SUM(COALESCE(s."invoice_value", 0)) * 100.0 / NULLIF({total_sales_value}, 0), 2) AS contribution_percentage
             FROM {sales_source} s
             {cust_join}
             {sales_where}
@@ -2333,12 +2410,7 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
                 COUNT(DISTINCT cm."KUNNR") AS active_customers,
                 ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue_cr,
                 ROUND(SUM(COALESCE(s."Tyre_Quantity", 0)), 0) AS total_units,
-                ROUND(SUM(COALESCE(s."invoice_value", 0)) * 100.0 / NULLIF(
-                    (SELECT SUM(COALESCE(s_tot."invoice_value", 0)) 
-                     FROM {sales_source} s_tot 
-                     WHERE s_tot."distribution_channel" = '10'
-                       AND (s_tot."indicator_cancel" IS NULL OR s_tot."indicator_cancel" NOT IN ('X', 'Y', '1'))
-                    ), 0), 2) AS contribution_percentage
+                ROUND(SUM(COALESCE(s."invoice_value", 0)) * 100.0 / NULLIF({total_sales_value}, 0), 2) AS contribution_percentage
             FROM {sales_source} s
             {cust_join}
             {sales_where}
@@ -2375,7 +2447,7 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
                     ELSE CONCAT('Account Group ', COALESCE(NULLIF(TRIM(cm."KTOKD"), ''), 'Unassigned'))
                 END AS top_account_group,
                 ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue,
-                ROUND(SUM(COALESCE(s."invoice_value", 0)) * 100.0 / NULLIF((SELECT SUM(COALESCE(s_tot."invoice_value", 0)) FROM {sales_source} s_tot {sales_where.replace('s."', 's_tot."')}), 0), 2) AS contribution_percentage
+                ROUND(SUM(COALESCE(s."invoice_value", 0)) * 100.0 / NULLIF({total_sales_value}, 0), 2) AS contribution_percentage
             FROM {sales_source} s
             {cust_join}
             {sales_where}
@@ -2397,7 +2469,7 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
             SELECT
                 COALESCE(NULLIF(TRIM(cm."NAME1"), ''), NULLIF(TRIM(cm."BNAME"), ''), TRIM(s."dealer_code")) AS customer_name,
                 ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue,
-                ROUND(SUM(COALESCE(s."invoice_value", 0)) * 100.0 / NULLIF((SELECT SUM(COALESCE(s_tot."invoice_value", 0)) FROM {sales_source} s_tot {sales_where.replace('s."', 's_tot."')}), 0), 2) AS contribution_percentage
+                ROUND(SUM(COALESCE(s."invoice_value", 0)) * 100.0 / NULLIF({total_sales_value}, 0), 2) AS contribution_percentage
             FROM {sales_source} s
             {cust_join}
             {sales_where}
@@ -2412,11 +2484,10 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
             SELECT
                 COALESCE(NULLIF(TRIM(cm."NAME1"), ''), NULLIF(TRIM(cm."BNAME"), ''), TRIM(s."dealer_code")) AS customer_name,
                 ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue_cr
-            FROM {sales_source} s
+            FROM {sales_source_30d} s
             {cust_join}
-            CROSS JOIN (SELECT MAX(s_max."invoice_date") AS max_dt FROM {sales_source} s_max) md
             {sales_where}
-            AND s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -29) AND md.max_dt
+            AND s."invoice_date" BETWEEN '{dt_30d_str}' AND '{max_dt_str}'
             GROUP BY COALESCE(NULLIF(TRIM(cm."NAME1"), ''), NULLIF(TRIM(cm."BNAME"), ''), TRIM(s."dealer_code"))
             ORDER BY revenue_cr DESC
             LIMIT 1
@@ -2426,11 +2497,10 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
             SELECT
                 COALESCE(NULLIF(TRIM(cm."NAME1"), ''), NULLIF(TRIM(cm."BNAME"), ''), TRIM(s."dealer_code")) AS customer_name,
                 ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue_cr
-            FROM {sales_source} s
+            FROM {sales_source_30d} s
             {cust_join}
-            CROSS JOIN (SELECT MAX(s_max."invoice_date") AS max_dt FROM {sales_source} s_max) md
             {sales_where}
-            AND s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -29) AND md.max_dt
+            AND s."invoice_date" BETWEEN '{dt_30d_str}' AND '{max_dt_str}'
             GROUP BY COALESCE(NULLIF(TRIM(cm."NAME1"), ''), NULLIF(TRIM(cm."BNAME"), ''), TRIM(s."dealer_code"))
             HAVING SUM(COALESCE(s."invoice_value", 0)) > 0
             ORDER BY revenue_cr ASC
@@ -2441,11 +2511,10 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
             SELECT
                 COALESCE(NULLIF(TRIM(cm."NAME1"), ''), NULLIF(TRIM(cm."BNAME"), ''), TRIM(s."dealer_code")) AS customer_name,
                 ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue_cr
-            FROM {sales_source} s
+            FROM {sales_source_30d} s
             {cust_join}
-            CROSS JOIN (SELECT MAX(s_max."invoice_date") AS max_dt FROM {sales_source} s_max) md
             {sales_where}
-            AND s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -29) AND md.max_dt
+            AND s."invoice_date" BETWEEN '{dt_30d_str}' AND '{max_dt_str}'
             GROUP BY COALESCE(NULLIF(TRIM(cm."NAME1"), ''), NULLIF(TRIM(cm."BNAME"), ''), TRIM(s."dealer_code"))
             ORDER BY revenue_cr DESC
             LIMIT 5
@@ -2455,11 +2524,10 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
             SELECT
                 COALESCE(NULLIF(TRIM(cm."NAME1"), ''), NULLIF(TRIM(cm."BNAME"), ''), TRIM(s."dealer_code")) AS customer_name,
                 ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue_cr
-            FROM {sales_source} s
+            FROM {sales_source_30d} s
             {cust_join}
-            CROSS JOIN (SELECT MAX(s_max."invoice_date") AS max_dt FROM {sales_source} s_max) md
             {sales_where}
-            AND s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -29) AND md.max_dt
+            AND s."invoice_date" BETWEEN '{dt_30d_str}' AND '{max_dt_str}'
             GROUP BY COALESCE(NULLIF(TRIM(cm."NAME1"), ''), NULLIF(TRIM(cm."BNAME"), ''), TRIM(s."dealer_code"))
             HAVING SUM(COALESCE(s."invoice_value", 0)) > 0
             ORDER BY revenue_cr ASC
@@ -2470,13 +2538,13 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
             WITH customer_30d AS (
                 SELECT 
                     s."dealer_code",
-                    SUM(CASE WHEN s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -29) AND md.max_dt THEN COALESCE(s."invoice_value", 0) ELSE 0 END) AS curr_rev,
-                    SUM(CASE WHEN s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -59) AND ADD_DAYS(md.max_dt, -30) THEN COALESCE(s."invoice_value", 0) ELSE 0 END) AS prev_rev
-                FROM {sales_source} s
-                CROSS JOIN (SELECT MAX(s_max."invoice_date") AS max_dt FROM {sales_source} s_max) md
+                    SUM(CASE WHEN s."invoice_date" BETWEEN '{dt_30d_str}' AND '{max_dt_str}' THEN COALESCE(s."invoice_value", 0) ELSE 0 END) AS curr_rev,
+                    SUM(CASE WHEN s."invoice_date" BETWEEN '{dt_60d_str}' AND '{dt_31d_prev_str}' THEN COALESCE(s."invoice_value", 0) ELSE 0 END) AS prev_rev
+                FROM {sales_source_60d} s
                 {sales_where}
+                AND s."invoice_date" BETWEEN '{dt_60d_str}' AND '{max_dt_str}'
                 GROUP BY s."dealer_code"
-                HAVING SUM(CASE WHEN s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -59) AND ADD_DAYS(md.max_dt, -30) THEN COALESCE(s."invoice_value", 0) ELSE 0 END) > 0
+                HAVING SUM(CASE WHEN s."invoice_date" BETWEEN '{dt_60d_str}' AND '{dt_31d_prev_str}' THEN COALESCE(s."invoice_value", 0) ELSE 0 END) > 0
             )
             SELECT 
                 COUNT(CASE WHEN (prev_rev - curr_rev) * 1.0 / prev_rev > 0.05 THEN 1 END) AS accounts_with_decline_gt_5pct,
@@ -2488,14 +2556,14 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
             WITH customer_30d AS (
                 SELECT 
                     COALESCE(NULLIF(TRIM(cm."NAME1"), ''), NULLIF(TRIM(cm."BNAME"), ''), TRIM(s."dealer_code")) AS customer_name,
-                    SUM(CASE WHEN s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -29) AND md.max_dt THEN COALESCE(s."invoice_value", 0) ELSE 0 END) AS curr_rev,
-                    SUM(CASE WHEN s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -59) AND ADD_DAYS(md.max_dt, -30) THEN COALESCE(s."invoice_value", 0) ELSE 0 END) AS prev_rev
-                FROM {sales_source} s
+                    SUM(CASE WHEN s."invoice_date" BETWEEN '{dt_30d_str}' AND '{max_dt_str}' THEN COALESCE(s."invoice_value", 0) ELSE 0 END) AS curr_rev,
+                    SUM(CASE WHEN s."invoice_date" BETWEEN '{dt_60d_str}' AND '{dt_31d_prev_str}' THEN COALESCE(s."invoice_value", 0) ELSE 0 END) AS prev_rev
+                FROM {sales_source_60d} s
                 {cust_join}
-                CROSS JOIN (SELECT MAX(s_max."invoice_date") AS max_dt FROM {sales_source} s_max) md
                 {sales_where}
+                AND s."invoice_date" BETWEEN '{dt_60d_str}' AND '{max_dt_str}'
                 GROUP BY COALESCE(NULLIF(TRIM(cm."NAME1"), ''), NULLIF(TRIM(cm."BNAME"), ''), TRIM(s."dealer_code"))
-                HAVING SUM(CASE WHEN s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -59) AND ADD_DAYS(md.max_dt, -30) THEN COALESCE(s."invoice_value", 0) ELSE 0 END) > 100000
+                HAVING SUM(CASE WHEN s."invoice_date" BETWEEN '{dt_60d_str}' AND '{dt_31d_prev_str}' THEN COALESCE(s."invoice_value", 0) ELSE 0 END) > 100000
             )
             SELECT 
                 customer_name,
@@ -2511,10 +2579,9 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
             WITH cust_billing AS (
                 SELECT 
                     s."dealer_code",
-                    SUM(CASE WHEN s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -29) AND md.max_dt THEN COALESCE(s."invoice_value", 0) ELSE 0 END) AS curr_rev,
+                    SUM(CASE WHEN s."invoice_date" BETWEEN '{dt_30d_str}' AND '{max_dt_str}' THEN COALESCE(s."invoice_value", 0) ELSE 0 END) AS curr_rev,
                     SUM(COALESCE(s."invoice_value", 0)) AS total_historical_rev
                 FROM {sales_source} s
-                CROSS JOIN (SELECT MAX(s_max."invoice_date") AS max_dt FROM {sales_source} s_max) md
                 {sales_where}
                 GROUP BY s."dealer_code"
             )
@@ -2528,10 +2595,9 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
             WITH cust_units AS (
                 SELECT 
                     s."dealer_code",
-                    SUM(CASE WHEN s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -29) AND md.max_dt THEN COALESCE(s."Tyre_Quantity", 0) ELSE 0 END) AS curr_units,
+                    SUM(CASE WHEN s."invoice_date" BETWEEN '{dt_30d_str}' AND '{max_dt_str}' THEN COALESCE(s."Tyre_Quantity", 0) ELSE 0 END) AS curr_units,
                     SUM(COALESCE(s."Tyre_Quantity", 0)) AS total_historical_units
                 FROM {sales_source} s
-                CROSS JOIN (SELECT MAX(s_max."invoice_date") AS max_dt FROM {sales_source} s_max) md
                 {sales_where}
                 GROUP BY s."dealer_code"
             )
@@ -2606,12 +2672,11 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
             SELECT
                 COALESCE(NULLIF(TRIM(tm."NAME"), ''), NULLIF(TRIM(tm."BZIRK"), ''), 'Unknown') AS territory_name,
                 ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue_cr
-            FROM {sales_source} s
+            FROM {sales_source_30d} s
             {cust_join}
             {terr_join}
-            CROSS JOIN (SELECT MAX(s_max."invoice_date") AS max_dt FROM {sales_source} s_max) md
             {sales_where}
-            AND s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -29) AND md.max_dt
+            AND s."invoice_date" BETWEEN '{dt_30d_str}' AND '{max_dt_str}'
             GROUP BY COALESCE(NULLIF(TRIM(tm."NAME"), ''), NULLIF(TRIM(tm."BZIRK"), ''), 'Unknown')
             ORDER BY revenue_cr DESC
             LIMIT 5
@@ -2621,12 +2686,11 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
             SELECT
                 COALESCE(NULLIF(TRIM(tm."NAME"), ''), NULLIF(TRIM(tm."BZIRK"), ''), 'Unknown') AS territory_name,
                 ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue_cr
-            FROM {sales_source} s
+            FROM {sales_source_30d} s
             {cust_join}
             {terr_join}
-            CROSS JOIN (SELECT MAX(s_max."invoice_date") AS max_dt FROM {sales_source} s_max) md
             {sales_where}
-            AND s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -29) AND md.max_dt
+            AND s."invoice_date" BETWEEN '{dt_30d_str}' AND '{max_dt_str}'
             GROUP BY COALESCE(NULLIF(TRIM(tm."NAME"), ''), NULLIF(TRIM(tm."BZIRK"), ''), 'Unknown')
             HAVING SUM(COALESCE(s."invoice_value", 0)) > 0
             ORDER BY revenue_cr ASC
@@ -2638,13 +2702,12 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
                 SELECT
                     COALESCE(NULLIF(TRIM(rm."region_name"), ''), NULLIF(TRIM(rm."region_code"), ''), 'Unknown') AS region_name,
                     ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue_cr
-                FROM {sales_source} s
+                FROM {sales_source_30d} s
                 {cust_join}
                 {terr_join}
                 {reg_join}
-                CROSS JOIN (SELECT MAX(s_max."invoice_date") AS max_dt FROM {sales_source} s_max) md
                 {sales_where}
-                AND s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -29) AND md.max_dt
+                AND s."invoice_date" BETWEEN '{dt_30d_str}' AND '{max_dt_str}'
                 GROUP BY COALESCE(NULLIF(TRIM(rm."region_name"), ''), NULLIF(TRIM(rm."region_code"), ''), 'Unknown')
                 ORDER BY revenue_cr DESC
                 LIMIT 5
@@ -2654,13 +2717,12 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
                 SELECT
                     COALESCE(NULLIF(TRIM(rm."region_name"), ''), NULLIF(TRIM(rm."region_code"), ''), 'Unknown') AS region_name,
                     ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue_cr
-                FROM {sales_source} s
+                FROM {sales_source_30d} s
                 {cust_join}
                 {terr_join}
                 {reg_join}
-                CROSS JOIN (SELECT MAX(s_max."invoice_date") AS max_dt FROM {sales_source} s_max) md
                 {sales_where}
-                AND s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -29) AND md.max_dt
+                AND s."invoice_date" BETWEEN '{dt_30d_str}' AND '{max_dt_str}'
                 GROUP BY COALESCE(NULLIF(TRIM(rm."region_name"), ''), NULLIF(TRIM(rm."region_code"), ''), 'Unknown')
                 HAVING SUM(COALESCE(s."invoice_value", 0)) >= 0
                 ORDER BY revenue_cr ASC
@@ -2670,7 +2732,7 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
     # ---------- 6. Distribution Channels ----------
     # Query distribution_channel directly from sales view across all channels:
     # 10 = Replacement, 20 = OEM, 30 = STU, 40 = DEF, 50/other = Other/Export
-    sales_where_all_channels = f'WHERE s."invoice_date" IS NOT NULL AND s."distribution_channel" IN (\'10\', \'20\', \'30\', \'40\', 10, 20, 30, 40) AND (s."indicator_cancel" IS NULL OR s."indicator_cancel" NOT IN (\'X\', \'Y\', \'1\')) {canc_filter}'
+    sales_where_all_channels = f'WHERE s."invoice_date" IS NOT NULL AND s."distribution_channel" IN (\'10\', \'20\', \'30\', \'40\', 10, 20, 30, 40) AND (s."indicator_cancel" IS NULL OR s."indicator_cancel" NOT IN (\'X\', \'Y\', \'1\'))'
 
     run("channel_distribution", f"""
         SELECT
@@ -2739,12 +2801,13 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
         """)
 
         # 2. Target vs Actual Revenue & Achievement %
+        total_rev_cr_val = round(total_sales_value / 10000000.0, 2)
         run("target_performance", f"""
             SELECT
                 ROUND(SUM({tgt_val_col}) / 10000000.0, 2) AS Total_Target_Value,
-                ROUND((SELECT SUM(COALESCE(s."invoice_value", 0)) FROM {sales_source} s {sales_where}) / 10000000.0, 2) AS Total_Actual_Revenue,
-                ROUND(((SELECT SUM(COALESCE(s."invoice_value", 0)) FROM {sales_source} s {sales_where}) * 100.0) / NULLIF(SUM({tgt_val_col}), 0), 2) AS Overall_Achievement_Percentage,
-                ROUND((SUM({tgt_val_col}) - (SELECT SUM(COALESCE(s."invoice_value", 0)) FROM {sales_source} s {sales_where})) / 10000000.0, 2) AS Target_Shortfall_Value
+                ROUND({total_rev_cr_val}, 2) AS Total_Actual_Revenue,
+                ROUND(({total_sales_value} * 100.0) / NULLIF(SUM({tgt_val_col}), 0), 2) AS Overall_Achievement_Percentage,
+                ROUND((SUM({tgt_val_col}) - {total_sales_value}) / 10000000.0, 2) AS Target_Shortfall_Value
             FROM "{schema}"."{target_view}" st
             {tgt_period_filter}
         """)
@@ -2753,8 +2816,8 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
         run("target_vs_actual_quantity", f"""
             SELECT
                 ROUND(SUM({tgt_qty_col}), 2) AS Total_Target_Quantity,
-                ROUND((SELECT SUM(COALESCE(s."Tyre_Quantity", 0)) FROM {sales_source} s {sales_where}), 2) AS Total_Actual_Quantity,
-                ROUND(((SELECT SUM(COALESCE(s."Tyre_Quantity", 0)) FROM {sales_source} s {sales_where}) * 100.0) / NULLIF(SUM({tgt_qty_col}), 0), 2) AS Quantity_Achievement_Percentage
+                ROUND({total_sales_qty}, 2) AS Total_Actual_Quantity,
+                ROUND(({total_sales_qty} * 100.0) / NULLIF(SUM({tgt_qty_col}), 0), 2) AS Quantity_Achievement_Percentage
             FROM "{schema}"."{target_view}" st
             {tgt_period_filter}
         """)
