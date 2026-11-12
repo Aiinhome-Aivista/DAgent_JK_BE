@@ -1136,7 +1136,7 @@ def _compute_core_kpis(cursor) -> dict:
             LIMIT 5
         """, required_tables=[sales_tbl, sku_tbl])
 
-        # Top 5 SKUs per Category
+        # Top 5 SKUs by Top 5 Categories (Last 30 Days)
         if cat_tbl:
             col_cat_desc = "COALESCE(NULLIF(TRIM(cat.CAT_DESC), ''), 'Other Category')" if is_sap else "COALESCE(NULLIF(TRIM(cat.category_name), ''), 'Other Category')"
             col_cat_code = "cat.CAT_CODE" if is_sap else "cat.category_code"
@@ -1146,18 +1146,38 @@ def _compute_core_kpis(cursor) -> dict:
                     SELECT 
                         {col_cat_desc} AS category_name,
                         {col_prod_name} AS sku_title,
-                        ROUND(SUM(sd.{col_revenue})/10000000, 2) AS revenue_cr,
-                        ROW_NUMBER() OVER(PARTITION BY {col_cat_desc} ORDER BY SUM(sd.{col_revenue}) DESC) AS rk
+                        SUM(sd.{col_revenue}) AS sku_rev
                     FROM `{sales_tbl}` sd
                     JOIN `{sku_tbl}` sk ON sd.{col_sku} = sk.MATNR
                     LEFT JOIN `{cat_tbl}` cat ON {sku_cat_code} = {col_cat_code}
+                    CROSS JOIN (SELECT MAX(s_max.{col_date}) AS max_dt FROM `{sales_tbl}` s_max) md
                     {sales_where}
+                    AND sd.{col_date} BETWEEN DATE_SUB(md.max_dt, INTERVAL 29 DAY) AND md.max_dt
                     GROUP BY category_name, sku_title
+                ),
+                CatTotals AS (
+                    SELECT 
+                        category_name,
+                        SUM(sku_rev) AS total_cat_rev,
+                        DENSE_RANK() OVER(ORDER BY SUM(sku_rev) DESC) AS cat_rk
+                    FROM CatSKU
+                    GROUP BY category_name
+                ),
+                RankedSKUs AS (
+                    SELECT 
+                        cs.category_name,
+                        cs.sku_title,
+                        ROUND(cs.sku_rev/10000000, 2) AS revenue_cr,
+                        ct.cat_rk,
+                        ROW_NUMBER() OVER(PARTITION BY cs.category_name ORDER BY cs.sku_rev DESC) AS sku_rk
+                    FROM CatSKU cs
+                    INNER JOIN CatTotals ct ON cs.category_name = ct.category_name
+                    WHERE ct.cat_rk <= 5
                 )
                 SELECT category_name, sku_title, revenue_cr
-                FROM CatSKU
-                WHERE rk <= 5
-                ORDER BY category_name, rk
+                FROM RankedSKUs
+                WHERE sku_rk <= 5
+                ORDER BY cat_rk, sku_rk
             """, required_tables=[sales_tbl, sku_tbl, cat_tbl])
 
 
@@ -2191,25 +2211,45 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
             LIMIT 5
         """)
 
-        # Top 5 SKUs per Category
+        # Top 5 SKUs by Top 5 Categories (Last 30 Days)
         if cat_view:
             run("top_skus_by_category", f"""
                 WITH CatSKU AS (
                     SELECT 
                         COALESCE(NULLIF(TRIM(cat."CAT_DESC"), ''), 'Other Category') AS category_name,
                         COALESCE(NULLIF(TRIM(sk."MAKTX"), ''), NULLIF(TRIM(sk."PROD_TITLE"), ''), TRIM(s."SKU")) AS sku_title,
-                        ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue_cr,
-                        ROW_NUMBER() OVER(PARTITION BY COALESCE(NULLIF(TRIM(cat."CAT_DESC"), ''), 'Other Category') ORDER BY SUM(COALESCE(s."invoice_value", 0)) DESC) AS rk
+                        SUM(COALESCE(s."invoice_value", 0)) AS sku_rev
                     FROM {sales_source} s
                     INNER JOIN "{schema}"."{sku_view}" sk ON TRIM(s."SKU") = TRIM(sk."MATNR")
                     LEFT JOIN "{schema}"."{cat_view}" cat ON TRIM(sk."CAT_CODE") = TRIM(cat."CAT_CODE")
+                    CROSS JOIN (SELECT MAX(s_max."invoice_date") AS max_dt FROM {sales_source} s_max) md
                     {sales_where}
+                    AND s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -29) AND md.max_dt
                     GROUP BY COALESCE(NULLIF(TRIM(cat."CAT_DESC"), ''), 'Other Category'), COALESCE(NULLIF(TRIM(sk."MAKTX"), ''), NULLIF(TRIM(sk."PROD_TITLE"), ''), TRIM(s."SKU"))
+                ),
+                CatTotals AS (
+                    SELECT 
+                        category_name,
+                        SUM(sku_rev) AS total_cat_rev,
+                        DENSE_RANK() OVER(ORDER BY SUM(sku_rev) DESC) AS cat_rk
+                    FROM CatSKU
+                    GROUP BY category_name
+                ),
+                RankedSKUs AS (
+                    SELECT 
+                        cs.category_name,
+                        cs.sku_title,
+                        ROUND(cs.sku_rev / 10000000.0, 2) AS revenue_cr,
+                        ct.cat_rk,
+                        ROW_NUMBER() OVER(PARTITION BY cs.category_name ORDER BY cs.sku_rev DESC) AS sku_rk
+                    FROM CatSKU cs
+                    INNER JOIN CatTotals ct ON cs.category_name = ct.category_name
+                    WHERE ct.cat_rk <= 5
                 )
                 SELECT category_name, sku_title, revenue_cr
-                FROM CatSKU
-                WHERE rk <= 5
-                ORDER BY category_name, rk
+                FROM RankedSKUs
+                WHERE sku_rk <= 5
+                ORDER BY cat_rk, sku_rk
             """)
 
     # ---------- 4. Customer Performance ----------
@@ -3408,8 +3448,8 @@ CRITICAL INSTRUCTIONS:
 10. In the VERIFIED KPI BLOCK, map these field names directly to report labels:
    - claims_amount → "Claims", returns_amount → "Returns", discount_percentage → "Discount %"
    - top_dealers → "Top Dealers", top_account_group → "Top Account Group", account_group_distribution → "Account Group Breakdown (KTOKD)", customer_concentration → "Customer Concentration Risk"
-   - top_skus_by_category → "Top SKUs by Category"
    - Last 30 Days Metrics:
+     * top_skus_by_category → "Top 5 SKUs by Top 5 Categories (Last 30 Days)" (Lists the top 5 highest-revenue categories in the last 30 days, and the top 5 SKUs in each of those 5 categories)
      * top_5_customers_30d → "Top 5 Customers (Last 30 Days)"
      * worst_5_customers_30d / bottom_5_customers_30d → "Worst 5 Customers (Last 30 Days)"
      * sales_decline_30d_summary → "Sales Decline Slabs (Last 30 Days vs Prior 30 Days)"
@@ -3446,9 +3486,9 @@ CRITICAL INSTRUCTIONS:
     - Top 5 Regions (Last 30 Days): <Region 1> (Sales Value: ₹<X> Cr), ...
     - Worst 5 Regions (Last 30 Days): <Region 1> (Sales Value: ₹<X> Cr), ...
 13. SUB-HEADER RULE FOR CATEGORY BREAKDOWNS:
-    Do NOT output "Top SKUs by Category" or "Account Group Breakdown (KTOKD)" as empty bullet list items (`- `).
+    Do NOT output "Top 5 SKUs by Top 5 Categories" or "Account Group Breakdown (KTOKD)" as empty bullet list items (`- `).
     Instead, format them as distinct subheaders:
-    `#### Top SKUs by Category (Overall)`
+    `#### Top 5 SKUs by Top 5 Categories (Last 30 Days)`
     and
     `#### Account Group Breakdown (KTOKD)`
     followed by their respective bullet items.
@@ -3472,7 +3512,6 @@ CRITICAL INSTRUCTIONS:
       * Top Category (Overall: <start_date> – Till Now): <Category Name> (Sales Value: ₹<Value> Cr)
       * Top Construction Type (Overall: <start_date> – Till Now): <Construction Type> (Sales Value: ₹<Value> Cr)
       * Top Product (Overall: <start_date> – Till Now): <Product Name> (Sales Value: ₹<Value> Cr)
-      * Top SKUs by Category (Overall: <start_date> – Till Now)
       * Top Customer (Overall: <start_date> – Till Now): <Customer Name>
       * Top Account Group (Overall: <start_date> – Till Now): <Account Group Name>
       * Top Zone (Overall: <start_date> – Till Now): <Zone Name> (Sales Value: ₹<Value> Cr)
@@ -3486,7 +3525,7 @@ CRITICAL INSTRUCTIONS:
     - In Executive Summary Title & Paragraph: Explicitly mention the Current Year dynamic range with Till Now:
       Title example: `Tyre & Tube Sales Performance Analysis: ... (Current Year: <start_date> – Till Now)`
       Opening line: "Sales performance analysis across <total_days> days (<start_date> – Till Now) demonstrates a total revenue of ₹<Value> Cr..."
-    - For rolling 30-day sections (Customer Churn & Inactivity Risk, Top 5 & Worst 5 Customers 30d, Top 5 & Worst 5 Territories & Regions 30d):
+    - For rolling 30-day sections (Top 5 SKUs by Top 5 Categories, Customer Churn & Inactivity Risk, Top 5 & Worst 5 Customers 30d, Top 5 & Worst 5 Territories & Regions 30d):
       Keep the explicit label `(Last 30 Days)`.
 """
 
@@ -3505,7 +3544,7 @@ ALSO, generate a category-wise trend report as a "line_chart" visualization extr
 
 Return ONLY this JSON:
 {{
-  "report": "TITLE: <Create a descriptive business-focused title based on the data>\\n\\n### Executive Summary\\n<Write exactly 5 to 8 lines summarizing overall business performance across <total_days> days (<start_date> – Till Now), key trends, and main takeaways based purely on the data. If the latest month is ongoing/partial (MTD), state it clearly as Month-to-Date rather than a business decline.>\\n\\n### Key Business Insights\\n\\n**1. Overall Performance**\\n- **Total Revenue (Overall: <start_date> – Till Now, <total_days> Days)**: <Value in Cr> (Sales Value)\\n- **Total Quantity Sold (Overall: <start_date> – Till Now)**: <Value> units\\n- **Total Transactions (Overall: <start_date> – Till Now)**: <Value>\\n- **Average Invoice Value**: <Value>\\n- **Average Selling Price per Unit**: <Value>\\n\\n**2. Revenue Trend**\\n- **Highest Completed Sales Month**: <Value>\\n- **Current Ongoing Month (MTD)**: <Month Year> (Till Now: ₹<Value> Cr)\\n- **Monthly Trend Context**: <State growth between completed full months, or explain that current month is ongoing MTD up to Till Now>\\n\\n**3. Product Performance**\\n- **Top Category (Overall: <start_date> – Till Now)**: <Category name> (Sales Value: <Value in Cr>)\\n- **Top Construction Type (Overall: <start_date> – Till Now)**: <Construction type> (Sales Value: <Value in Cr>)\\n- **Top Product (Overall: <start_date> – Till Now)**: <Product name> (Sales Value: <Value in Cr>)\\n- **Lowest Selling Product (Overall: <start_date> – Till Now)**: <Product name> (Sales Value: <Value in Cr>)\\n\\n#### Top SKUs by Category (Overall: <start_date> – Till Now)\\n- **<Category 1>**: <Top 5 SKUs with Sales Value in Cr>\\n- **<Category 2>**: <Top 5 SKUs with Sales Value in Cr>\\n\\n**4. Customer Performance & Account Group Breakdown**\\n- **Top Customer (Overall: <start_date> – Till Now)**: <Customer name> (Sales Value: <Value in Cr>)\\n- **Top 5 Customers Combined Sales Value (Overall: <start_date> – Till Now)**: <Value in Cr>\\n- **Customer Concentration Risk**: <Value>\\n- **Top Account Group (Overall: <start_date> – Till Now)**: <Account group name> (Sales Value: <Value in Cr>, <Contribution %>)\\n\\n#### Account Group Breakdown (KTOKD: <start_date> – Till Now)\\n- **Dealers / Trade Network (Z001)**: <Active customers count>, Sales Value <Value in Cr>, <Units count> units, <Contribution %> contribution\\n- **Institutional Customers (Z004)**: <Active customers count>, Sales Value <Value in Cr>, <Units count> units, <Contribution %> contribution\\n- **Fleet Customers (Z009)**: <Active customers count>, Sales Value <Value in Cr>, <Units count> units, <Contribution %> contribution\\n- **Traders & Retailers (Z015)**: <Active customers count>, Sales Value <Value in Cr>, <Units count> units, <Contribution %> contribution\\n- **Government & PSU (Z006)**: <Active customers count>, Sales Value <Value in Cr>, <Units count> units, <Contribution %> contribution\\n- **Govt Special Accounts (Z010)**: <Active customers count>, Sales Value <Value in Cr>, <Units count> units, <Contribution %> contribution\\n- **Export / Overseas (Z003)**: <Active customers count>, Sales Value <Value in Cr>, <Units count> units, <Contribution %> contribution\\n- **Heavy Equipment / OTR (Z007)**: <Active customers count>, Sales Value <Value in Cr>, <Units count> units, <Contribution %> contribution\\n\\n- **Top 5 Customers (Last 30 Days)**: <List of Top 5 customers with Sales Value in Cr>\\n- **Worst 5 Customers (Last 30 Days)**: <List of Worst 5 customers with Sales Value in Cr>\\n\\n**5. Customer Churn & Inactivity Risk (Last 30 Days)**\\n- **Accounts with >5% Sales Decline**: <Count of accounts declining >5% compared to prior 30 days>\\n- **Accounts with >10% Sales Decline**: <Count of accounts declining >10% compared to prior 30 days>\\n- **Steepest Sales Decline Accounts**: <List of worst performing accounts with decline percentage>\\n- **High-Risk Inactive Accounts (₹2L+ Historical Billing)**: <Count of zero-billing accounts>\\n- **Zero-Sale Active Counters**: <Count of counters with 0 tyre units in the last 30 days>\\n\\n**6. Geography Performance**\\n- **Top Zone (Overall: <start_date> – Till Now)**: <Zone name> (Sales Value: <Value in Cr>)\\n- **Top Region (Overall: <start_date> – Till Now)**: <Region name> (Sales Value: <Value in Cr>)\\n- **Top Territory (Overall: <start_date> – Till Now)**: <Territory name> (Sales Value: <Value in Cr>)\\n- **Lowest Territory (Overall: <start_date> – Till Now)**: <Territory name> (Sales Value: <Value in Cr>)\\n- **Top 5 Territories (Last 30 Days)**: <List of top 5 territories with Sales Value in Cr>\\n- **Worst 5 Territories (Last 30 Days)**: <List of lowest 5 territories with Sales Value in Cr>\\n- **Top 5 Regions (Last 30 Days)**: <List of top 5 regions with Sales Value in Cr>\\n- **Worst 5 Regions (Last 30 Days)**: <List of lowest 5 regions with Sales Value in Cr>\\n\\n**7. Distribution**\\n- **Replacement Channel Revenue (Overall: <start_date> – Till Now)**: <Sales Value with contribution %>\\n- **OEM Channel Revenue (Overall: <start_date> – Till Now)**: <Sales Value with contribution %>\\n- **STU Channel Revenue (Overall: <start_date> – Till Now)**: <Sales Value with contribution %>\\n- **DEF Channel Revenue (Overall: <start_date> – Till Now)**: <Sales Value with contribution %>\\n\\n**8. Target Performance**\\n- **Total Target Value (Overall: <start_date> – Till Now)**: <Value in Cr>\\n- **Overall Achievement %**: <Value>\\n- **Target Shortfall (Overall: <start_date> – Till Now)**: <Shortfall Value in Cr>\\n- **Quantity Achievement %**: <Value>\\n- **Top Target Shortfall Territory (Overall: <start_date> – Till Now)**: <Territory name> (Sales Value Shortfall: <Value in Cr>, <Achievement %>)\\n\\n### Business Risks\\n- <Data-driven Risk 1 (e.g. High customer concentration)>\\n- <Data-driven Risk 2 (e.g. High discount dependency)>\\n- <Data-driven Risk 3>\\n\\n### Actionable Recommendations\\n- <Data-driven Recommendation 1 (e.g. Improve sales in low-performing territories)>\\n- <Data-driven Recommendation 2 (e.g. Reduce dependency on top customers)>\\n- <Data-driven Recommendation 3>",
+  "report": "TITLE: <Create a descriptive business-focused title based on the data>\\n\\n### Executive Summary\\n<Write exactly 5 to 8 lines summarizing overall business performance across <total_days> days (<start_date> – Till Now), key trends, and main takeaways based purely on the data. If the latest month is ongoing/partial (MTD), state it clearly as Month-to-Date rather than a business decline.>\\n\\n### Key Business Insights\\n\\n**1. Overall Performance**\\n- **Total Revenue (Overall: <start_date> – Till Now, <total_days> Days)**: <Value in Cr> (Sales Value)\\n- **Total Quantity Sold (Overall: <start_date> – Till Now)**: <Value> units\\n- **Total Transactions (Overall: <start_date> – Till Now)**: <Value>\\n- **Average Invoice Value**: <Value>\\n- **Average Selling Price per Unit**: <Value>\\n\\n**2. Revenue Trend**\\n- **Highest Completed Sales Month**: <Value>\\n- **Current Ongoing Month (MTD)**: <Month Year> (Till Now: ₹<Value> Cr)\\n- **Monthly Trend Context**: <State growth between completed full months, or explain that current month is ongoing MTD up to Till Now>\\n\\n**3. Product Performance**\\n- **Top Category (Overall: <start_date> – Till Now)**: <Category name> (Sales Value: <Value in Cr>)\\n- **Top Construction Type (Overall: <start_date> – Till Now)**: <Construction type> (Sales Value: <Value in Cr>)\\n- **Top Product (Overall: <start_date> – Till Now)**: <Product name> (Sales Value: <Value in Cr>)\\n- **Lowest Selling Product (Overall: <start_date> – Till Now)**: <Product name> (Sales Value: <Value in Cr>)\\n\\n#### Top 5 SKUs by Top 5 Categories (Last 30 Days)\\n- **<Category 1>**: <Top 5 SKUs with Sales Value in Cr>\\n- **<Category 2>**: <Top 5 SKUs with Sales Value in Cr>\\n\\n**4. Customer Performance & Account Group Breakdown**\\n- **Top Customer (Overall: <start_date> – Till Now)**: <Customer name> (Sales Value: <Value in Cr>)\\n- **Top 5 Customers Combined Sales Value (Overall: <start_date> – Till Now)**: <Value in Cr>\\n- **Customer Concentration Risk**: <Value>\\n- **Top Account Group (Overall: <start_date> – Till Now)**: <Account group name> (Sales Value: <Value in Cr>, <Contribution %>)\\n\\n#### Account Group Breakdown (KTOKD: <start_date> – Till Now)\\n- **Dealers / Trade Network (Z001)**: <Active customers count>, Sales Value <Value in Cr>, <Units count> units, <Contribution %> contribution\\n- **Institutional Customers (Z004)**: <Active customers count>, Sales Value <Value in Cr>, <Units count> units, <Contribution %> contribution\\n- **Fleet Customers (Z009)**: <Active customers count>, Sales Value <Value in Cr>, <Units count> units, <Contribution %> contribution\\n- **Traders & Retailers (Z015)**: <Active customers count>, Sales Value <Value in Cr>, <Units count> units, <Contribution %> contribution\\n- **Government & PSU (Z006)**: <Active customers count>, Sales Value <Value in Cr>, <Units count> units, <Contribution %> contribution\\n- **Govt Special Accounts (Z010)**: <Active customers count>, Sales Value <Value in Cr>, <Units count> units, <Contribution %> contribution\\n- **Export / Overseas (Z003)**: <Active customers count>, Sales Value <Value in Cr>, <Units count> units, <Contribution %> contribution\\n- **Heavy Equipment / OTR (Z007)**: <Active customers count>, Sales Value <Value in Cr>, <Units count> units, <Contribution %> contribution\\n\\n- **Top 5 Customers (Last 30 Days)**: <List of Top 5 customers with Sales Value in Cr>\\n- **Worst 5 Customers (Last 30 Days)**: <List of Worst 5 customers with Sales Value in Cr>\\n\\n**5. Customer Churn & Inactivity Risk (Last 30 Days)**\\n- **Accounts with >5% Sales Decline**: <Count of accounts declining >5% compared to prior 30 days>\\n- **Accounts with >10% Sales Decline**: <Count of accounts declining >10% compared to prior 30 days>\\n- **Steepest Sales Decline Accounts**: <List of worst performing accounts with decline percentage>\\n- **High-Risk Inactive Accounts (₹2L+ Historical Billing)**: <Count of zero-billing accounts>\\n- **Zero-Sale Active Counters**: <Count of counters with 0 tyre units in the last 30 days>\\n\\n**6. Geography Performance**\\n- **Top Zone (Overall: <start_date> – Till Now)**: <Zone name> (Sales Value: <Value in Cr>)\\n- **Top Region (Overall: <start_date> – Till Now)**: <Region name> (Sales Value: <Value in Cr>)\\n- **Top Territory (Overall: <start_date> – Till Now)**: <Territory name> (Sales Value: <Value in Cr>)\\n- **Lowest Territory (Overall: <start_date> – Till Now)**: <Territory name> (Sales Value: <Value in Cr>)\\n- **Top 5 Territories (Last 30 Days)**: <List of top 5 territories with Sales Value in Cr>\\n- **Worst 5 Territories (Last 30 Days)**: <List of lowest 5 territories with Sales Value in Cr>\\n- **Top 5 Regions (Last 30 Days)**: <List of top 5 regions with Sales Value in Cr>\\n- **Worst 5 Regions (Last 30 Days)**: <List of lowest 5 regions with Sales Value in Cr>\\n\\n**7. Distribution**\\n- **Replacement Channel Revenue (Overall: <start_date> – Till Now)**: <Sales Value with contribution %>\\n- **OEM Channel Revenue (Overall: <start_date> – Till Now)**: <Sales Value with contribution %>\\n- **STU Channel Revenue (Overall: <start_date> – Till Now)**: <Sales Value with contribution %>\\n- **DEF Channel Revenue (Overall: <start_date> – Till Now)**: <Sales Value with contribution %>\\n\\n**8. Target Performance**\\n- **Total Target Value (Overall: <start_date> – Till Now)**: <Value in Cr>\\n- **Overall Achievement %**: <Value>\\n- **Target Shortfall (Overall: <start_date> – Till Now)**: <Shortfall Value in Cr>\\n- **Quantity Achievement %**: <Value>\\n- **Top Target Shortfall Territory (Overall: <start_date> – Till Now)**: <Territory name> (Sales Value Shortfall: <Value in Cr>, <Achievement %>)\\n\\n### Business Risks\\n- <Data-driven Risk 1 (e.g. High customer concentration)>\\n- <Data-driven Risk 2 (e.g. High discount dependency)>\\n- <Data-driven Risk 3>\\n\\n### Actionable Recommendations\\n- <Data-driven Recommendation 1 (e.g. Improve sales in low-performing territories)>\\n- <Data-driven Recommendation 2 (e.g. Reduce dependency on top customers)>\\n- <Data-driven Recommendation 3>",
   "follow_up_questions": ["What ...?", "What ...?", "What ...?", "What ...?", "What ...?"],
   "visualizations": [
     {{
