@@ -1646,17 +1646,19 @@ CANONICAL DATA MODEL & RELATIONSHIP GRAPH (OFFICIAL):
    - Multi-year Historical Trend (ONLY when explicitly requested):
      SELECT da.CAL_YEAR, da.YMONTH, SUM(fact."invoice_value") AS total_sales
      FROM (
-       SELECT "distribution_channel", "invoice_date", "indicator_cancel", "invoice_value"
+       SELECT "dealer_code", "distribution_channel", "invoice_date", "indicator_cancel", "invoice_value"
        FROM "SAP_S4"."ZPVF_SD_CurrentSales_01_TR"
        WHERE "distribution_channel" = '10'
          AND ("indicator_cancel" IS NULL OR "indicator_cancel" NOT IN ('X', 'Y', '1'))
        UNION ALL
-       SELECT "distribution_channel", "invoice_date", "indicator_cancel", "invoice_value"
+       SELECT "dealer_code", "distribution_channel", "invoice_date", "indicator_cancel", "invoice_value"
        FROM "SAP_S4"."ZPVF_SD_SalesHistory_01_TR"
        WHERE "distribution_channel" = '10'
          AND ("indicator_cancel" IS NULL OR "indicator_cancel" NOT IN ('X', 'Y', '1'))
      ) AS fact
+     LEFT JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm ON TRIM(LEADING '0' FROM cm."KUNNR") = TRIM(LEADING '0' FROM fact."dealer_code")
      JOIN "SAP_S4"."ZITR_DayAttribute_01_TR" da ON fact."invoice_date" = da."Date_"
+     WHERE (cm."KLABC" IS NULL OR cm."KLABC" <> 'X')
      GROUP BY da.CAL_YEAR, da.YMONTH
      ORDER BY da.CAL_YEAR, da.YMONTH
 
@@ -3367,10 +3369,70 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                 SQL_RESERVED = {'where', 'group', 'order', 'inner', 'left', 'right', 'join', 'on', 'union', 'having', 'limit', 'as', 'from', 'select', 'set', 'by'}
 
                                 if is_hana and ("ZPVF_SD_CurrentSales_01_TR" in run_query or "ZPVF_SD_SalesHistory_01_TR" in run_query):
-                                    # Avoid injecting into complex UNION queries
                                     is_subquery_union = bool(re.search(r'\bUNION\b', run_query, re.I))
 
-                                    if not is_subquery_union:
+                                    if is_subquery_union:
+                                        # Auto-inject CustomerMaster & KLABC for UNION subqueries: FROM ( SELECT ... UNION ALL ... ) AS fact
+                                        try:
+                                            m_open = re.search(r'\bFROM\s*\(', run_query, re.I)
+                                            if m_open:
+                                                open_idx = m_open.end() - 1
+                                                depth = 0
+                                                in_q = False
+                                                q_c = None
+                                                close_idx = None
+                                                end_alias_idx = None
+                                                f_alias = "fact"
+                                                for ci in range(open_idx, len(run_query)):
+                                                    ch = run_query[ci]
+                                                    if ch in ("'", '"'):
+                                                        if not in_q: in_q = True; q_c = ch
+                                                        elif q_c == ch: in_q = False
+                                                    elif not in_q:
+                                                        if ch == '(': depth += 1
+                                                        elif ch == ')':
+                                                            depth -= 1
+                                                            if depth == 0:
+                                                                close_idx = ci
+                                                                m_al = re.match(r'\s*(?:AS\s+)?([a-zA-Z0-9_]+)', run_query[close_idx+1:], re.I)
+                                                                if m_al and m_al.group(1).lower() not in SQL_RESERVED:
+                                                                    f_alias = m_al.group(1)
+                                                                    end_alias_idx = close_idx + 1 + m_al.end()
+                                                                else:
+                                                                    end_alias_idx = close_idx + 1
+                                                                break
+                                                if close_idx and end_alias_idx:
+                                                    # A. Ensure "dealer_code" in subquery SELECT branches
+                                                    sub_text = run_query[open_idx:close_idx]
+                                                    if "dealer_code" not in sub_text.lower():
+                                                        def _add_dc(m_sel):
+                                                            return f'{m_sel.group(1)}"dealer_code",\n    '
+                                                        sub_fixed = re.sub(r'(\bSELECT\s+(?:\n\s*)?)', _add_dc, sub_text, flags=re.I)
+                                                        run_query = run_query[:open_idx] + sub_fixed + run_query[close_idx:]
+                                                        # recalculate end_alias_idx
+                                                        diff_len = len(sub_fixed) - len(sub_text)
+                                                        end_alias_idx += diff_len
+
+                                                    # B. Inject CustomerMaster join
+                                                    if "ZIVF_CustomerMaster_01_MD" not in run_query:
+                                                        cm_join = f'\nLEFT JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm ON TRIM(LEADING \'0\' FROM cm."KUNNR") = TRIM(LEADING \'0\' FROM {f_alias}."dealer_code")'
+                                                        run_query = run_query[:end_alias_idx] + cm_join + run_query[end_alias_idx:]
+                                                        end_alias_idx += len(cm_join)
+
+                                                    # C. Inject KLABC filter
+                                                    if "KLABC" not in run_query:
+                                                        k_filter = '(cm."KLABC" IS NULL OR cm."KLABC" <> \'X\')'
+                                                        outer_p = run_query[end_alias_idx:]
+                                                        if re.search(r'\bWHERE\b', outer_p, re.I):
+                                                            outer_p = re.sub(r'(\bWHERE\s+)', f'\\1{k_filter} AND ', outer_p, count=1, flags=re.I)
+                                                        elif re.search(r'\b(GROUP\s+BY|ORDER\s+BY|LIMIT)\b', outer_p, re.I):
+                                                            outer_p = re.sub(r'(\b(GROUP\s+BY|ORDER\s+BY|LIMIT)\b)', f'\nWHERE {k_filter}\n\\1', outer_p, count=1, flags=re.I)
+                                                        else:
+                                                            outer_p += f'\nWHERE {k_filter}'
+                                                        run_query = run_query[:end_alias_idx] + outer_p
+                                        except Exception as inj_err:
+                                            print(f"[SQL_INJECT] Subquery UNION injection note: {inj_err}")
+                                    else:
                                         m_f = re.search(r'("?ZPVF_SD_(?:CurrentSales|SalesHistory)_01_TR"?)\s+(?:AS\s+)?([a-zA-Z0-9_]+)', run_query, re.I)
                                         if m_f and m_f.group(2).lower() not in SQL_RESERVED:
                                             f_alias = m_f.group(2)
