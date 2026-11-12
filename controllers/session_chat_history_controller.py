@@ -694,6 +694,25 @@ def get_chat_history(get_connection_func):
         except Exception as e:
             print(f"[History Migration] Note: {e}", flush=True)
 
+        # Auto-clean duplicate default analysis rows: keep only the single latest one in DB
+        try:
+            cur.execute("""
+                SELECT id FROM session_chat_history
+                WHERE session_id = %s
+                  AND (question LIKE 'default_%%' OR question IN ('Generated Session Analysis Report', 'Updated Analysis from newly uploaded files') OR (visit_number = 1 AND turn_index = 0))
+                ORDER BY id DESC
+            """, (session_id,))
+            def_rows = cur.fetchall()
+            if def_rows and len(def_rows) > 1:
+                keep_id = def_rows[0]['id']
+                del_ids = [r['id'] for r in def_rows[1:]]
+                format_strings = ','.join(['%s'] * len(del_ids))
+                cur.execute(f"DELETE FROM session_chat_history WHERE id IN ({format_strings})", tuple(del_ids))
+                conn.commit()
+                print(f"[History Cleanup] Kept latest summary id {keep_id}, deleted {len(del_ids)} duplicate rows for session {session_id}", flush=True)
+        except Exception as e:
+            print(f"[History Cleanup Note] {e}", flush=True)
+
         if user_role in (1, 3, 4):
             # Admin, Super Admin, and Support User can see all chats for this session
             cur.execute("""
@@ -784,6 +803,21 @@ def get_chat_history(get_connection_func):
         for v_num in sorted(grouped_sessions.keys()):
             history = grouped_sessions[v_num]
             
+            # For session_visit_1, strictly ensure only ONE latest default summary row is returned
+            if v_num == 1 and history:
+                summary_items = [
+                    item for item in history
+                    if item.get("question", "").startswith("default_")
+                    or item.get("question") in ("Generated Session Analysis Report", "Updated Analysis from newly uploaded files")
+                ]
+                non_summary_items = [
+                    item for item in history
+                    if item not in summary_items
+                ]
+                if summary_items:
+                    # Keep strictly the latest one
+                    history = [summary_items[-1]] + non_summary_items
+
             # Revert to original naming logic:
             session_name = history[0]["question"] if history and history[0].get("question") else workspace_name
             if v_num == 1 and history and history[0]["question"] == "Generated Session Analysis Report":

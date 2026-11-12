@@ -108,41 +108,39 @@ def sync_session_chat_history_with_report(conn, session_id: str, report: str) ->
         default_q = f"default_{today_str}"
         ch_cur = conn.cursor(dictionary=True) if hasattr(conn, "cursor") else conn.cursor()
 
-        # 1. Update ALL existing default analysis rows for this session_id across ALL users
+        # 1. Ensure exactly ONE master default analysis row exists for this session_id
         ch_cur.execute("""
-            UPDATE session_chat_history
-            SET question = %s, answer = %s, created_at = NOW()
-            WHERE session_id = %s AND (question LIKE 'default_%' OR question = 'default' OR question = 'Generated Session Analysis Report')
-        """, (default_q, str(report), session_id))
-
-        # 2. Find all users associated with this workspace (owner in workspaces + users in workspace_users)
-        ch_cur.execute("""
-            SELECT DISTINCT user_id FROM (
-                SELECT user_id FROM workspaces WHERE session_id = %s
-                UNION
-                SELECT user_id FROM workspace_users WHERE session_id = %s
-            ) AS u WHERE user_id IS NOT NULL
-        """, (session_id, session_id))
-        ws_users = [r["user_id"] for r in ch_cur.fetchall() if r.get("user_id")]
-        if not ws_users:
-            ws_users = [1]
-
-        # 3. Ensure each user in this workspace has at least one default row
-        for u_id in ws_users:
+            SELECT id FROM session_chat_history
+            WHERE session_id = %s AND (question LIKE 'default_%%' OR question = 'default' OR question IN ('Generated Session Analysis Report', 'Updated Analysis from newly uploaded files'))
+            ORDER BY id DESC
+        """, (session_id,))
+        existing_rows = ch_cur.fetchall()
+        if existing_rows:
+            keep_id = existing_rows[0]['id']
             ch_cur.execute("""
-                SELECT id FROM session_chat_history
-                WHERE session_id = %s AND user_id = %s AND (question LIKE 'default_%' OR question = 'default')
-                LIMIT 1
-            """, (session_id, int(u_id)))
-            if not ch_cur.fetchone():
-                ch_cur.execute("""
-                    INSERT INTO session_chat_history
-                    (session_id, user_id, turn_index, visit_number, question, answer, mode)
-                    VALUES (%s, %s, 0, 1, %s, %s, 'answer')
-                """, (session_id, int(u_id), default_q, str(report)))
+                UPDATE session_chat_history
+                SET question = %s, answer = %s, created_at = NOW()
+                WHERE id = %s
+            """, (default_q, str(report), keep_id))
+            if len(existing_rows) > 1:
+                del_ids = [r['id'] for r in existing_rows[1:]]
+                format_strings = ','.join(['%s'] * len(del_ids))
+                ch_cur.execute(f"DELETE FROM session_chat_history WHERE id IN ({format_strings})", tuple(del_ids))
+                print(f"[Analysis] Cleaned {len(del_ids)} duplicate summary rows for session {session_id}, kept id {keep_id}", flush=True)
+        else:
+            owner_id = 1
+            ch_cur.execute("SELECT user_id FROM workspaces WHERE session_id = %s LIMIT 1", (session_id,))
+            w_row = ch_cur.fetchone()
+            if w_row and w_row.get("user_id"):
+                owner_id = w_row["user_id"]
+            ch_cur.execute("""
+                INSERT INTO session_chat_history
+                (session_id, user_id, turn_index, visit_number, question, answer, mode)
+                VALUES (%s, %s, 0, 1, %s, %s, 'answer')
+            """, (session_id, int(owner_id), default_q, str(report)))
 
         conn.commit()
-        print(f"[Analysis] session_chat_history fully synced across {len(ws_users)} user(s) for session {session_id}", flush=True)
+        print(f"[Analysis] session_chat_history synced with single master summary row for session {session_id}", flush=True)
     except Exception as ch_err:
         print(f"[Analysis] sync_session_chat_history error: {ch_err}", flush=True)
     finally:
