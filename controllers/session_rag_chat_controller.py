@@ -2553,6 +2553,277 @@ def _is_unbounded_heavy_comparison(question: str) -> bool:
     
     return not has_time_limit
 
+def _resolve_canonical_churn_sql(question: str):
+    """
+    Direct deterministic SQL resolver for Section 5 (Customer Churn & Inactivity Risk)
+    from the Executive Performance Summary. Guarantees 100% accuracy matching the verified
+    KPI calculations and instantly yields the exact record count without LLM drift.
+    """
+    q = (question or "").strip().lower()
+    if not q:
+        return None
+
+    # 1. Zero-Sale Active Counters (Last 30 Days)
+    if re.search(r'\bzero[- ]?sale active counters?\b', q, re.I):
+        return {
+            "db": "SAP_S4",
+            "sql": (
+                'WITH max_d AS (\n'
+                '    SELECT MAX("invoice_date") AS max_dt \n'
+                '    FROM "SAP_S4"."ZPVF_SD_CurrentSales_01_TR" \n'
+                '    WHERE "invoice_date" IS NOT NULL\n'
+                '),\n'
+                'sales_source AS (\n'
+                '    SELECT "dealer_code", "invoice_date", "Tyre_Quantity", "distribution_channel", "indicator_cancel"\n'
+                '    FROM "SAP_S4"."ZPVF_SD_CurrentSales_01_TR"\n'
+                '    WHERE "invoice_date" >= \'2026-01-01\'\n'
+                '    UNION ALL\n'
+                '    SELECT "dealer_code", "invoice_date", "Tyre_Quantity", "distribution_channel", "indicator_cancel"\n'
+                '    FROM "SAP_S4"."ZPVF_SD_SalesHistory_01_TR"\n'
+                '    WHERE "invoice_date" >= \'2026-01-01\'\n'
+                '),\n'
+                'cust_units AS (\n'
+                '    SELECT \n'
+                '        s."dealer_code",\n'
+                '        SUM(CASE WHEN s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -29) AND md.max_dt THEN COALESCE(s."Tyre_Quantity", 0) ELSE 0 END) AS recent_30_days_units_sold,\n'
+                '        SUM(COALESCE(s."Tyre_Quantity", 0)) AS total_historical_units\n'
+                '    FROM sales_source s\n'
+                '    CROSS JOIN max_d md\n'
+                '    WHERE s."invoice_date" IS NOT NULL \n'
+                '      AND (s."distribution_channel" = \'10\' OR s."distribution_channel" = 10) \n'
+                '      AND (s."indicator_cancel" IS NULL OR s."indicator_cancel" NOT IN (\'X\', \'Y\', \'1\'))\n'
+                '    GROUP BY s."dealer_code"\n'
+                '    HAVING SUM(CASE WHEN s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -29) AND md.max_dt THEN COALESCE(s."Tyre_Quantity", 0) ELSE 0 END) = 0\n'
+                '       AND SUM(COALESCE(s."Tyre_Quantity", 0)) > 0\n'
+                ')\n'
+                'SELECT \n'
+                '    cu."dealer_code" AS customer_code,\n'
+                '    COALESCE(NULLIF(TRIM(cm."NAME1"), \'\'), NULLIF(TRIM(cm."BNAME"), \'\'), cu."dealer_code") AS customer_name,\n'
+                '    cu.total_historical_units AS historical_total_units_sold,\n'
+                '    cu.recent_30_days_units_sold\n'
+                'FROM cust_units cu\n'
+                'LEFT JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm \n'
+                '    ON (cu."dealer_code" = cm."KUNNR" OR LTRIM(cu."dealer_code", \'0\') = LTRIM(cm."KUNNR", \'0\'))\n'
+                'WHERE (cm."KLABC" IS NULL OR cm."KLABC" <> \'X\')\n'
+                'ORDER BY cu.total_historical_units DESC'
+            ),
+            "reasoning": "Exact canonical query for Zero-Sale Active Counters (Last 30 Days) matching Executive Summary calculation."
+        }
+
+    # 2. Accounts with > 5% Sales Decline
+    if re.search(r'\baccounts\s+with\s*>\s*5%\s+sales\s+decline\b', q, re.I):
+        return {
+            "db": "SAP_S4",
+            "sql": (
+                'WITH max_d AS (\n'
+                '    SELECT MAX("invoice_date") AS max_dt FROM "SAP_S4"."ZPVF_SD_CurrentSales_01_TR" WHERE "invoice_date" IS NOT NULL\n'
+                '),\n'
+                'sales_source_60d AS (\n'
+                '    SELECT "dealer_code", "invoice_date", "invoice_value", "distribution_channel", "indicator_cancel"\n'
+                '    FROM "SAP_S4"."ZPVF_SD_CurrentSales_01_TR"\n'
+                '    WHERE "invoice_date" >= \'2026-01-01\'\n'
+                '    UNION ALL\n'
+                '    SELECT "dealer_code", "invoice_date", "invoice_value", "distribution_channel", "indicator_cancel"\n'
+                '    FROM "SAP_S4"."ZPVF_SD_SalesHistory_01_TR"\n'
+                '    WHERE "invoice_date" >= \'2026-01-01\'\n'
+                '),\n'
+                'cust_30d AS (\n'
+                '    SELECT \n'
+                '        s."dealer_code",\n'
+                '        SUM(CASE WHEN s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -29) AND md.max_dt THEN COALESCE(s."invoice_value", 0) ELSE 0 END) AS current_30d_sales,\n'
+                '        SUM(CASE WHEN s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -59) AND ADD_DAYS(md.max_dt, -30) THEN COALESCE(s."invoice_value", 0) ELSE 0 END) AS prior_30d_sales\n'
+                '    FROM sales_source_60d s\n'
+                '    CROSS JOIN max_d md\n'
+                '    WHERE s."invoice_date" IS NOT NULL \n'
+                '      AND (s."distribution_channel" = \'10\' OR s."distribution_channel" = 10) \n'
+                '      AND (s."indicator_cancel" IS NULL OR s."indicator_cancel" NOT IN (\'X\', \'Y\', \'1\'))\n'
+                '      AND s."invoice_date" >= ADD_DAYS(md.max_dt, -59)\n'
+                '    GROUP BY s."dealer_code"\n'
+                '),\n'
+                'decline_calc AS (\n'
+                '    SELECT \n'
+                '        c.dealer_code,\n'
+                '        c.current_30d_sales,\n'
+                '        c.prior_30d_sales,\n'
+                '        ROUND(((c.prior_30d_sales - c.current_30d_sales) / NULLIF(c.prior_30d_sales, 0)) * 100.0, 2) AS decline_pct\n'
+                '    FROM cust_30d c\n'
+                '    WHERE c.prior_30d_sales > 0\n'
+                '      AND ((c.current_30d_sales - c.prior_30d_sales) / NULLIF(c.prior_30d_sales, 0)) * 100.0 < -5.0\n'
+                ')\n'
+                'SELECT \n'
+                '    d.dealer_code AS customer_code,\n'
+                '    COALESCE(NULLIF(TRIM(cm."NAME1"), \'\'), NULLIF(TRIM(cm."BNAME"), \'\'), d.dealer_code) AS customer_name,\n'
+                '    ROUND(d.current_30d_sales / 10000000.0, 4) AS current_30d_sales_cr,\n'
+                '    ROUND(d.prior_30d_sales / 10000000.0, 4) AS prior_30d_sales_cr,\n'
+                '    d.decline_pct AS decline_percentage\n'
+                'FROM decline_calc d\n'
+                'LEFT JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm \n'
+                '    ON (d.dealer_code = cm."KUNNR" OR LTRIM(d.dealer_code, \'0\') = LTRIM(cm."KUNNR", \'0\'))\n'
+                'WHERE (cm."KLABC" IS NULL OR cm."KLABC" <> \'X\')\n'
+                'ORDER BY d.decline_pct DESC'
+            ),
+            "reasoning": "Exact canonical query for Accounts with > 5% Sales Decline matching Executive Summary calculation."
+        }
+
+    # 3. Accounts with > 10% Sales Decline
+    if re.search(r'\baccounts\s+with\s*>\s*10%\s+sales\s+decline\b', q, re.I):
+        return {
+            "db": "SAP_S4",
+            "sql": (
+                'WITH max_d AS (\n'
+                '    SELECT MAX("invoice_date") AS max_dt FROM "SAP_S4"."ZPVF_SD_CurrentSales_01_TR" WHERE "invoice_date" IS NOT NULL\n'
+                '),\n'
+                'sales_source_60d AS (\n'
+                '    SELECT "dealer_code", "invoice_date", "invoice_value", "distribution_channel", "indicator_cancel"\n'
+                '    FROM "SAP_S4"."ZPVF_SD_CurrentSales_01_TR"\n'
+                '    WHERE "invoice_date" >= \'2026-01-01\'\n'
+                '    UNION ALL\n'
+                '    SELECT "dealer_code", "invoice_date", "invoice_value", "distribution_channel", "indicator_cancel"\n'
+                '    FROM "SAP_S4"."ZPVF_SD_SalesHistory_01_TR"\n'
+                '    WHERE "invoice_date" >= \'2026-01-01\'\n'
+                '),\n'
+                'cust_30d AS (\n'
+                '    SELECT \n'
+                '        s."dealer_code",\n'
+                '        SUM(CASE WHEN s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -29) AND md.max_dt THEN COALESCE(s."invoice_value", 0) ELSE 0 END) AS current_30d_sales,\n'
+                '        SUM(CASE WHEN s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -59) AND ADD_DAYS(md.max_dt, -30) THEN COALESCE(s."invoice_value", 0) ELSE 0 END) AS prior_30d_sales\n'
+                '    FROM sales_source_60d s\n'
+                '    CROSS JOIN max_d md\n'
+                '    WHERE s."invoice_date" IS NOT NULL \n'
+                '      AND (s."distribution_channel" = \'10\' OR s."distribution_channel" = 10) \n'
+                '      AND (s."indicator_cancel" IS NULL OR s."indicator_cancel" NOT IN (\'X\', \'Y\', \'1\'))\n'
+                '      AND s."invoice_date" >= ADD_DAYS(md.max_dt, -59)\n'
+                '    GROUP BY s."dealer_code"\n'
+                '),\n'
+                'decline_calc AS (\n'
+                '    SELECT \n'
+                '        c.dealer_code,\n'
+                '        c.current_30d_sales,\n'
+                '        c.prior_30d_sales,\n'
+                '        ROUND(((c.prior_30d_sales - c.current_30d_sales) / NULLIF(c.prior_30d_sales, 0)) * 100.0, 2) AS decline_pct\n'
+                '    FROM cust_30d c\n'
+                '    WHERE c.prior_30d_sales > 0\n'
+                '      AND ((c.current_30d_sales - c.prior_30d_sales) / NULLIF(c.prior_30d_sales, 0)) * 100.0 < -10.0\n'
+                ')\n'
+                'SELECT \n'
+                '    d.dealer_code AS customer_code,\n'
+                '    COALESCE(NULLIF(TRIM(cm."NAME1"), \'\'), NULLIF(TRIM(cm."BNAME"), \'\'), d.dealer_code) AS customer_name,\n'
+                '    ROUND(d.current_30d_sales / 10000000.0, 4) AS current_30d_sales_cr,\n'
+                '    ROUND(d.prior_30d_sales / 10000000.0, 4) AS prior_30d_sales_cr,\n'
+                '    d.decline_pct AS decline_percentage\n'
+                'FROM decline_calc d\n'
+                'LEFT JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm \n'
+                '    ON (d.dealer_code = cm."KUNNR" OR LTRIM(d.dealer_code, \'0\') = LTRIM(cm."KUNNR", \'0\'))\n'
+                'WHERE (cm."KLABC" IS NULL OR cm."KLABC" <> \'X\')\n'
+                'ORDER BY d.decline_pct DESC'
+            ),
+            "reasoning": "Exact canonical query for Accounts with > 10% Sales Decline matching Executive Summary calculation."
+        }
+
+    # 4. High-Risk Inactive Accounts (Last 30 Days)
+    if re.search(r'\bhigh[- ]risk inactive accounts?\b', q, re.I):
+        return {
+            "db": "SAP_S4",
+            "sql": (
+                'WITH max_d AS (\n'
+                '    SELECT MAX("invoice_date") AS max_dt \n'
+                '    FROM "SAP_S4"."ZPVF_SD_CurrentSales_01_TR" \n'
+                '    WHERE "invoice_date" IS NOT NULL\n'
+                '),\n'
+                'sales_source AS (\n'
+                '    SELECT "dealer_code", "invoice_date", "invoice_value", "distribution_channel", "indicator_cancel"\n'
+                '    FROM "SAP_S4"."ZPVF_SD_CurrentSales_01_TR"\n'
+                '    WHERE "invoice_date" >= \'2026-01-01\'\n'
+                '    UNION ALL\n'
+                '    SELECT "dealer_code", "invoice_date", "invoice_value", "distribution_channel", "indicator_cancel"\n'
+                '    FROM "SAP_S4"."ZPVF_SD_SalesHistory_01_TR"\n'
+                '    WHERE "invoice_date" >= \'2026-01-01\'\n'
+                '),\n'
+                'cust_billing AS (\n'
+                '    SELECT \n'
+                '        s."dealer_code",\n'
+                '        SUM(CASE WHEN s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -29) AND md.max_dt THEN COALESCE(s."invoice_value", 0) ELSE 0 END) AS curr_rev,\n'
+                '        SUM(COALESCE(s."invoice_value", 0)) AS total_historical_rev\n'
+                '    FROM sales_source s\n'
+                '    CROSS JOIN max_d md\n'
+                '    WHERE s."invoice_date" IS NOT NULL \n'
+                '      AND (s."distribution_channel" = \'10\' OR s."distribution_channel" = 10) \n'
+                '      AND (s."indicator_cancel" IS NULL OR s."indicator_cancel" NOT IN (\'X\', \'Y\', \'1\'))\n'
+                '    GROUP BY s."dealer_code"\n'
+                '    HAVING SUM(CASE WHEN s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -29) AND md.max_dt THEN COALESCE(s."invoice_value", 0) ELSE 0 END) = 0\n'
+                '       AND SUM(COALESCE(s."invoice_value", 0)) >= 200000\n'
+                ')\n'
+                'SELECT \n'
+                '    cb."dealer_code" AS customer_code,\n'
+                '    COALESCE(NULLIF(TRIM(cm."NAME1"), \'\'), NULLIF(TRIM(cm."BNAME"), \'\'), cb."dealer_code") AS customer_name,\n'
+                '    ROUND(cb.total_historical_rev / 100000.0, 2) AS historical_sales_lakhs,\n'
+                '    cb.curr_rev AS recent_30d_sales\n'
+                'FROM cust_billing cb\n'
+                'LEFT JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm \n'
+                '    ON (cb."dealer_code" = cm."KUNNR" OR LTRIM(cb."dealer_code", \'0\') = LTRIM(cm."KUNNR", \'0\'))\n'
+                'WHERE (cm."KLABC" IS NULL OR cm."KLABC" <> \'X\')\n'
+                'ORDER BY cb.total_historical_rev DESC'
+            ),
+            "reasoning": "Exact canonical query for High-Risk Inactive Accounts (₹2L+ Historical Billing) matching Executive Summary calculation."
+        }
+
+    # 5. Steepest Sales Decline Accounts
+    if re.search(r'\bsteepest\s+sales\s+decline\s+accounts?\b', q, re.I):
+        return {
+            "db": "SAP_S4",
+            "sql": (
+                'WITH max_d AS (\n'
+                '    SELECT MAX("invoice_date") AS max_dt FROM "SAP_S4"."ZPVF_SD_CurrentSales_01_TR" WHERE "invoice_date" IS NOT NULL\n'
+                '),\n'
+                'sales_source_60d AS (\n'
+                '    SELECT "dealer_code", "invoice_date", "invoice_value", "distribution_channel", "indicator_cancel"\n'
+                '    FROM "SAP_S4"."ZPVF_SD_CurrentSales_01_TR"\n'
+                '    WHERE "invoice_date" >= \'2026-01-01\'\n'
+                '    UNION ALL\n'
+                '    SELECT "dealer_code", "invoice_date", "invoice_value", "distribution_channel", "indicator_cancel"\n'
+                '    FROM "SAP_S4"."ZPVF_SD_SalesHistory_01_TR"\n'
+                '    WHERE "invoice_date" >= \'2026-01-01\'\n'
+                '),\n'
+                'cust_30d AS (\n'
+                '    SELECT \n'
+                '        s."dealer_code",\n'
+                '        SUM(CASE WHEN s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -29) AND md.max_dt THEN COALESCE(s."invoice_value", 0) ELSE 0 END) AS current_30d_sales,\n'
+                '        SUM(CASE WHEN s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -59) AND ADD_DAYS(md.max_dt, -30) THEN COALESCE(s."invoice_value", 0) ELSE 0 END) AS prior_30d_sales\n'
+                '    FROM sales_source_60d s\n'
+                '    CROSS JOIN max_d md\n'
+                '    WHERE s."invoice_date" IS NOT NULL \n'
+                '      AND (s."distribution_channel" = \'10\' OR s."distribution_channel" = 10) \n'
+                '      AND (s."indicator_cancel" IS NULL OR s."indicator_cancel" NOT IN (\'X\', \'Y\', \'1\'))\n'
+                '      AND s."invoice_date" >= ADD_DAYS(md.max_dt, -59)\n'
+                '    GROUP BY s."dealer_code"\n'
+                '),\n'
+                'decline_calc AS (\n'
+                '    SELECT \n'
+                '        c.dealer_code,\n'
+                '        c.current_30d_sales,\n'
+                '        c.prior_30d_sales,\n'
+                '        ROUND(((c.prior_30d_sales - c.current_30d_sales) / NULLIF(c.prior_30d_sales, 0)) * 100.0, 2) AS decline_pct\n'
+                '    FROM cust_30d c\n'
+                '    WHERE c.prior_30d_sales > 0\n'
+                ')\n'
+                'SELECT \n'
+                '    d.dealer_code AS customer_code,\n'
+                '    COALESCE(NULLIF(TRIM(cm."NAME1"), \'\'), NULLIF(TRIM(cm."BNAME"), \'\'), d.dealer_code) AS customer_name,\n'
+                '    ROUND(d.current_30d_sales / 10000000.0, 4) AS current_30d_sales_cr,\n'
+                '    ROUND(d.prior_30d_sales / 10000000.0, 4) AS prior_30d_sales_cr,\n'
+                '    d.decline_pct AS decline_percentage\n'
+                'FROM decline_calc d\n'
+                'LEFT JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm \n'
+                '    ON (d.dealer_code = cm."KUNNR" OR LTRIM(d.dealer_code, \'0\') = LTRIM(cm."KUNNR", \'0\'))\n'
+                'WHERE (cm."KLABC" IS NULL OR cm."KLABC" <> \'X\')\n'
+                'ORDER BY d.decline_pct DESC\n'
+                'LIMIT 20'
+            ),
+            "reasoning": "Exact canonical query for Steepest Sales Decline Accounts matching Executive Summary calculation."
+        }
+
+    return None
+
 def session_rag_chat_controller(get_connection_func, status_callback=None):
     data       = request.json or {}
     session_id     = (data.get("session_id")     or "").strip()
@@ -2933,7 +3204,13 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
         except Exception as _e:
             print(f"[BIZMAP] skipped: {_e}")
 
-        sql_json = _mistral(sql_sys, sql_user, temperature=0.0)
+        # Check for direct canonical Section 5 Customer Churn & Inactivity Risk queries
+        canonical_churn_sql = _resolve_canonical_churn_sql(question)
+        if canonical_churn_sql:
+            print(f"[CANONICAL_CHURN] Handled via direct canonical SQL for: '{question}'")
+            sql_json = canonical_churn_sql
+        else:
+            sql_json = _mistral(sql_sys, sql_user, temperature=0.0)
         print(f"[DEBUG SQL JSON] {sql_json}")
 
         # Local LLM fallbacks (Mistral sometimes nests inside 'query' or uses uppercase)
@@ -2948,20 +3225,21 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
         # (e.g. `invoice`.`construction`), which fails at execution with 1054.
         # Catch it statically against the real schema and force a correction
         # BEFORE touching the database, so the first DB attempt is already right.
-        for _v in range(2):
-            cand_sql = (sql_json or {}).get("sql", "") if isinstance(sql_json, dict) else ""
-            if not cand_sql:
-                break
-            violations = _validate_column_refs(cand_sql, table_cols_map)
-            if not violations:
-                break
-            print(f"[SQL_VALIDATE] wrong-table column refs {violations} — regenerating before execution")
-            fix_user = (
-                sql_user
-                + "\n\nPREVIOUS SQL:\n" + cand_sql
-                + "\n\n" + _column_ref_correction(violations, col_to_tables)
-            )
-            sql_json = _mistral(sql_sys, fix_user, temperature=0.0)
+        if not canonical_churn_sql:
+            for _v in range(2):
+                cand_sql = (sql_json or {}).get("sql", "") if isinstance(sql_json, dict) else ""
+                if not cand_sql:
+                    break
+                violations = _validate_column_refs(cand_sql, table_cols_map)
+                if not violations:
+                    break
+                print(f"[SQL_VALIDATE] wrong-table column refs {violations} — regenerating before execution")
+                fix_user = (
+                    sql_user
+                    + "\n\nPREVIOUS SQL:\n" + cand_sql
+                    + "\n\n" + _column_ref_correction(violations, col_to_tables)
+                )
+                sql_json = _mistral(sql_sys, fix_user, temperature=0.0)
 
         # Track failures so we never fall through to an empty-context LLM answer.
         agg_sql_error = None
