@@ -738,6 +738,37 @@ def _fetch_web_data(session_id: str, topics: list, conn) -> list:
 
 
 # ══════════════════════════════════════════════════════
+# CURRENCY & METRIC FORMATTERS
+# ══════════════════════════════════════════════════════
+def _format_inr_kpi(amount):
+    """
+    Formats monetary amounts dynamically so small amounts display in exact K or L
+    instead of being prematurely rounded down to 0.00 Cr:
+      >= 10,000,000 (1 Cr)   -> '₹1.25 Cr'
+      >= 100,000    (1 L)    -> '₹2.50 L'
+      >= 1,000      (1 K)    -> '₹45.2 K'
+      > 0           (< 1 K)  -> '₹500'
+      0 or None              -> '₹0'
+    """
+    if amount is None:
+        return "₹0"
+    try:
+        val = float(amount)
+    except (ValueError, TypeError):
+        return str(amount)
+    if val >= 10000000:
+        return f"₹{val / 10000000.0:.2f} Cr"
+    elif val >= 100000:
+        return f"₹{val / 100000.0:.2f} L"
+    elif val >= 1000:
+        return f"₹{val / 1000.0:.1f} K"
+    elif val > 0:
+        return f"₹{val:.0f}"
+    else:
+        return "₹0"
+
+
+# ══════════════════════════════════════════════════════
 # HARDCODED CORE KPIs — deterministic, no LLM involved
 # ══════════════════════════════════════════════════════
 def _compute_core_kpis(cursor) -> dict:
@@ -1363,7 +1394,8 @@ def _compute_core_kpis(cursor) -> dict:
         run("bottom_5_customers_30d", f"""
             SELECT
                 {col_cust_name} AS customer_name,
-                ROUND(SUM(sd.{col_revenue})/10000000, 2) AS revenue_cr
+                SUM(sd.{col_revenue}) AS revenue_raw,
+                ROUND(SUM(sd.{col_revenue})/10000000, 4) AS revenue_cr
             FROM `{sales_tbl}` sd
             {cust_join}
             CROSS JOIN (SELECT MAX(sd_max.{col_date}) AS max_dt FROM `{sales_tbl}` sd_max) md
@@ -1371,7 +1403,7 @@ def _compute_core_kpis(cursor) -> dict:
             AND sd.{col_date} BETWEEN DATE_SUB(md.max_dt, INTERVAL 29 DAY) AND md.max_dt
             GROUP BY customer_name
             HAVING SUM(sd.{col_revenue}) > 0
-            ORDER BY revenue_cr ASC
+            ORDER BY SUM(sd.{col_revenue}) ASC
             LIMIT 5
         """, required_tables=[sales_tbl, cust_tbl])
 
@@ -1570,7 +1602,8 @@ def _compute_core_kpis(cursor) -> dict:
             run("worst_5_territories_30d", f"""
                 SELECT
                     COALESCE(tm.NAME, cm.BZIRK, 'Unmapped Territory') AS territory_name,
-                    ROUND(SUM(sd.{col_revenue})/10000000, 2) AS revenue_cr
+                    SUM(sd.{col_revenue}) AS revenue_raw,
+                    ROUND(SUM(sd.{col_revenue})/10000000, 4) AS revenue_cr
                 FROM `{sales_tbl}` sd
                 JOIN `{cust_tbl}` cm ON (sd.{col_cust} = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(sd.{col_cust} AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))
                 JOIN `{terr_tbl}` tm ON cm.BZIRK = tm.BZIRK
@@ -1579,7 +1612,7 @@ def _compute_core_kpis(cursor) -> dict:
                 AND sd.{col_date} BETWEEN DATE_SUB(md.max_dt, INTERVAL 29 DAY) AND md.max_dt
                 GROUP BY territory_name
                 HAVING SUM(sd.{col_revenue}) > 0
-                ORDER BY revenue_cr ASC
+                ORDER BY SUM(sd.{col_revenue}) ASC
                 LIMIT 5
             """, required_tables=[sales_tbl, cust_tbl, terr_tbl])
 
@@ -1603,7 +1636,8 @@ def _compute_core_kpis(cursor) -> dict:
                 run("worst_5_regions_30d", f"""
                     SELECT
                         COALESCE(rm.region_name, cm.REGIO, 'Unmapped Region') AS region_name,
-                        ROUND(SUM(sd.{col_revenue})/10000000, 2) AS revenue_cr
+                        SUM(sd.{col_revenue}) AS revenue_raw,
+                        ROUND(SUM(sd.{col_revenue})/10000000, 4) AS revenue_cr
                     FROM `{sales_tbl}` sd
                     JOIN `{cust_tbl}` cm ON (sd.{col_cust} = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(sd.{col_cust} AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))
                     {join_terr}
@@ -1613,7 +1647,7 @@ def _compute_core_kpis(cursor) -> dict:
                     AND sd.{col_date} BETWEEN DATE_SUB(md.max_dt, INTERVAL 29 DAY) AND md.max_dt
                     GROUP BY region_name
                     HAVING SUM(sd.{col_revenue}) >= 0
-                    ORDER BY revenue_cr ASC
+                    ORDER BY SUM(sd.{col_revenue}) ASC
                     LIMIT 5
                 """, required_tables=[sales_tbl, cust_tbl, reg_tbl])
 
@@ -1897,6 +1931,20 @@ def _compute_core_kpis(cursor) -> dict:
                 ORDER BY Target_Value DESC
             """, required_tables=[target_tbl, cat_tbl])
 
+    # Dynamic INR formatting (Cr, L, K) for bottom / low-volume metrics
+    for kpi_name in ["bottom_5_customers_30d", "worst_5_territories_30d", "worst_5_regions_30d"]:
+        rows = kpis.get(kpi_name)
+        if isinstance(rows, list):
+            for r in rows:
+                if isinstance(r, dict):
+                    raw_val = r.get("revenue_raw")
+                    if raw_val is None and "revenue_cr" in r:
+                        try:
+                            raw_val = float(r["revenue_cr"]) * 10000000.0
+                        except Exception:
+                            pass
+                    if raw_val is not None:
+                        r["sales_value"] = _format_inr_kpi(raw_val)
 
     return kpis
 
@@ -2494,14 +2542,15 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
         run("worst_customer_30d", f"""
             SELECT
                 COALESCE(NULLIF(TRIM(cm."NAME1"), ''), NULLIF(TRIM(cm."BNAME"), ''), TRIM(s."dealer_code")) AS customer_name,
-                ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue_cr
+                SUM(COALESCE(s."invoice_value", 0)) AS revenue_raw,
+                ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 4) AS revenue_cr
             FROM {sales_source_30d} s
             {cust_join}
             {sales_where}
             AND s."invoice_date" BETWEEN '{dt_30d_str}' AND '{max_dt_str}'
             GROUP BY COALESCE(NULLIF(TRIM(cm."NAME1"), ''), NULLIF(TRIM(cm."BNAME"), ''), TRIM(s."dealer_code"))
             HAVING SUM(COALESCE(s."invoice_value", 0)) > 0
-            ORDER BY revenue_cr ASC
+            ORDER BY SUM(COALESCE(s."invoice_value", 0)) ASC
             LIMIT 1
         """)
 
@@ -2521,14 +2570,15 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
         run("bottom_5_customers_30d", f"""
             SELECT
                 COALESCE(NULLIF(TRIM(cm."NAME1"), ''), NULLIF(TRIM(cm."BNAME"), ''), TRIM(s."dealer_code")) AS customer_name,
-                ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue_cr
+                SUM(COALESCE(s."invoice_value", 0)) AS revenue_raw,
+                ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 4) AS revenue_cr
             FROM {sales_source_30d} s
             {cust_join}
             {sales_where}
             AND s."invoice_date" BETWEEN '{dt_30d_str}' AND '{max_dt_str}'
             GROUP BY COALESCE(NULLIF(TRIM(cm."NAME1"), ''), NULLIF(TRIM(cm."BNAME"), ''), TRIM(s."dealer_code"))
             HAVING SUM(COALESCE(s."invoice_value", 0)) > 0
-            ORDER BY revenue_cr ASC
+            ORDER BY SUM(COALESCE(s."invoice_value", 0)) ASC
             LIMIT 5
         """)
 
@@ -2683,7 +2733,8 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
         run("worst_5_territories_30d", f"""
             SELECT
                 COALESCE(NULLIF(TRIM(tm."NAME"), ''), NULLIF(TRIM(tm."BZIRK"), ''), 'Unknown') AS territory_name,
-                ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue_cr
+                SUM(COALESCE(s."invoice_value", 0)) AS revenue_raw,
+                ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 4) AS revenue_cr
             FROM {sales_source_30d} s
             {cust_join}
             {terr_join}
@@ -2691,7 +2742,7 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
             AND s."invoice_date" BETWEEN '{dt_30d_str}' AND '{max_dt_str}'
             GROUP BY COALESCE(NULLIF(TRIM(tm."NAME"), ''), NULLIF(TRIM(tm."BZIRK"), ''), 'Unknown')
             HAVING SUM(COALESCE(s."invoice_value", 0)) > 0
-            ORDER BY revenue_cr ASC
+            ORDER BY SUM(COALESCE(s."invoice_value", 0)) ASC
             LIMIT 5
         """)
 
@@ -2714,7 +2765,8 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
             run("worst_5_regions_30d", f"""
                 SELECT
                     COALESCE(NULLIF(TRIM(rm."region_name"), ''), NULLIF(TRIM(rm."region_code"), ''), 'Unknown') AS region_name,
-                    ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue_cr
+                    SUM(COALESCE(s."invoice_value", 0)) AS revenue_raw,
+                    ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 4) AS revenue_cr
                 FROM {sales_source_30d} s
                 {cust_join}
                 {terr_join}
@@ -2723,7 +2775,7 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
                 AND s."invoice_date" BETWEEN '{dt_30d_str}' AND '{max_dt_str}'
                 GROUP BY COALESCE(NULLIF(TRIM(rm."region_name"), ''), NULLIF(TRIM(rm."region_code"), ''), 'Unknown')
                 HAVING SUM(COALESCE(s."invoice_value", 0)) >= 0
-                ORDER BY revenue_cr ASC
+                ORDER BY SUM(COALESCE(s."invoice_value", 0)) ASC
                 LIMIT 5
             """)
 
@@ -2860,6 +2912,21 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
         cur.close()
     except Exception:
         pass
+
+    # Dynamic INR formatting (Cr, L, K) for bottom / low-volume metrics
+    for kpi_name in ["bottom_5_customers_30d", "worst_customer_30d", "worst_5_territories_30d", "lowest_territory", "worst_5_regions_30d"]:
+        rows = kpis.get(kpi_name)
+        if isinstance(rows, list):
+            for r in rows:
+                if isinstance(r, dict):
+                    raw_val = r.get("revenue_raw")
+                    if raw_val is None and "revenue_cr" in r:
+                        try:
+                            raw_val = float(r["revenue_cr"]) * 10000000.0
+                        except Exception:
+                            pass
+                    if raw_val is not None:
+                        r["sales_value"] = _format_inr_kpi(raw_val)
 
     return kpis
 
@@ -3523,9 +3590,11 @@ CRITICAL INSTRUCTIONS:
      * worst_5_regions_30d → "Worst 5 Regions (Last 30 Days)"
    - channel_distribution / distribution_contribution_pct → "Distribution" (Replacement %, OEM %, STU %, DEF %, and breakdown with Contribution %)
    - target_performance → "Target vs Actual Performance" (Total Target Value, Overall Achievement %, Target Shortfall), target_vs_actual_quantity → "Quantity Achievement %", territory_target_shortfall → "Territory Target Shortfall".
-11. UNIT RULE (critical): The monetary values in the VERIFIED KPI BLOCK are ALREADY IN CRORES. You MUST append " Cr" to them. Display them EXACTLY as given, formatted with a ₹ symbol and " Cr" (e.g. if the value is 995.04, write "₹995.04 Cr"). Do NOT divide or multiply them further.
+11. UNIT & VALUE FORMATTING RULE (CRITICAL):
+    - When a metric in the VERIFIED KPI BLOCK provides a pre-formatted `sales_value` (e.g. '₹24.8 K', '₹1.05 L', '₹6.25 Cr'), you MUST use that exact formatted string directly as its Sales Value (do NOT force it into Cr and do NOT add extra units).
+    - For standard metrics given in Crores (like Total Revenue, Category/Product Sales, Top Zones, Top Customers), format them with a ₹ symbol and " Cr" (e.g. if the value is 995.04, write "₹995.04 Cr"). Do NOT divide or multiply them further.
 12. VALUE TYPE & TIMEFRAME RULE (CRITICAL):
-    For EVERY metric that displays a monetary value (e.g. ₹... Cr), you MUST explicitly specify:
+    For EVERY metric that displays a monetary value (e.g. ₹... Cr, ₹... L, ₹... K), you MUST explicitly specify:
     (a) What type of value it is: always write "Sales Value" (or "Revenue", "Target Value", "Shortfall Value" as applicable).
     (b) The timeframe/duration: If it is not a 30-day window, explicitly mark it as "(Overall)" or "(Active Period)". If it is a 30-day metric, make sure "(Last 30 Days)" is clearly stated.
     Examples of format:
@@ -3541,11 +3610,11 @@ CRITICAL INSTRUCTIONS:
     - Top Territory (Overall): <Territory Name> (Sales Value: ₹<X> Cr)
     - Lowest Territory (Overall): <Territory Name> (Sales Value: ₹<X> Cr)
     - Top 5 Customers (Last 30 Days): <Customer 1> (Sales Value: ₹<X> Cr), ...
-    - Worst 5 Customers (Last 30 Days): <Customer 1> (Sales Value: ₹<X> Cr), ...
+    - Worst 5 Customers (Last 30 Days): <Customer 1> (Sales Value: <sales_value or exact amount>), ...
     - Top 5 Territories (Last 30 Days): <Territory 1> (Sales Value: ₹<X> Cr), ...
-    - Worst 5 Territories (Last 30 Days): <Territory 1> (Sales Value: ₹<X> Cr), ...
+    - Worst 5 Territories (Last 30 Days): <Territory 1> (Sales Value: <sales_value or exact amount>), ...
     - Top 5 Regions (Last 30 Days): <Region 1> (Sales Value: ₹<X> Cr), ...
-    - Worst 5 Regions (Last 30 Days): <Region 1> (Sales Value: ₹<X> Cr), ...
+    - Worst 5 Regions (Last 30 Days): <Region 1> (Sales Value: <sales_value or exact amount>), ...
 13. SUB-HEADER RULE FOR CATEGORY BREAKDOWNS:
     Do NOT output "Top 5 SKUs by Top 5 Categories" or "Account Group Breakdown (KTOKD)" as empty bullet list items (`- `).
     Instead, format them as distinct subheaders:
