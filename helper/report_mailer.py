@@ -589,12 +589,13 @@ def check_and_send_scheduled_reports():
             should_gen_pdf = (not parsed_rids) or any(rid in parsed_rids for rid in ('1', '2', '3', '4', '5', '6', '7', '8', '11'))
             if should_gen_pdf:
                 print(f"[Mailer] Generating PDF report for {schedule['email']}...", flush=True)
-                # 1. Generate PDF Report
+                # 1. Generate PDF Report (with executive summary embedded, no hyperlinks)
                 pdf_path = generate_pdf_report(
                     db_conn=conn, 
                     workspace_name=schedule['workspace_name'],
                     session_id=schedule['session_id'],
-                    report_ids=schedule['report_ids']
+                    report_ids=schedule['report_ids'],
+                    summary_text=summary_md
                 )
                 if not pdf_path:
                     print(f"[Mailer] Failed to generate PDF for {schedule['email']}", flush=True)

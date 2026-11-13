@@ -1,4 +1,5 @@
 import os
+import re
 import pymysql
 # pyrefly: ignore [missing-import]
 import matplotlib
@@ -115,6 +116,123 @@ def draw_data_table(pdf, title, data, col1_header, col2_header):
         alignments=['L', 'R']
     )
 
+def sanitize_pdf_text(text: str) -> str:
+    """Sanitizes text for FPDF latin-1 encoding, removes hyperlinks, and normalizes typography."""
+    if not text:
+        return ""
+    s = str(text)
+    # Strip markdown hyperlinks: [text](url) -> text (No hyperlinks in PDF)
+    s = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', s)
+    # Strip raw URLs
+    s = re.sub(r'https?://\S+', '', s)
+    # Normalize Currency and Typographic Unicode
+    s = s.replace('\u20b9', 'Rs. ').replace('₹', 'Rs. ')
+    s = s.replace('\u2013', '-').replace('\u2014', '-')
+    s = s.replace('\u2018', "'").replace('\u2019', "'")
+    s = s.replace('\u201c', '"').replace('\u201d', '"')
+    s = s.replace('\u2022', '-').replace('\u25cf', '-').replace('\u25aa', '-')
+    s = s.replace('\u2026', '...')
+    # Strip markdown bold/italic syntax
+    s = re.sub(r'\*\*([^*]+)\*\*', r'\1', s)
+    s = re.sub(r'\*([^*]+)\*', r'\1', s)
+    # Strip HTML tags if any
+    s = re.sub(r'<[^<]+?>', '', s)
+    return s.encode('latin-1', 'replace').decode('latin-1')
+
+
+def parse_summary_for_pdf(raw_text: str):
+    """Extracts executive narrative paragraph and key salient bullet points for clean PDF presentation."""
+    if not raw_text:
+        return "", []
+    clean = sanitize_pdf_text(raw_text)
+    lines = [line.strip() for line in clean.split('\n')]
+    
+    narrative_parts = []
+    bullet_items = []
+    found_narrative = False
+    collecting_narrative = False
+    
+    for line in lines:
+        if not line:
+            if collecting_narrative and narrative_parts:
+                collecting_narrative = False
+                found_narrative = True
+            continue
+        
+        # Heading lines (#, ##, ###)
+        if line.startswith('#'):
+            if collecting_narrative and narrative_parts:
+                collecting_narrative = False
+                found_narrative = True
+            continue
+            
+        # Bullet / numbered item lines
+        if line.startswith(('-', '*', '•')) or (len(line) > 2 and line[:2].isdigit() and line[2] == '.'):
+            clean_b = re.sub(r'^[-*•\d\.]+\s*', '', line).strip()
+            # Skip section group titles like '1. Overall Performance'
+            if re.match(r'^(Overall Performance|Revenue Trend|Product Performance|Customer Performance|Customer Churn|Geography Performance|Distribution Channel|Key Business Insights)', clean_b, re.I):
+                continue
+            if len(clean_b) > 5:
+                bullet_items.append(clean_b)
+            continue
+            
+        # Top narrative before bulleted sections
+        if not found_narrative:
+            narrative_parts.append(line)
+            collecting_narrative = True
+
+    narrative = ' '.join(narrative_parts).strip()
+    return narrative, bullet_items
+
+
+def draw_executive_summary_section(pdf, summary_text: str):
+    """Renders a concise, executive business summary directly onto the PDF without hyperlinks."""
+    if not summary_text:
+        return
+        
+    narrative, bullets = parse_summary_for_pdf(summary_text)
+    if not narrative and not bullets:
+        return
+        
+    pdf.set_font("Arial", 'B', 12)
+    pdf.set_text_color(30, 41, 59) # Slate-800
+    pdf.cell(0, 8, "EXECUTIVE BUSINESS SUMMARY", ln=True)
+    pdf.ln(1)
+    
+    # 1. Executive Narrative Callout Box
+    if narrative:
+        pdf.set_fill_color(248, 250, 252) # Slate-50 soft card
+        pdf.set_draw_color(203, 213, 225) # Slate-300 border
+        pdf.set_font("Arial", '', 8.5)
+        pdf.set_text_color(51, 65, 85)     # Slate-700
+        # Multi_cell draws clean border & fill
+        pdf.multi_cell(190, 4.2, narrative, border=1, fill=True)
+        pdf.ln(3)
+        
+    # 2. Key Business Highlights (Concise Bullets, Max 8 high impact items)
+    if bullets:
+        if pdf.get_y() > 245:
+            pdf.add_page()
+        pdf.set_font("Arial", 'B', 10)
+        pdf.set_text_color(30, 41, 59)
+        pdf.cell(0, 6, "Key Business Highlights & Insights", ln=True)
+        pdf.ln(1)
+        
+        pdf.set_font("Arial", '', 8.5)
+        pdf.set_text_color(51, 65, 85)
+        
+        # Display top salient bullets (up to 8 to keep it concise as requested)
+        salient_bullets = bullets[:8]
+        for b in salient_bullets:
+            if pdf.get_y() > 270:
+                pdf.add_page()
+            pdf.cell(4, 4.2, "-", ln=0)
+            pdf.multi_cell(186, 4.2, b)
+            pdf.ln(0.5)
+            
+        pdf.ln(4)
+
+
 def extract_response(r):
     if isinstance(r, tuple):
         res = r[0]
@@ -126,7 +244,7 @@ def extract_response(r):
         return res.get_json() or {}
     return {}
 
-def generate_pdf_report(db_conn, workspace_name, session_id, report_ids=None):
+def generate_pdf_report(db_conn, workspace_name, session_id, report_ids=None, summary_text=None):
     """
     Generates a PDF report dynamically based on selected report_ids.
     Returns the file path of the generated PDF.
@@ -156,6 +274,17 @@ def generate_pdf_report(db_conn, workspace_name, session_id, report_ids=None):
         ORDER BY id DESC LIMIT 1
     """, (session_id,))
     sync_row = cursor.fetchone()
+
+    # Dynamic Executive Summary fetch fallback if not directly passed
+    if not summary_text:
+        try:
+            from helper.report_mailer import _fetch_session_analysis_summary
+            summary_text = _fetch_session_analysis_summary(db_conn, session_id)
+            if summary_text:
+                print(f"[PDF Generation] Executive summary fetched for session {session_id} ({len(summary_text)} chars)", flush=True)
+        except Exception as se:
+            print(f"[PDF Generation] Note on summary fetch: {se}", flush=True)
+            summary_text = ""
 
     # Dynamic fallback structures
     kpis = [
@@ -644,11 +773,15 @@ def generate_pdf_report(db_conn, workspace_name, session_id, report_ids=None):
     pdf.set_font("Arial", '', 10)
     pdf.set_text_color(100, 116, 139) # Slate-500
     pdf.cell(0, 5, f"Created on: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}", ln=True, align='L')
-    pdf.ln(10)
+    pdf.ln(5)
+    
+    # 0. Executive Business Summary (Concise, Clean Latin-1, No Hyperlinks)
+    if summary_text:
+        draw_executive_summary_section(pdf, summary_text)
     
     # 1. Key Metrics (Report ID '11')
     if '11' in [str(r) for r in (report_ids or [])]:
-        if pdf.get_y() > 210:
+        if pdf.get_y() > 215:
             pdf.add_page()
         pdf.set_font("Arial", 'B', 12)
         pdf.set_text_color(30, 41, 59)
@@ -696,7 +829,7 @@ def generate_pdf_report(db_conn, workspace_name, session_id, report_ids=None):
 
     # 3. Sales Revenue (Cr) - Report ID '8'
     if '8' in report_ids and os.path.exists(img4_path):
-        if pdf.get_y() > 180: pdf.add_page()
+        if pdf.get_y() > 140: pdf.add_page()
         pdf.set_font("Arial", 'B', 12)
         pdf.set_text_color(30, 41, 59)
         pdf.cell(0, 10, f"SALES REVENUE (CR) - {current_year_num} YTD", ln=True)
