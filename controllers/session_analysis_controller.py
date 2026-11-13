@@ -94,10 +94,11 @@ def _load_cache(session_id: str, data_hash: str, conn) -> dict | None:
 
 
 
-def sync_session_chat_history_with_report(conn, session_id: str, report: str) -> None:
+def sync_session_chat_history_with_report(conn, session_id: str, report: str, user_id=None) -> None:
     """
     Ensure session_chat_history is 100% in sync with the latest analysis report
     for ALL users belonging to the given workspace (session_id).
+    Tracks the actual user_id who executed the analysis for auditing.
     """
     if not conn or not session_id or not report:
         return
@@ -107,6 +108,33 @@ def sync_session_chat_history_with_report(conn, session_id: str, report: str) ->
         today_str = datetime.now().strftime("%d_%m_%Y")
         default_q = f"default_{today_str}"
         ch_cur = conn.cursor(dictionary=True) if hasattr(conn, "cursor") else conn.cursor()
+
+        # Find proper user_id for audit: prefer caller, then assigned private user (visibility=2) / admin, then owner
+        target_user_id = user_id
+        if not target_user_id:
+            try:
+                ch_cur.execute("""
+                    SELECT u.id 
+                    FROM users u
+                    JOIN workspace_users wu ON u.id = wu.user_id
+                    JOIN workspaces w ON wu.workspace_id = w.id
+                    WHERE w.session_id = %s AND (u.visibility = 2 OR u.role_id IN (1, 3, 4))
+                    ORDER BY (u.visibility = 2) DESC, u.id ASC
+                    LIMIT 1
+                """, (session_id,))
+                p_row = ch_cur.fetchone()
+                if p_row and p_row.get("id"):
+                    target_user_id = p_row["id"]
+            except Exception:
+                pass
+
+        if not target_user_id:
+            ch_cur.execute("SELECT user_id FROM workspaces WHERE session_id = %s LIMIT 1", (session_id,))
+            w_row = ch_cur.fetchone()
+            if w_row and w_row.get("user_id"):
+                target_user_id = w_row["user_id"]
+            else:
+                target_user_id = 1
 
         # 1. Ensure exactly ONE master default analysis row exists for this session_id
         ch_cur.execute("""
@@ -119,28 +147,23 @@ def sync_session_chat_history_with_report(conn, session_id: str, report: str) ->
             keep_id = existing_rows[0]['id']
             ch_cur.execute("""
                 UPDATE session_chat_history
-                SET question = %s, answer = %s, created_at = NOW()
+                SET question = %s, answer = %s, user_id = %s, created_at = NOW()
                 WHERE id = %s
-            """, (default_q, str(report), keep_id))
+            """, (default_q, str(report), int(target_user_id), keep_id))
             if len(existing_rows) > 1:
                 del_ids = [r['id'] for r in existing_rows[1:]]
                 format_strings = ','.join(['%s'] * len(del_ids))
                 ch_cur.execute(f"DELETE FROM session_chat_history WHERE id IN ({format_strings})", tuple(del_ids))
                 print(f"[Analysis] Cleaned {len(del_ids)} duplicate summary rows for session {session_id}, kept id {keep_id}", flush=True)
         else:
-            owner_id = 1
-            ch_cur.execute("SELECT user_id FROM workspaces WHERE session_id = %s LIMIT 1", (session_id,))
-            w_row = ch_cur.fetchone()
-            if w_row and w_row.get("user_id"):
-                owner_id = w_row["user_id"]
             ch_cur.execute("""
                 INSERT INTO session_chat_history
                 (session_id, user_id, turn_index, visit_number, question, answer, mode)
                 VALUES (%s, %s, 0, 1, %s, %s, 'answer')
-            """, (session_id, int(owner_id), default_q, str(report)))
+            """, (session_id, int(target_user_id), default_q, str(report)))
 
         conn.commit()
-        print(f"[Analysis] session_chat_history synced with single master summary row for session {session_id}", flush=True)
+        print(f"[Analysis] session_chat_history synced with single master summary row for session {session_id} (audited user: {target_user_id})", flush=True)
     except Exception as ch_err:
         print(f"[Analysis] sync_session_chat_history error: {ch_err}", flush=True)
     finally:
@@ -3858,6 +3881,7 @@ RULES:
 def session_analysis_controller(get_connection_func):
     data       = request.json or {}
     session_id = (data.get("session_id") or "").strip()
+    caller_user_id = data.get("user_id")
     topics     = [t.strip() for t in (data.get("topics")    or []) if str(t).strip()]
     databases  = [d.strip() for d in (data.get("databases") or []) if str(d).strip()]
 
@@ -3996,7 +4020,7 @@ def session_analysis_controller(get_connection_func):
 
         # 6. Save to cache and sync session_chat_history for all workspace users
         _save_cache(session_id, data_hash, report, graph_url, topics, databases, conn)
-        sync_session_chat_history_with_report(conn, session_id, report)
+        sync_session_chat_history_with_report(conn, session_id, report, user_id=caller_user_id)
 
         # 7. Step 4: Store in Vector DB (ChromaDB) - Kept separate if skip_vector is requested
         skip_vector = data.get("skip_vector", False) or data.get("is_scheduled", False)

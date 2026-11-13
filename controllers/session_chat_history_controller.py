@@ -838,13 +838,14 @@ def get_chat_history(get_connection_func):
                     import datetime
                     created_date = datetime.datetime.now().strftime("%d_%m_%Y")
                 session_name = f"default_{created_date}"    
+            is_default_session = (v_num == 1) or (session_name and session_name.strip().lower().startswith("default"))
             querySessions.append({
                 # "sessionId": session_id,                        # e.g., "f9c29d15..."
                 "querySessionName": session_name,               # Use first question as name
                 "querySessionId": f"session_visit_{v_num}",     # e.g., "session_visit_1"
                 "querySessionHistory": history,                  # The list of chats
-                "userId": grouped_users[v_num]["userId"],
-                "userName": grouped_users[v_num]["userName"],
+                "userId": None if is_default_session else grouped_users[v_num]["userId"],
+                "userName": None if is_default_session else grouped_users[v_num]["userName"],
                 "createdAt": history[-1].get("created_at") if history else None
             })
 
