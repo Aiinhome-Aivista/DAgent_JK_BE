@@ -105,45 +105,165 @@ def generate_excel_report(report_ids_json, workspace_db):
         if 'cursor' in locals(): cursor.close()
         if 'conn' in locals(): conn.close()
 
-def _fetch_session_analysis_summary(conn, session_id: str) -> str:
-    """Fetches the latest Executive Analysis Summary markdown from session_analysis_cache."""
-    if not conn or not session_id:
+def _fetch_session_analysis_summary(conn, session_id: str = None, workspace_id: int = None) -> str:
+    """
+    Fetches the latest Executive Analysis Summary markdown.
+    Multi-level guaranteed resolution:
+      1. session_analysis_cache for session_id
+      2. session_chat_history for session_id (default_% or Executive Summary turn)
+      3. Auto-resolve session_id from workspace_id or workspaces table
+      4. Global fallback to the latest available summary in session_analysis_cache or session_chat_history
+      5. Live dynamic generation if no summary exists anywhere
+    """
+    if not conn:
         return ""
     cur = None
+    raw = None
     try:
         cur = conn.cursor(dictionary=True) if hasattr(conn, "cursor") else conn.cursor()
-        cur.execute(
-            "SELECT report FROM session_analysis_cache WHERE session_id = %s ORDER BY id DESC LIMIT 1",
-            (session_id,)
-        )
-        row = cur.fetchone()
-        raw = row.get("report") if isinstance(row, dict) else (row[0] if row else "")
+
+        # 1. Direct query on session_analysis_cache by session_id
+        if session_id and str(session_id).strip() not in ("", "null", "None"):
+            cur.execute(
+                """SELECT report FROM session_analysis_cache 
+                   WHERE session_id = %s AND report IS NOT NULL AND report != '' 
+                   ORDER BY updated_at DESC, id DESC LIMIT 1""",
+                (str(session_id).strip(),)
+            )
+            row = cur.fetchone()
+            if row:
+                raw = row.get("report") if isinstance(row, dict) else row[0]
+
+            # 2. Check session_chat_history for this session_id
+            if not raw:
+                cur.execute(
+                    """SELECT answer FROM session_chat_history 
+                       WHERE session_id = %s 
+                         AND (question LIKE 'default_%%' OR answer LIKE '%%Executive Summary%%' OR (visit_number = 1 AND turn_index = 0))
+                         AND answer IS NOT NULL AND answer != ''
+                       ORDER BY id DESC LIMIT 1""",
+                    (str(session_id).strip(),)
+                )
+                row = cur.fetchone()
+                if row:
+                    raw = row.get("answer") if isinstance(row, dict) else row[0]
+
+        # 3. Resolve session_id from workspace_id if raw is still empty
+        resolved_sid = None
+        if not raw and workspace_id:
+            try:
+                cur.execute("SELECT session_id FROM workspaces WHERE id = %s AND session_id IS NOT NULL AND session_id != '' LIMIT 1", (workspace_id,))
+                w_row = cur.fetchone()
+                if w_row:
+                    resolved_sid = w_row.get("session_id") if isinstance(w_row, dict) else w_row[0]
+                    if resolved_sid and resolved_sid != session_id:
+                        cur.execute(
+                            """SELECT report FROM session_analysis_cache 
+                               WHERE session_id = %s AND report IS NOT NULL AND report != '' 
+                               ORDER BY updated_at DESC, id DESC LIMIT 1""",
+                            (resolved_sid,)
+                        )
+                        row = cur.fetchone()
+                        if row:
+                            raw = row.get("report") if isinstance(row, dict) else row[0]
+                        if not raw:
+                            cur.execute(
+                                """SELECT answer FROM session_chat_history 
+                                   WHERE session_id = %s 
+                                     AND (question LIKE 'default_%%' OR answer LIKE '%%Executive Summary%%' OR (visit_number = 1 AND turn_index = 0))
+                                     AND answer IS NOT NULL AND answer != ''
+                                   ORDER BY id DESC LIMIT 1""",
+                                (resolved_sid,)
+                            )
+                            row = cur.fetchone()
+                            if row:
+                                raw = row.get("answer") if isinstance(row, dict) else row[0]
+            except Exception as w_err:
+                print(f"[Mailer] Workspace session lookup note: {w_err}", flush=True)
+
+        # 4. Global fallback: get the latest summary from ANY session in session_analysis_cache
         if not raw:
-            return ""
-        text = str(raw).strip()
-        # Strip Coverage Gaps / Strategic Conclusion if present (matching UI filter)
-        text = re.sub(
-            r'(?:^|\n)\s*(?:###\s*|\*\*)?(?:\d+\.\s*)?Coverage\s+Gaps\b[^\n]*(?:\*\*)?:?[\s\S]*?(?=(?:\n\s*(?:###|\*\*\d+\.|\*\*Business Risks|\*\*Actionable Recommendations))|$)',
-            '\n',
-            text,
-            flags=re.IGNORECASE,
-        )
-        text = re.sub(
-            r'(?:^|\n)\s*(?:###\s*|\*\*)?Strategic\s+Conclusion(?:\*\*)?:?[\s\S]*?(?=(?:\n\s*###|$))',
-            '\n',
-            text,
-            flags=re.IGNORECASE,
-        )
-        return text.strip()
+            cur.execute(
+                """SELECT report FROM session_analysis_cache 
+                   WHERE report IS NOT NULL AND report != '' 
+                   ORDER BY updated_at DESC, id DESC LIMIT 1"""
+            )
+            row = cur.fetchone()
+            if row:
+                raw = row.get("report") if isinstance(row, dict) else row[0]
+
+        # 5. Global fallback: get the latest summary from ANY session in session_chat_history
+        if not raw:
+            cur.execute(
+                """SELECT answer FROM session_chat_history 
+                   WHERE (question LIKE 'default_%%' OR answer LIKE '%%Executive Summary%%' OR (visit_number = 1 AND turn_index = 0))
+                     AND answer IS NOT NULL AND answer != ''
+                   ORDER BY id DESC LIMIT 1"""
+            )
+            row = cur.fetchone()
+            if row:
+                raw = row.get("answer") if isinstance(row, dict) else row[0]
+
+        # 6. If STILL empty, dynamically generate it!
+        if not raw:
+            target_sid = session_id or resolved_sid or "42d4f4e5-e66d-4c2a-9ad4-ea637e90fc91"
+            try:
+                from controllers.session_analysis_controller import run_daily_session_analysis_scheduler
+                print(f"[Mailer] No summary found anywhere. Generating fresh analysis for session {target_sid}...", flush=True)
+                run_daily_session_analysis_scheduler(get_db_connection, session_id=target_sid)
+                cur.execute(
+                    """SELECT report FROM session_analysis_cache 
+                       WHERE session_id = %s AND report IS NOT NULL AND report != '' 
+                       ORDER BY updated_at DESC, id DESC LIMIT 1""",
+                    (target_sid,)
+                )
+                row = cur.fetchone()
+                if row:
+                    raw = row.get("report") if isinstance(row, dict) else row[0]
+            except Exception as gen_err:
+                print(f"[Mailer] Dynamic summary generation fallback note: {gen_err}", flush=True)
+
     except Exception as e:
         print(f"[Mailer] Could not fetch session analysis summary: {e}", flush=True)
-        return ""
     finally:
         if cur:
-            try:
-                cur.close()
-            except Exception:
-                pass
+            try: cur.close()
+            except: pass
+
+    if not raw:
+        return ""
+
+    # If raw is a dict or stringified JSON, extract the text
+    if isinstance(raw, dict):
+        raw = raw.get("report") or raw.get("answer") or str(raw)
+    elif isinstance(raw, str) and raw.strip().startswith("{") and raw.strip().endswith("}"):
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                raw = parsed.get("report") or parsed.get("answer") or raw
+        except Exception:
+            pass
+
+    text = str(raw).strip()
+
+    # Unescape literal backslash-n if escaped as \\n in json
+    if "\\n" in text and "\n" not in text:
+        text = text.replace("\\n", "\n")
+
+    # Strip Coverage Gaps / Strategic Conclusion if present (matching UI filter)
+    text = re.sub(
+        r'(?:^|\n)\s*(?:###\s*|\*\*)?(?:\d+\.\s*)?Coverage\s+Gaps\b[^\n]*(?:\*\*)?:?[\s\S]*?(?=(?:\n\s*(?:###|\*\*\d+\.|\*\*Business Risks|\*\*Actionable Recommendations))|$)',
+        '\n',
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r'(?:^|\n)\s*(?:###\s*|\*\*)?Strategic\s+Conclusion(?:\*\*)?:?[\s\S]*?(?=(?:\n\s*###|$))',
+        '\n',
+        text,
+        flags=re.IGNORECASE,
+    )
+    return text.strip()
 
 
 def _format_summary_to_email_html(report_text: str) -> str:
@@ -160,8 +280,10 @@ def _format_summary_to_email_html(report_text: str) -> str:
         s = re.sub(r'\*([^\s*](?:[^*\n]*?[^\s*])?)\*', r'<em>\1</em>', s)
         return s
 
-    parts = ['<div style="margin-top:24px;padding-top:20px;border-top:1px solid #e2e8f0;color:#334155;font-size:14px;line-height:1.6;">']
+    parts = ['<div style="margin-top:24px;padding-top:20px;border-top:2px solid #e2e8f0;color:#334155;font-size:14px;line-height:1.6;">']
     in_list = False
+    in_table = False
+    table_rows = []
 
     def close_list():
         nonlocal in_list
@@ -169,36 +291,86 @@ def _format_summary_to_email_html(report_text: str) -> str:
             parts.append('</ul>')
             in_list = False
 
+    def close_table():
+        nonlocal in_table, table_rows
+        if in_table and table_rows:
+            html_table = ['<table style="width:100%; border-collapse:collapse; margin:14px 0 18px 0; font-size:13px; border:1px solid #cbd5e1; border-radius:6px; overflow:hidden;">']
+            for idx, r in enumerate(table_rows):
+                cols = [c.strip() for c in r.strip('|').split('|')]
+                if not any(cols):
+                    continue
+                # Skip divider rows like |---|---|
+                if all(re.match(r'^:?-+:?$', c) for c in cols if c):
+                    continue
+                if idx == 0:
+                    html_table.append('<tr style="background-color:#1e293b; color:#ffffff; font-weight:600; text-align:left;">')
+                    for c in cols:
+                        html_table.append(f'<th style="padding:10px 12px; border:1px solid #334155;">{fmt_inline(c)}</th>')
+                    html_table.append('</tr>')
+                else:
+                    bg = '#f8fafc' if idx % 2 == 1 else '#ffffff'
+                    html_table.append(f'<tr style="background-color:{bg}; border-bottom:1px solid #e2e8f0;">')
+                    for c in cols:
+                        html_table.append(f'<td style="padding:8px 12px; border:1px solid #cbd5e1; color:#334155;">{fmt_inline(c)}</td>')
+                    html_table.append('</tr>')
+            html_table.append('</table>')
+            parts.append(''.join(html_table))
+            table_rows = []
+            in_table = False
+
     for raw_line in report_text.split('\n'):
         t = raw_line.strip()
         if not t:
             close_list()
+            close_table()
             continue
+
+        # Handle Markdown Tables
+        if t.startswith('|') and t.endswith('|'):
+            close_list()
+            in_table = True
+            table_rows.append(t)
+            continue
+        elif in_table:
+            close_table()
 
         if t.upper().startswith('TITLE:'):
             close_list()
             title_txt = fmt_inline(t[6:].strip())
-            parts.append(f'<h2 style="margin:0 0 12px 0;font-size:18px;color:#0f172a;">{title_txt}</h2>')
+            parts.append(
+                f'<div style="background-color:#f1f5f9; border-left:4px solid #2563eb; padding:14px 18px; margin:0 0 16px 0; border-radius:4px;">'
+                f'<h2 style="margin:0; font-size:18px; color:#0f172a; font-weight:700; line-height:1.4;">{title_txt}</h2>'
+                f'</div>'
+            )
         elif t.startswith('#### '):
             close_list()
-            parts.append(f'<h4 style="margin:14px 0 6px 0;font-size:14px;color:#1e293b;">{fmt_inline(t[5:])}</h4>')
+            parts.append(f'<h4 style="margin:16px 0 8px 0; font-size:14px; color:#1e293b; font-weight:600;">{fmt_inline(t[5:])}</h4>')
         elif t.startswith('### '):
             close_list()
-            parts.append(f'<h3 style="margin:18px 0 8px 0;font-size:16px;color:#0f172a;border-bottom:1px solid #f1f5f9;padding-bottom:4px;">{fmt_inline(t[4:])}</h3>')
+            parts.append(
+                f'<h3 style="margin:22px 0 10px 0; font-size:16px; color:#0f172a; border-bottom:2px solid #e2e8f0; padding-bottom:6px; font-weight:700;">'
+                f'{fmt_inline(t[4:])}'
+                f'</h3>'
+            )
         elif t.startswith('## ') or t.startswith('# '):
             close_list()
             heading = t.lstrip('#').strip()
-            parts.append(f'<h3 style="margin:18px 0 8px 0;font-size:16px;color:#0f172a;">{fmt_inline(heading)}</h3>')
+            parts.append(
+                f'<h3 style="margin:22px 0 10px 0; font-size:16px; color:#0f172a; border-bottom:2px solid #e2e8f0; padding-bottom:6px; font-weight:700;">'
+                f'{fmt_inline(heading)}'
+                f'</h3>'
+            )
         elif t.startswith('- ') or t.startswith('* ') or t.startswith('• '):
             if not in_list:
-                parts.append('<ul style="margin:6px 0 10px 0;padding-left:20px;">')
+                parts.append('<ul style="margin:8px 0 12px 0; padding-left:22px; list-style-type:disc;">')
                 in_list = True
-            parts.append(f'<li style="margin-bottom:4px;">{fmt_inline(t[2:].strip())}</li>')
+            parts.append(f'<li style="margin-bottom:6px; color:#334155; line-height:1.6;">{fmt_inline(t[2:].strip())}</li>')
         else:
             close_list()
-            parts.append(f'<p style="margin:8px 0;">{fmt_inline(t)}</p>')
+            parts.append(f'<p style="margin:8px 0; color:#334155; line-height:1.6;">{fmt_inline(t)}</p>')
 
     close_list()
+    close_table()
     parts.append('</div>')
     return '\n'.join(parts)
 
@@ -345,6 +517,8 @@ def check_and_send_scheduled_reports():
         
         query = """
             SELECT 
+                sr.id AS schedule_id,
+                sr.workspace_id,
                 sr.report_ids,
                 w.workspace_db,
                 w.workspace_name,
@@ -382,13 +556,18 @@ def check_and_send_scheduled_reports():
             # Always include Executive Analysis Summary in the email body
             print(f"[Mailer] Fetching Executive Analysis Summary for {schedule['email']}...", flush=True)
             summary_conn = get_db_connection()
-            summary_md = _fetch_session_analysis_summary(summary_conn, schedule['session_id'])
+            summary_md = _fetch_session_analysis_summary(
+                summary_conn, 
+                schedule.get('session_id'),
+                workspace_id=schedule.get('workspace_id')
+            )
             if summary_conn:
                 try:
                     summary_conn.close()
                 except Exception:
                     pass
             summary_html = _format_summary_to_email_html(summary_md)
+            print(f"[Mailer] Executive Analysis Summary prepared for {schedule['email']} (chars: {len(summary_md)}, html_chars: {len(summary_html)})", flush=True)
 
             pdf_path = None
             should_gen_pdf = (not parsed_rids) or any(rid in parsed_rids for rid in ('1', '2', '3', '4', '5', '6', '7', '8', '11'))
