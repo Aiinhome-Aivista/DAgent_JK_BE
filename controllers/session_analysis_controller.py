@@ -2627,49 +2627,26 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
         """)
 
         run("sales_decline_30d_summary", f"""
-            WITH max_d AS (
-                SELECT MAX("invoice_date") AS max_dt FROM "{schema}"."{curr_view or 'ZPVF_SD_CurrentSales_01_TR'}" WHERE "invoice_date" IS NOT NULL
-            ),
-            sales_source_60d AS (
-                SELECT "dealer_code", "invoice_date", "invoice_value", "distribution_channel", "indicator_cancel"
-                FROM "{schema}"."{curr_view or 'ZPVF_SD_CurrentSales_01_TR'}"
-                WHERE "invoice_date" >= '{year_start}'
-                UNION ALL
-                SELECT "dealer_code", "invoice_date", "invoice_value", "distribution_channel", "indicator_cancel"
-                FROM "{schema}"."{hist_view or 'ZPVF_SD_SalesHistory_01_TR'}"
-                WHERE "invoice_date" >= '{year_start}'
-            ),
-            cust_30d AS (
+            WITH customer_30d AS (
                 SELECT 
                     s."dealer_code",
-                    SUM(CASE WHEN s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -29) AND md.max_dt THEN COALESCE(s."invoice_value", 0) ELSE 0 END) AS current_30d_sales,
-                    SUM(CASE WHEN s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -59) AND ADD_DAYS(md.max_dt, -30) THEN COALESCE(s."invoice_value", 0) ELSE 0 END) AS prior_30d_sales
-                FROM sales_source_60d s
-                CROSS JOIN max_d md
-                WHERE s."invoice_date" IS NOT NULL 
-                  AND s."distribution_channel" = '10'
-                  AND (s."indicator_cancel" IS NULL OR s."indicator_cancel" NOT IN ('X', 'Y', '1'))
-                  AND s."invoice_date" >= ADD_DAYS(md.max_dt, -59)
+                    SUM(CASE WHEN s."invoice_date" BETWEEN '{dt_30d_str}' AND '{max_dt_str}' THEN COALESCE(s."invoice_value", 0) ELSE 0 END) AS curr_rev,
+                    SUM(CASE WHEN s."invoice_date" BETWEEN '{dt_60d_str}' AND '{dt_31d_prev_str}' THEN COALESCE(s."invoice_value", 0) ELSE 0 END) AS prev_rev
+                FROM {sales_source_60d} s
+                {sales_where}
+                AND s."invoice_date" BETWEEN '{dt_60d_str}' AND '{max_dt_str}'
                 GROUP BY s."dealer_code"
-            ),
-            decline_calc AS (
-                SELECT 
-                    c.dealer_code,
-                    c.current_30d_sales,
-                    c.prior_30d_sales,
-                    ROUND(((c.prior_30d_sales - c.current_30d_sales) / NULLIF(c.prior_30d_sales, 0)) * 100.0, 2) AS decline_pct
-                FROM cust_30d c
-                WHERE c.prior_30d_sales > 0
+                HAVING SUM(CASE WHEN s."invoice_date" BETWEEN '{dt_60d_str}' AND '{dt_31d_prev_str}' THEN COALESCE(s."invoice_value", 0) ELSE 0 END) > 0
             ),
             filtered_declines AS (
                 SELECT 
-                    d.dealer_code,
-                    d.current_30d_sales,
-                    d.prior_30d_sales,
-                    d.decline_pct
-                FROM decline_calc d
+                    c."dealer_code",
+                    c.curr_rev,
+                    c.prev_rev,
+                    ROUND(((c.prev_rev - c.curr_rev) * 1.0 / NULLIF(c.prev_rev, 0)) * 100.0, 2) AS decline_pct
+                FROM customer_30d c
                 LEFT JOIN "{schema}"."{cust_view or 'ZIVF_CustomerMaster_01_MD'}" cm 
-                    ON (d.dealer_code = cm."KUNNR" OR LTRIM(d.dealer_code, '0') = LTRIM(cm."KUNNR", '0'))
+                    ON (c."dealer_code" = cm."KUNNR" OR LTRIM(c."dealer_code", '0') = LTRIM(cm."KUNNR", '0'))
                 WHERE (cm."KLABC" IS NULL OR cm."KLABC" <> 'X')
             )
             SELECT 
@@ -2679,50 +2656,35 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
         """)
 
         run("worst_customers_steepest_decline_30d", f"""
-            WITH max_d AS (
-                SELECT MAX("invoice_date") AS max_dt FROM "{schema}"."{curr_view or 'ZPVF_SD_CurrentSales_01_TR'}" WHERE "invoice_date" IS NOT NULL
-            ),
-            sales_source_60d AS (
-                SELECT "dealer_code", "invoice_date", "invoice_value", "distribution_channel", "indicator_cancel"
-                FROM "{schema}"."{curr_view or 'ZPVF_SD_CurrentSales_01_TR'}"
-                WHERE "invoice_date" >= '{year_start}'
-                UNION ALL
-                SELECT "dealer_code", "invoice_date", "invoice_value", "distribution_channel", "indicator_cancel"
-                FROM "{schema}"."{hist_view or 'ZPVF_SD_SalesHistory_01_TR'}"
-                WHERE "invoice_date" >= '{year_start}'
-            ),
-            cust_30d AS (
+            WITH customer_30d AS (
                 SELECT 
                     s."dealer_code",
-                    SUM(CASE WHEN s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -29) AND md.max_dt THEN COALESCE(s."invoice_value", 0) ELSE 0 END) AS current_30d_sales,
-                    SUM(CASE WHEN s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -59) AND ADD_DAYS(md.max_dt, -30) THEN COALESCE(s."invoice_value", 0) ELSE 0 END) AS prior_30d_sales
-                FROM sales_source_60d s
-                CROSS JOIN max_d md
-                WHERE s."invoice_date" IS NOT NULL 
-                  AND s."distribution_channel" = '10'
-                  AND (s."indicator_cancel" IS NULL OR s."indicator_cancel" NOT IN ('X', 'Y', '1'))
-                  AND s."invoice_date" >= ADD_DAYS(md.max_dt, -59)
+                    SUM(CASE WHEN s."invoice_date" BETWEEN '{dt_30d_str}' AND '{max_dt_str}' THEN COALESCE(s."invoice_value", 0) ELSE 0 END) AS curr_rev,
+                    SUM(CASE WHEN s."invoice_date" BETWEEN '{dt_60d_str}' AND '{dt_31d_prev_str}' THEN COALESCE(s."invoice_value", 0) ELSE 0 END) AS prev_rev
+                FROM {sales_source_60d} s
+                {sales_where}
+                AND s."invoice_date" BETWEEN '{dt_60d_str}' AND '{max_dt_str}'
                 GROUP BY s."dealer_code"
+                HAVING SUM(CASE WHEN s."invoice_date" BETWEEN '{dt_60d_str}' AND '{dt_31d_prev_str}' THEN COALESCE(s."invoice_value", 0) ELSE 0 END) > 100000
             ),
-            decline_calc AS (
+            decline_ranked AS (
                 SELECT 
-                    c.dealer_code,
-                    c.current_30d_sales,
-                    c.prior_30d_sales,
-                    ROUND(((c.prior_30d_sales - c.current_30d_sales) / NULLIF(c.prior_30d_sales, 0)) * 100.0, 2) AS decline_pct
-                FROM cust_30d c
-                WHERE c.prior_30d_sales > 0
+                    COALESCE(NULLIF(TRIM(cm."NAME1"), ''), NULLIF(TRIM(cm."BNAME"), ''), TRIM(c."dealer_code")) AS customer_name,
+                    ROUND(c.curr_rev / 10000000.0, 2) AS current_30d_rev_cr,
+                    ROUND(c.prev_rev / 10000000.0, 2) AS prev_30d_rev_cr,
+                    ROUND((c.curr_rev - c.prev_rev) * 100.0 / NULLIF(c.prev_rev, 0), 2) AS decline_pct
+                FROM customer_30d c
+                LEFT JOIN "{schema}"."{cust_view or 'ZIVF_CustomerMaster_01_MD'}" cm 
+                    ON (c."dealer_code" = cm."KUNNR" OR LTRIM(c."dealer_code", '0') = LTRIM(cm."KUNNR", '0'))
+                WHERE (cm."KLABC" IS NULL OR cm."KLABC" <> 'X')
             )
             SELECT 
-                COALESCE(NULLIF(TRIM(cm."NAME1"), ''), NULLIF(TRIM(cm."BNAME"), ''), d.dealer_code) AS customer_name,
-                ROUND(d.current_30d_sales / 10000000.0, 2) AS current_30d_rev_cr,
-                ROUND(d.prior_30d_sales / 10000000.0, 2) AS prev_30d_rev_cr,
-                -d.decline_pct AS decline_pct
-            FROM decline_calc d
-            LEFT JOIN "{schema}"."{cust_view or 'ZIVF_CustomerMaster_01_MD'}" cm 
-                ON (d.dealer_code = cm."KUNNR" OR LTRIM(d.dealer_code, '0') = LTRIM(cm."KUNNR", '0'))
-            WHERE (cm."KLABC" IS NULL OR cm."KLABC" <> 'X')
-            ORDER BY d.decline_pct DESC
+                customer_name,
+                current_30d_rev_cr,
+                prev_30d_rev_cr,
+                decline_pct
+            FROM decline_ranked
+            ORDER BY decline_pct ASC
             LIMIT 5
         """)
 
