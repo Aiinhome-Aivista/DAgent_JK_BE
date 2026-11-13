@@ -1419,21 +1419,30 @@ def _compute_core_kpis(cursor) -> dict:
                 GROUP BY sd.{col_cust}
                 HAVING SUM(CASE WHEN sd.{col_date} BETWEEN DATE_SUB(md.max_dt, INTERVAL 59 DAY) AND DATE_SUB(md.max_dt, INTERVAL 30 DAY) THEN sd.{col_revenue} ELSE 0 END) > 0
             ),
-            filtered_cust AS (
+            decline_calc AS (
                 SELECT 
                     c.cust_code,
                     c.curr_rev,
-                    c.prev_rev
+                    c.prev_rev,
+                    ROUND(((c.prev_rev - c.curr_rev) / NULLIF(c.prev_rev, 0)) * 100.0, 2) AS decline_pct
                 FROM customer_30d c
+                WHERE c.prev_rev > 0
+            ),
+            filtered_declines AS (
+                SELECT 
+                    d.cust_code,
+                    d.curr_rev,
+                    d.prev_rev,
+                    d.decline_pct
+                FROM decline_calc d
                 LEFT JOIN `{cust_tbl}` cm 
-                    ON (c.cust_code = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(c.cust_code AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))
+                    ON (d.cust_code = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(d.cust_code AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))
                 WHERE 1=1 {cust_filter_klabc}
-                GROUP BY c.cust_code, c.curr_rev, c.prev_rev
             )
             SELECT 
-                COUNT(CASE WHEN (prev_rev - curr_rev) / prev_rev > 0.05 THEN 1 END) AS accounts_with_decline_gt_5pct,
-                COUNT(CASE WHEN (prev_rev - curr_rev) / prev_rev > 0.10 THEN 1 END) AS accounts_with_decline_gt_10pct
-            FROM filtered_cust
+                COUNT(CASE WHEN decline_pct > 5.0 THEN 1 END) AS accounts_with_decline_gt_5pct,
+                COUNT(CASE WHEN decline_pct > 10.0 THEN 1 END) AS accounts_with_decline_gt_10pct
+            FROM filtered_declines
         """, required_tables=[sales_tbl, cust_tbl])
 
         run("worst_customers_steepest_decline_30d", f"""
@@ -1469,22 +1478,19 @@ def _compute_core_kpis(cursor) -> dict:
                 CROSS JOIN (SELECT MAX(sd_max.{col_date}) AS max_dt FROM `{sales_tbl}` sd_max) md
                 {sales_where}
                 GROUP BY sd.{col_cust}
-            ),
-            filtered_cust AS (
-                SELECT 
-                    cb.cust_code,
-                    cb.curr_rev,
-                    cb.total_historical_rev
+                HAVING SUM(CASE WHEN sd.{col_date} BETWEEN DATE_SUB(md.max_dt, INTERVAL 29 DAY) AND md.max_dt THEN sd.{col_revenue} ELSE 0 END) = 0
+                   AND SUM(sd.{col_revenue}) >= 200000
+            )
+            SELECT 
+                COUNT(*) AS high_risk_inactive_accounts_2lakh_plus,
+                COUNT(*) AS total_zero_billing_accounts
+            FROM (
+                SELECT cb.cust_code
                 FROM cust_billing cb
                 LEFT JOIN `{cust_tbl}` cm 
                     ON (cb.cust_code = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(cb.cust_code AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))
                 WHERE 1=1 {cust_filter_klabc}
-                GROUP BY cb.cust_code, cb.curr_rev, cb.total_historical_rev
-            )
-            SELECT 
-                COUNT(CASE WHEN curr_rev = 0 AND total_historical_rev >= 200000 THEN 1 END) AS high_risk_inactive_accounts_2lakh_plus,
-                COUNT(CASE WHEN curr_rev = 0 AND total_historical_rev > 0 THEN 1 END) AS total_zero_billing_accounts
-            FROM filtered_cust
+            ) filtered_cust
         """, required_tables=[sales_tbl, cust_tbl])
 
         run("zero_units_30d_accounts", f"""
@@ -1497,21 +1503,18 @@ def _compute_core_kpis(cursor) -> dict:
                 CROSS JOIN (SELECT MAX(sd_max.{col_date}) AS max_dt FROM `{sales_tbl}` sd_max) md
                 {sales_where}
                 GROUP BY sd.{col_cust}
-            ),
-            filtered_units AS (
-                SELECT 
-                    cu.cust_code,
-                    cu.curr_units,
-                    cu.total_historical_units
+                HAVING SUM(CASE WHEN sd.{col_date} BETWEEN DATE_SUB(md.max_dt, INTERVAL 29 DAY) AND md.max_dt THEN sd.{col_qty} ELSE 0 END) = 0
+                   AND SUM(sd.{col_qty}) > 0
+            )
+            SELECT 
+                COUNT(*) AS zero_unit_active_counters
+            FROM (
+                SELECT cu.cust_code
                 FROM cust_units cu
                 LEFT JOIN `{cust_tbl}` cm 
                     ON (cu.cust_code = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(cu.cust_code AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))
                 WHERE 1=1 {cust_filter_klabc}
-                GROUP BY cu.cust_code, cu.curr_units, cu.total_historical_units
-            )
-            SELECT 
-                COUNT(CASE WHEN curr_units = 0 AND total_historical_units > 0 THEN 1 END) AS zero_unit_active_counters
-            FROM filtered_units
+            ) filtered_units
         """, required_tables=[sales_tbl, cust_tbl])
 
 
@@ -2624,108 +2627,192 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
         """)
 
         run("sales_decline_30d_summary", f"""
-            WITH customer_30d AS (
+            WITH max_d AS (
+                SELECT MAX("invoice_date") AS max_dt FROM "{schema}"."{curr_view or 'ZPVF_SD_CurrentSales_01_TR'}" WHERE "invoice_date" IS NOT NULL
+            ),
+            sales_source_60d AS (
+                SELECT "dealer_code", "invoice_date", "invoice_value", "distribution_channel", "indicator_cancel"
+                FROM "{schema}"."{curr_view or 'ZPVF_SD_CurrentSales_01_TR'}"
+                WHERE "invoice_date" >= '{year_start}'
+                UNION ALL
+                SELECT "dealer_code", "invoice_date", "invoice_value", "distribution_channel", "indicator_cancel"
+                FROM "{schema}"."{hist_view or 'ZPVF_SD_SalesHistory_01_TR'}"
+                WHERE "invoice_date" >= '{year_start}'
+            ),
+            cust_30d AS (
                 SELECT 
                     s."dealer_code",
-                    SUM(CASE WHEN s."invoice_date" BETWEEN '{dt_30d_str}' AND '{max_dt_str}' THEN COALESCE(s."invoice_value", 0) ELSE 0 END) AS curr_rev,
-                    SUM(CASE WHEN s."invoice_date" BETWEEN '{dt_60d_str}' AND '{dt_31d_prev_str}' THEN COALESCE(s."invoice_value", 0) ELSE 0 END) AS prev_rev
-                FROM {sales_source_60d} s
-                {sales_where}
-                AND s."invoice_date" BETWEEN '{dt_60d_str}' AND '{max_dt_str}'
+                    SUM(CASE WHEN s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -29) AND md.max_dt THEN COALESCE(s."invoice_value", 0) ELSE 0 END) AS current_30d_sales,
+                    SUM(CASE WHEN s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -59) AND ADD_DAYS(md.max_dt, -30) THEN COALESCE(s."invoice_value", 0) ELSE 0 END) AS prior_30d_sales
+                FROM sales_source_60d s
+                CROSS JOIN max_d md
+                WHERE s."invoice_date" IS NOT NULL 
+                  AND s."distribution_channel" = '10'
+                  AND (s."indicator_cancel" IS NULL OR s."indicator_cancel" NOT IN ('X', 'Y', '1'))
+                  AND s."invoice_date" >= ADD_DAYS(md.max_dt, -59)
                 GROUP BY s."dealer_code"
-                HAVING SUM(CASE WHEN s."invoice_date" BETWEEN '{dt_60d_str}' AND '{dt_31d_prev_str}' THEN COALESCE(s."invoice_value", 0) ELSE 0 END) > 0
             ),
-            filtered_cust AS (
+            decline_calc AS (
                 SELECT 
-                    c."dealer_code",
-                    c.curr_rev,
-                    c.prev_rev
-                FROM customer_30d c
-                LEFT JOIN "{schema}"."{cust_view}" cm 
-                    ON (c."dealer_code" = cm."KUNNR" OR LTRIM(c."dealer_code", '0') = LTRIM(cm."KUNNR", '0'))
+                    c.dealer_code,
+                    c.current_30d_sales,
+                    c.prior_30d_sales,
+                    ROUND(((c.prior_30d_sales - c.current_30d_sales) / NULLIF(c.prior_30d_sales, 0)) * 100.0, 2) AS decline_pct
+                FROM cust_30d c
+                WHERE c.prior_30d_sales > 0
+            ),
+            filtered_declines AS (
+                SELECT 
+                    d.dealer_code,
+                    d.current_30d_sales,
+                    d.prior_30d_sales,
+                    d.decline_pct
+                FROM decline_calc d
+                LEFT JOIN "{schema}"."{cust_view or 'ZIVF_CustomerMaster_01_MD'}" cm 
+                    ON (d.dealer_code = cm."KUNNR" OR LTRIM(d.dealer_code, '0') = LTRIM(cm."KUNNR", '0'))
                 WHERE (cm."KLABC" IS NULL OR cm."KLABC" <> 'X')
-                GROUP BY c."dealer_code", c.curr_rev, c.prev_rev
             )
             SELECT 
-                COUNT(CASE WHEN (prev_rev - curr_rev) * 1.0 / prev_rev > 0.05 THEN 1 END) AS accounts_with_decline_gt_5pct,
-                COUNT(CASE WHEN (prev_rev - curr_rev) * 1.0 / prev_rev > 0.10 THEN 1 END) AS accounts_with_decline_gt_10pct
-            FROM filtered_cust
+                COUNT(CASE WHEN decline_pct > 5.0 THEN 1 END) AS accounts_with_decline_gt_5pct,
+                COUNT(CASE WHEN decline_pct > 10.0 THEN 1 END) AS accounts_with_decline_gt_10pct
+            FROM filtered_declines
         """)
 
         run("worst_customers_steepest_decline_30d", f"""
-            WITH customer_30d AS (
+            WITH max_d AS (
+                SELECT MAX("invoice_date") AS max_dt FROM "{schema}"."{curr_view or 'ZPVF_SD_CurrentSales_01_TR'}" WHERE "invoice_date" IS NOT NULL
+            ),
+            sales_source_60d AS (
+                SELECT "dealer_code", "invoice_date", "invoice_value", "distribution_channel", "indicator_cancel"
+                FROM "{schema}"."{curr_view or 'ZPVF_SD_CurrentSales_01_TR'}"
+                WHERE "invoice_date" >= '{year_start}'
+                UNION ALL
+                SELECT "dealer_code", "invoice_date", "invoice_value", "distribution_channel", "indicator_cancel"
+                FROM "{schema}"."{hist_view or 'ZPVF_SD_SalesHistory_01_TR'}"
+                WHERE "invoice_date" >= '{year_start}'
+            ),
+            cust_30d AS (
                 SELECT 
-                    COALESCE(NULLIF(TRIM(cm."NAME1"), ''), NULLIF(TRIM(cm."BNAME"), ''), TRIM(s."dealer_code")) AS customer_name,
-                    SUM(CASE WHEN s."invoice_date" BETWEEN '{dt_30d_str}' AND '{max_dt_str}' THEN COALESCE(s."invoice_value", 0) ELSE 0 END) AS curr_rev,
-                    SUM(CASE WHEN s."invoice_date" BETWEEN '{dt_60d_str}' AND '{dt_31d_prev_str}' THEN COALESCE(s."invoice_value", 0) ELSE 0 END) AS prev_rev
-                FROM {sales_source_60d} s
-                {cust_join}
-                {sales_where}
-                AND s."invoice_date" BETWEEN '{dt_60d_str}' AND '{max_dt_str}'
-                GROUP BY COALESCE(NULLIF(TRIM(cm."NAME1"), ''), NULLIF(TRIM(cm."BNAME"), ''), TRIM(s."dealer_code"))
-                HAVING SUM(CASE WHEN s."invoice_date" BETWEEN '{dt_60d_str}' AND '{dt_31d_prev_str}' THEN COALESCE(s."invoice_value", 0) ELSE 0 END) > 100000
+                    s."dealer_code",
+                    SUM(CASE WHEN s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -29) AND md.max_dt THEN COALESCE(s."invoice_value", 0) ELSE 0 END) AS current_30d_sales,
+                    SUM(CASE WHEN s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -59) AND ADD_DAYS(md.max_dt, -30) THEN COALESCE(s."invoice_value", 0) ELSE 0 END) AS prior_30d_sales
+                FROM sales_source_60d s
+                CROSS JOIN max_d md
+                WHERE s."invoice_date" IS NOT NULL 
+                  AND s."distribution_channel" = '10'
+                  AND (s."indicator_cancel" IS NULL OR s."indicator_cancel" NOT IN ('X', 'Y', '1'))
+                  AND s."invoice_date" >= ADD_DAYS(md.max_dt, -59)
+                GROUP BY s."dealer_code"
+            ),
+            decline_calc AS (
+                SELECT 
+                    c.dealer_code,
+                    c.current_30d_sales,
+                    c.prior_30d_sales,
+                    ROUND(((c.prior_30d_sales - c.current_30d_sales) / NULLIF(c.prior_30d_sales, 0)) * 100.0, 2) AS decline_pct
+                FROM cust_30d c
+                WHERE c.prior_30d_sales > 0
             )
             SELECT 
-                customer_name,
-                ROUND(curr_rev / 10000000.0, 2) AS current_30d_rev_cr,
-                ROUND(prev_rev / 10000000.0, 2) AS prev_30d_rev_cr,
-                ROUND((curr_rev - prev_rev) * 100.0 / NULLIF(prev_rev, 0), 2) AS decline_pct
-            FROM customer_30d
-            ORDER BY decline_pct ASC
+                COALESCE(NULLIF(TRIM(cm."NAME1"), ''), NULLIF(TRIM(cm."BNAME"), ''), d.dealer_code) AS customer_name,
+                ROUND(d.current_30d_sales / 10000000.0, 2) AS current_30d_rev_cr,
+                ROUND(d.prior_30d_sales / 10000000.0, 2) AS prev_30d_rev_cr,
+                -d.decline_pct AS decline_pct
+            FROM decline_calc d
+            LEFT JOIN "{schema}"."{cust_view or 'ZIVF_CustomerMaster_01_MD'}" cm 
+                ON (d.dealer_code = cm."KUNNR" OR LTRIM(d.dealer_code, '0') = LTRIM(cm."KUNNR", '0'))
+            WHERE (cm."KLABC" IS NULL OR cm."KLABC" <> 'X')
+            ORDER BY d.decline_pct DESC
             LIMIT 5
         """)
 
         run("zero_billing_30d_accounts", f"""
-            WITH cust_billing AS (
+            WITH max_d AS (
+                SELECT MAX("invoice_date") AS max_dt 
+                FROM "{schema}"."{curr_view or 'ZPVF_SD_CurrentSales_01_TR'}" 
+                WHERE "invoice_date" IS NOT NULL
+            ),
+            sales_source AS (
+                SELECT "dealer_code", "invoice_date", "invoice_value", "distribution_channel", "indicator_cancel"
+                FROM "{schema}"."{curr_view or 'ZPVF_SD_CurrentSales_01_TR'}"
+                WHERE "invoice_date" >= '{year_start}'
+                UNION ALL
+                SELECT "dealer_code", "invoice_date", "invoice_value", "distribution_channel", "indicator_cancel"
+                FROM "{schema}"."{hist_view or 'ZPVF_SD_SalesHistory_01_TR'}"
+                WHERE "invoice_date" >= '{year_start}'
+            ),
+            cust_billing AS (
                 SELECT 
                     s."dealer_code",
-                    SUM(CASE WHEN s."invoice_date" BETWEEN '{dt_30d_str}' AND '{max_dt_str}' THEN COALESCE(s."invoice_value", 0) ELSE 0 END) AS curr_rev,
+                    SUM(CASE WHEN s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -29) AND md.max_dt THEN COALESCE(s."invoice_value", 0) ELSE 0 END) AS curr_rev,
                     SUM(COALESCE(s."invoice_value", 0)) AS total_historical_rev
-                FROM {sales_source} s
-                {sales_where}
+                FROM sales_source s
+                CROSS JOIN max_d md
+                WHERE s."invoice_date" IS NOT NULL 
+                  AND s."distribution_channel" = '10'
+                  AND (s."indicator_cancel" IS NULL OR s."indicator_cancel" NOT IN ('X', 'Y', '1'))
                 GROUP BY s."dealer_code"
-            ),
-            filtered_cust AS (
-                SELECT 
-                    cb."dealer_code",
-                    cb.curr_rev,
-                    cb.total_historical_rev
-                FROM cust_billing cb
-                LEFT JOIN "{schema}"."{cust_view}" cm 
-                    ON (cb."dealer_code" = cm."KUNNR" OR LTRIM(cb."dealer_code", '0') = LTRIM(cm."KUNNR", '0'))
-                WHERE (cm."KLABC" IS NULL OR cm."KLABC" <> 'X')
-                GROUP BY cb."dealer_code", cb.curr_rev, cb.total_historical_rev
+                HAVING SUM(CASE WHEN s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -29) AND md.max_dt THEN COALESCE(s."invoice_value", 0) ELSE 0 END) = 0
+                   AND SUM(COALESCE(s."invoice_value", 0)) >= 200000
             )
             SELECT 
-                COUNT(CASE WHEN curr_rev = 0 AND total_historical_rev >= 200000 THEN 1 END) AS high_risk_inactive_accounts_2lakh_plus,
-                COUNT(CASE WHEN curr_rev = 0 AND total_historical_rev > 0 THEN 1 END) AS total_zero_billing_accounts
-            FROM filtered_cust
+                COUNT(*) AS high_risk_inactive_accounts_2lakh_plus,
+                COUNT(*) AS total_zero_billing_accounts
+            FROM (
+                SELECT 
+                    cb."dealer_code" AS customer_code,
+                    COALESCE(NULLIF(TRIM(cm."NAME1"), ''), NULLIF(TRIM(cm."BNAME"), ''), cb."dealer_code") AS customer_name,
+                    ROUND(cb.total_historical_rev / 100000.0, 2) AS historical_sales_lakhs,
+                    cb.curr_rev AS recent_30d_sales
+                FROM cust_billing cb
+                LEFT JOIN "{schema}"."{cust_view or 'ZIVF_CustomerMaster_01_MD'}" cm 
+                    ON (cb."dealer_code" = cm."KUNNR" OR LTRIM(cb."dealer_code", '0') = LTRIM(cm."KUNNR", '0'))
+                WHERE (cm."KLABC" IS NULL OR cm."KLABC" <> 'X')
+            )
         """)
 
         run("zero_units_30d_accounts", f"""
-            WITH cust_units AS (
+            WITH max_d AS (
+                SELECT MAX("invoice_date") AS max_dt 
+                FROM "{schema}"."{curr_view or 'ZPVF_SD_CurrentSales_01_TR'}" 
+                WHERE "invoice_date" IS NOT NULL
+            ),
+            sales_source AS (
+                SELECT "dealer_code", "invoice_date", "Tyre_Quantity", "distribution_channel", "indicator_cancel"
+                FROM "{schema}"."{curr_view or 'ZPVF_SD_CurrentSales_01_TR'}"
+                WHERE "invoice_date" >= '{year_start}'
+                UNION ALL
+                SELECT "dealer_code", "invoice_date", "Tyre_Quantity", "distribution_channel", "indicator_cancel"
+                FROM "{schema}"."{hist_view or 'ZPVF_SD_SalesHistory_01_TR'}"
+                WHERE "invoice_date" >= '{year_start}'
+            ),
+            cust_units AS (
                 SELECT 
                     s."dealer_code",
-                    SUM(CASE WHEN s."invoice_date" BETWEEN '{dt_30d_str}' AND '{max_dt_str}' THEN COALESCE(s."Tyre_Quantity", 0) ELSE 0 END) AS curr_units,
+                    SUM(CASE WHEN s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -29) AND md.max_dt THEN COALESCE(s."Tyre_Quantity", 0) ELSE 0 END) AS recent_30_days_units_sold,
                     SUM(COALESCE(s."Tyre_Quantity", 0)) AS total_historical_units
-                FROM {sales_source} s
-                {sales_where}
+                FROM sales_source s
+                CROSS JOIN max_d md
+                WHERE s."invoice_date" IS NOT NULL 
+                  AND s."distribution_channel" = '10'
+                  AND (s."indicator_cancel" IS NULL OR s."indicator_cancel" NOT IN ('X', 'Y', '1'))
                 GROUP BY s."dealer_code"
-            ),
-            filtered_units AS (
-                SELECT 
-                    cu."dealer_code",
-                    cu.curr_units,
-                    cu.total_historical_units
-                FROM cust_units cu
-                LEFT JOIN "{schema}"."{cust_view}" cm 
-                    ON (cu."dealer_code" = cm."KUNNR" OR LTRIM(cu."dealer_code", '0') = LTRIM(cm."KUNNR", '0'))
-                WHERE (cm."KLABC" IS NULL OR cm."KLABC" <> 'X')
-                GROUP BY cu."dealer_code", cu.curr_units, cu.total_historical_units
+                HAVING SUM(CASE WHEN s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -29) AND md.max_dt THEN COALESCE(s."Tyre_Quantity", 0) ELSE 0 END) = 0
+                   AND SUM(COALESCE(s."Tyre_Quantity", 0)) > 0
             )
             SELECT 
-                COUNT(CASE WHEN curr_units = 0 AND total_historical_units > 0 THEN 1 END) AS zero_unit_active_counters
-            FROM filtered_units
+                COUNT(*) AS zero_unit_active_counters
+            FROM (
+                SELECT 
+                    cu."dealer_code" AS customer_code,
+                    COALESCE(NULLIF(TRIM(cm."NAME1"), ''), NULLIF(TRIM(cm."BNAME"), ''), cu."dealer_code") AS customer_name,
+                    cu.total_historical_units AS historical_total_units_sold,
+                    cu.recent_30_days_units_sold
+                FROM cust_units cu
+                LEFT JOIN "{schema}"."{cust_view or 'ZIVF_CustomerMaster_01_MD'}" cm 
+                    ON (cu."dealer_code" = cm."KUNNR" OR LTRIM(cu."dealer_code", '0') = LTRIM(cm."KUNNR", '0'))
+                WHERE (cm."KLABC" IS NULL OR cm."KLABC" <> 'X')
+            )
         """)
 
     # ---------- 5. Geography ----------
