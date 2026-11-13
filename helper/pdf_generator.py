@@ -348,13 +348,13 @@ def draw_full_summary_report(pdf, summary_text: str):
     lines = [ln.strip() for ln in clean_text.split('\n')]
     
     # 1. Header Title
-    pdf.set_font("Arial", 'B', 13)
+    pdf.set_font("Arial", 'B', 12)
     pdf.set_text_color(15, 23, 42) # Slate-900
-    pdf.cell(0, 7, "EXECUTIVE ANALYSIS REPORT", ln=True)
-    pdf.set_font("Arial", 'I', 8.5)
+    pdf.cell(0, 6, "EXECUTIVE ANALYSIS REPORT", ln=True)
+    pdf.set_font("Arial", 'I', 8)
     pdf.set_text_color(100, 116, 139) # Slate-500
-    pdf.cell(0, 4.5, "Current Year: 01 Jan 2026 - Till Now | Tyre & Tube Business Performance Analysis", ln=True)
-    pdf.ln(2)
+    pdf.cell(0, 4, "Current Year: 01 Jan 2026 - Till Now | Tyre & Tube Business Performance Analysis", ln=True)
+    pdf.ln(1.5)
 
     narrative_lines = []
     i = 0
@@ -381,10 +381,10 @@ def draw_full_summary_report(pdf, summary_text: str):
         narrative = " ".join(narrative_lines)
         pdf.set_fill_color(248, 250, 252) # Slate-50
         pdf.set_draw_color(203, 213, 225) # Slate-300
-        pdf.set_font("Arial", '', 8.5)
+        pdf.set_font("Arial", '', 8)
         pdf.set_text_color(51, 65, 85)     # Slate-700
-        pdf.multi_cell(190, 4.2, narrative, border=1, fill=True)
-        pdf.ln(3)
+        pdf.multi_cell(190, 3.8, narrative, border=1, fill=True)
+        pdf.ln(2)
 
     # Process remaining structured lines
     current_section_type = "normal" # "normal", "risk", "rec"
@@ -401,42 +401,42 @@ def draw_full_summary_report(pdf, summary_text: str):
         # Section Heading: Key Business Insights
         if re.search(r'Key Business Insights', line, re.I):
             pdf.ln(1)
-            pdf.set_font("Arial", 'B', 11)
+            pdf.set_font("Arial", 'B', 10)
             pdf.set_text_color(30, 41, 59)
-            pdf.cell(0, 6, "KEY BUSINESS INSIGHTS", ln=True)
+            pdf.cell(0, 5, "KEY BUSINESS INSIGHTS", ln=True)
             pdf.set_draw_color(226, 232, 240)
             pdf.line(10, pdf.get_y(), 200, pdf.get_y())
-            pdf.ln(2)
+            pdf.ln(1.5)
             i += 1
             continue
 
         # Section Heading: Business Risks
         if re.search(r'Business Risks', line, re.I):
             current_section_type = "risk"
-            if pdf.get_y() > 230:
+            if pdf.get_y() > 255:
                 pdf.add_page()
-            pdf.ln(2)
-            pdf.set_font("Arial", 'B', 10.5)
-            pdf.set_text_color(159, 18, 57) # Rose-800
-            pdf.cell(0, 6, "CRITICAL BUSINESS RISKS", ln=True)
-            pdf.set_draw_color(253, 164, 175)
+            pdf.ln(1.5)
+            pdf.set_font("Arial", 'B', 9.5)
+            pdf.set_text_color(30, 41, 59) # Slate-800 (Clean black shade)
+            pdf.cell(0, 4.5, "CRITICAL BUSINESS RISKS", ln=True)
+            pdf.set_draw_color(226, 232, 240)
             pdf.line(10, pdf.get_y(), 200, pdf.get_y())
-            pdf.ln(2)
+            pdf.ln(1.2)
             i += 1
             continue
 
         # Section Heading: Actionable Recommendations
         if re.search(r'Actionable Recommendations', line, re.I):
             current_section_type = "rec"
-            if pdf.get_y() > 230:
+            if pdf.get_y() > 255:
                 pdf.add_page()
-            pdf.ln(2)
-            pdf.set_font("Arial", 'B', 10.5)
-            pdf.set_text_color(22, 101, 52) # Green-800
-            pdf.cell(0, 6, "ACTIONABLE STRATEGIC RECOMMENDATIONS", ln=True)
-            pdf.set_draw_color(134, 239, 172)
+            pdf.ln(1.5)
+            pdf.set_font("Arial", 'B', 9.5)
+            pdf.set_text_color(30, 41, 59) # Slate-800 (Clean black shade)
+            pdf.cell(0, 4.5, "ACTIONABLE STRATEGIC RECOMMENDATIONS", ln=True)
+            pdf.set_draw_color(226, 232, 240)
             pdf.line(10, pdf.get_y(), 200, pdf.get_y())
-            pdf.ln(2)
+            pdf.ln(1.2)
             i += 1
             continue
 
@@ -446,30 +446,27 @@ def draw_full_summary_report(pdf, summary_text: str):
             title_p = main_sec_m.group(2).strip()
             if any(k in title_p.lower() for k in ["performance", "trend", "product", "customer", "churn", "geography", "distribution", "target"]):
                 current_section_type = "normal"
-                if pdf.get_y() > 258:
+                if pdf.get_y() > 260:
                     pdf.add_page()
                 pdf.ln(1)
-                pdf.set_font("Arial", 'B', 9)
+                pdf.set_font("Arial", 'B', 8.5)
                 pdf.set_text_color(15, 23, 42) # Slate-900
-                pdf.cell(0, 4.5, f"{main_sec_m.group(1)}. {title_p.upper()}", ln=True)
-                pdf.ln(0.3)
+                pdf.cell(0, 4.2, f"{main_sec_m.group(1)}. {title_p.upper()}", ln=True)
+                pdf.ln(0.2)
                 i += 1
                 continue
 
         # Check Sub-headings: e.g. "**Worst 5 Customers (Last 30 Days)**"
-        # Rendered slightly less bold than main points as requested ("main point er theke ektu kom bold")
+        # Rendered in black/dark slate shade (no colorful tints) as requested
         clean_subhead = line.replace("**", "").replace("#", "").strip()
         if any(k in clean_subhead.lower() for k in ["top 5", "worst 5", "steepest", "top category", "account group breakdown"]) and not line.startswith(('-', '*')) and not re.match(r'^\d+\.', line):
-            if pdf.get_y() > 258:
+            if pdf.get_y() > 260:
                 pdf.add_page()
-            pdf.ln(0.8)
-            pdf.set_font("Arial", 'B', 8.5)
-            if "worst" in clean_subhead.lower() or "decline" in clean_subhead.lower():
-                pdf.set_text_color(180, 83, 9) # Amber-700
-            else:
-                pdf.set_text_color(71, 85, 105) # Slate-600
-            pdf.cell(0, 4.0, clean_subhead, ln=True)
-            pdf.ln(0.3)
+            pdf.ln(0.6)
+            pdf.set_font("Arial", 'B', 8)
+            pdf.set_text_color(71, 85, 105) # Slate-600 (Dark shade, monochrome)
+            pdf.cell(0, 3.8, clean_subhead, ln=True)
+            pdf.ln(0.2)
             i += 1
             continue
 
@@ -489,35 +486,35 @@ def draw_full_summary_report(pdf, summary_text: str):
                 name_p = body
                 val_p = ""
                 
-            if pdf.get_y() > 265:
+            if pdf.get_y() > 266:
                 pdf.add_page()
             pdf.set_x(12)
-            pdf.set_font("Arial", 'B', 8)
+            pdf.set_font("Arial", 'B', 7.5)
             pdf.set_text_color(100, 116, 139) # Slate-500
-            pdf.cell(5, 3.8, f"{rank_no}.", ln=0)
+            pdf.cell(5, 3.6, f"{rank_no}.", ln=0)
             
-            pdf.set_font("Arial", 'B', 8)
+            pdf.set_font("Arial", 'B', 7.5)
             pdf.set_text_color(30, 41, 59) # Slate-800
-            pdf.write(3.8, name_p)
+            pdf.write(3.6, name_p)
             
             if val_p:
-                pdf.set_font("Arial", '', 8)
+                pdf.set_font("Arial", '', 7.5)
                 pdf.set_text_color(71, 85, 105) # Slate-600
-                pdf.write(3.8, f"  -  {val_p}\n")
+                pdf.write(3.6, f"  -  {val_p}\n")
             else:
-                pdf.write(3.8, "\n")
-            pdf.ln(0.3)
+                pdf.write(3.6, "\n")
+            pdf.ln(0.2)
             i += 1
             continue
 
         # Bullet points or Key-Value lines: e.g. "- Total Revenue: Rs. 9785.68 Cr"
-        # Formatted with high-contrast bold dark labels and clear values for enhanced readability
+        # Formatted with high-contrast bold dark labels and clear values for enhanced readability (Monochrome black shade)
         is_bullet = line.startswith(('-', '*', '•'))
         has_colon = (":" in line) and not line.startswith(("#", "###"))
         if is_bullet or has_colon:
             b_txt = re.sub(r'^[-*•\d\.]+\s*', '', line) if is_bullet else line.strip()
             if b_txt:
-                if pdf.get_y() > 265:
+                if pdf.get_y() > 266:
                     pdf.add_page()
                 pdf.set_x(10)
                 
@@ -530,48 +527,27 @@ def draw_full_summary_report(pdf, summary_text: str):
                     k_str = b_txt
                     v_str = ""
 
-                if current_section_type == "risk":
-                    pdf.set_font("Arial", 'B', 8)
-                    pdf.set_text_color(190, 18, 60) # Rose-700
-                    pdf.cell(4, 3.8, "!", ln=0)
-                    pdf.set_font("Arial", 'B', 8)
-                    pdf.set_text_color(159, 18, 57) # Rose-800
-                    pdf.write(3.8, k_str + " ")
-                    pdf.set_font("Arial", '', 8)
-                    pdf.set_text_color(76, 5, 25)
-                    pdf.write(3.8, v_str + "\n")
-                elif current_section_type == "rec":
-                    pdf.set_font("Arial", 'B', 8)
-                    pdf.set_text_color(16, 185, 129) # Emerald-500
-                    pdf.cell(4, 3.8, ">", ln=0)
-                    pdf.set_font("Arial", 'B', 8)
-                    pdf.set_text_color(22, 101, 52) # Green-800
-                    pdf.write(3.8, k_str + " ")
-                    pdf.set_font("Arial", '', 8)
-                    pdf.set_text_color(6, 78, 59)
-                    pdf.write(3.8, v_str + "\n")
-                else:
-                    pdf.set_font("Arial", 'B', 8)
-                    pdf.set_text_color(100, 116, 139) # Slate-500
-                    pdf.cell(4, 3.8, "-", ln=0)
-                    pdf.set_font("Arial", 'B', 8)
-                    pdf.set_text_color(15, 23, 42) # Slate-900 (Bold Key)
-                    pdf.write(3.8, k_str + " ")
-                    pdf.set_font("Arial", '', 8)
-                    pdf.set_text_color(51, 65, 85) # Slate-700 (Clear Value)
-                    pdf.write(3.8, v_str + "\n")
-                pdf.ln(0.4)
+                pdf.set_font("Arial", 'B', 7.5)
+                pdf.set_text_color(100, 116, 139) # Slate-500
+                pdf.cell(4, 3.6, "-", ln=0)
+                pdf.set_font("Arial", 'B', 7.5)
+                pdf.set_text_color(15, 23, 42) # Slate-900 (Bold Key in black shade)
+                pdf.write(3.6, k_str + " ")
+                pdf.set_font("Arial", '', 7.5)
+                pdf.set_text_color(51, 65, 85) # Slate-700 (Clear Value)
+                pdf.write(3.6, v_str + "\n")
+                pdf.ln(0.3)
             i += 1
             continue
 
         # General text line
-        pdf.set_font("Arial", '', 8)
+        pdf.set_font("Arial", '', 7.5)
         pdf.set_text_color(51, 65, 85)
-        pdf.multi_cell(190, 4.0, line.replace("**", "").replace("#", "").strip())
-        pdf.ln(0.5)
+        pdf.multi_cell(190, 3.6, line.replace("**", "").replace("#", "").strip())
+        pdf.ln(0.3)
         i += 1
 
-    pdf.ln(3)
+    pdf.ln(2)
 
 
 def draw_executive_summary_section(pdf, summary_text: str):
@@ -1336,49 +1312,69 @@ def generate_pdf_report(db_conn, workspace_name, session_id, report_ids=None, su
         if t_list and b_list:
             fig, (ax_top, ax_bot) = plt.subplots(1, 2, figsize=(11.5, 4.6))
             
-            # Robust conversion from raw Rupees to Crores
-            # Any value > 50 is raw Rupees (since no single entity sells > 50 Cr in 2 days)
-            def _val_to_cr(v):
-                num = float(v or 0)
-                return (num / 10000000.0) if num > 50.0 else num
+            # Dynamic unit configuration matching Engagement Zone UI (TopBottomPerformanceChart.tsx)
+            def _get_dim_unit_config(raw_vals):
+                max_v = max([float(v or 0) for v in raw_vals], default=0.0)
+                if max_v >= 500000: # >= Rs. 5 Lakhs -> Crores (Cr)
+                    return {
+                        "divisor": 10000000.0,
+                        "unit": "Cr",
+                        "axis_label": "Sales Value (Rs. Cr)",
+                        "fmt": lambda v: f"{v:.2f} Cr"
+                    }
+                elif max_v >= 100000: # Rs. 1 Lakh to 5 Lakhs -> Lakhs (L)
+                    return {
+                        "divisor": 100000.0,
+                        "unit": "L",
+                        "axis_label": "Sales Value (Rs. Lakh)",
+                        "fmt": lambda v: f"{v:.2f} L"
+                    }
+                elif max_v >= 1000: # Rs. 1,000 to 1 Lakh -> Thousands (K)
+                    return {
+                        "divisor": 1000.0,
+                        "unit": "K",
+                        "axis_label": "Sales Value (Rs. K)",
+                        "fmt": lambda v: f"{v:.1f} K"
+                    }
+                else: # Under Rs. 1,000 -> Direct Rupees (Rs.)
+                    return {
+                        "divisor": 1.0,
+                        "unit": "",
+                        "axis_label": "Sales Value (Rs.)",
+                        "fmt": lambda v: f"Rs. {int(round(v)):,}"
+                    }
 
             # Top 10 Entities
             top_names = [str(r.get('name', r.get('entity_name', 'Unknown')))[:18] for r in t_list[::-1]]
             top_raw_vals = [float(r.get('sales_value', 0)) for r in t_list[::-1]]
-            top_vals_cr = [_val_to_cr(v) for v in top_raw_vals]
+            top_cfg = _get_dim_unit_config(top_raw_vals)
+            top_plot_vals = [v / top_cfg["divisor"] for v in top_raw_vals]
             
-            bars_top = ax_top.barh(top_names, top_vals_cr, color=top_colors[:len(top_names)], height=0.55)
-            ax_top.bar_label(bars_top, labels=[f"{v:.2f} Cr" for v in top_vals_cr], padding=4, fontsize=8.5, fontweight='bold', color='#0369A1')
+            bars_top = ax_top.barh(top_names, top_plot_vals, color=top_colors[:len(top_names)], height=0.55)
+            ax_top.bar_label(bars_top, labels=[top_cfg["fmt"](v) for v in top_plot_vals], padding=4, fontsize=8.5, fontweight='bold', color='#0369A1')
             ax_top.set_title(f'Top 10 {dim_t} (Last 2 Days)', fontsize=11, fontweight='bold', color='#0F172A', pad=10)
-            ax_top.set_xlabel('Sales Value (Rs. Cr)', fontsize=9, fontweight='bold', color='#1E293B')
+            ax_top.set_xlabel(top_cfg["axis_label"], fontsize=9, fontweight='bold', color='#1E293B')
             ax_top.set_ylabel(f'{ent_l} Name', fontsize=9, fontweight='bold', color='#1E293B')
             ax_top.spines['top'].set_visible(False)
             ax_top.spines['right'].set_visible(False)
-            if top_vals_cr and max(top_vals_cr) > 0:
-                ax_top.set_xlim(0, max(top_vals_cr) * 1.25)
+            if top_plot_vals and max(top_plot_vals) > 0:
+                ax_top.set_xlim(0, max(top_plot_vals) * 1.25)
 
-            # Bottom 10 Entities
+            # Worst 10 Entities
             bot_names = [str(r.get('name', r.get('entity_name', 'Unknown')))[:18] for r in b_list[::-1]]
             bot_raw_vals = [float(r.get('sales_value', 0)) for r in b_list[::-1]]
-            bot_vals_cr = [_val_to_cr(v) for v in bot_raw_vals]
+            bot_cfg = _get_dim_unit_config(bot_raw_vals)
+            bot_plot_vals = [v / bot_cfg["divisor"] for v in bot_raw_vals]
             
-            bars_bot = ax_bot.barh(bot_names, bot_vals_cr, color=bot_colors[:len(bot_names)], height=0.55)
-            bot_lbls = []
-            for v in bot_vals_cr:
-                if v == 0:
-                    bot_lbls.append("0.00 Cr")
-                elif v < 0.01:
-                    bot_lbls.append(f"{v:.4f} Cr")
-                else:
-                    bot_lbls.append(f"{v:.2f} Cr")
-            ax_bot.bar_label(bars_bot, labels=bot_lbls, padding=4, fontsize=8, fontweight='bold', color='#B45309')
-            ax_bot.set_title(f'Bottom 10 {dim_t} (Last 2 Days)', fontsize=11, fontweight='bold', color='#0F172A', pad=10)
-            ax_bot.set_xlabel('Sales Value (Rs. Cr)', fontsize=9, fontweight='bold', color='#1E293B')
+            bars_bot = ax_bot.barh(bot_names, bot_plot_vals, color=bot_colors[:len(bot_names)], height=0.55)
+            ax_bot.bar_label(bars_bot, labels=[bot_cfg["fmt"](v) for v in bot_plot_vals], padding=4, fontsize=8, fontweight='bold', color='#B45309')
+            ax_bot.set_title(f'Worst 10 {dim_t} (Last 2 Days)', fontsize=11, fontweight='bold', color='#0F172A', pad=10)
+            ax_bot.set_xlabel(bot_cfg["axis_label"], fontsize=9, fontweight='bold', color='#1E293B')
             ax_bot.set_ylabel(f'{ent_l} Name', fontsize=9, fontweight='bold', color='#1E293B')
             ax_bot.spines['top'].set_visible(False)
             ax_bot.spines['right'].set_visible(False)
-            if bot_vals_cr and max(bot_vals_cr) > 0:
-                ax_bot.set_xlim(0, max(bot_vals_cr) * 1.25)
+            if bot_plot_vals and max(bot_plot_vals) > 0:
+                ax_bot.set_xlim(0, max(bot_plot_vals) * 1.25)
 
             plt.tight_layout()
             dim_img_path = os.path.join(temp_dir, f"chart_tb_{dim_k}_{timestamp}.png")
@@ -1476,20 +1472,27 @@ def generate_pdf_report(db_conn, workspace_name, session_id, report_ids=None, su
     # 0. Executive Business Summary (Full comprehensive Latin-1 report, No Hyperlinks)
     if summary_text:
         draw_full_summary_report(pdf, summary_text)
-        pdf.add_page() # Fresh page for Key Metrics & Visual Analytics
     
     # 1. Key Metrics (Report ID '11')
+    # If remaining height on current page below summary is sufficient (~60mm), place it right there!
     if '11' in [str(r) for r in (report_ids or [])]:
-        pdf.set_font("Arial", 'B', 14)
+        needed_kpi_h = 60
+        if pdf.get_y() + needed_kpi_h > 270:
+            pdf.add_page()
+        else:
+            pdf.ln(3)
+
+        pdf.set_font("Arial", 'B', 12)
         pdf.set_text_color(30, 41, 59)
-        pdf.cell(0, 10, "KEY METRICS & VISUAL ANALYTICS", ln=True)
-        pdf.ln(2)
+        pdf.cell(0, 7, "KEY METRICS & VISUAL ANALYTICS", ln=True)
+        pdf.ln(1)
         
-        start_x = pdf.get_x()
+        start_x = 10
         start_y = pdf.get_y()
         
         col_width = 45
-        row_height = 30
+        box_h = 23
+        row_gap = 3
         current_y = start_y
         
         for i, kpi in enumerate(kpis):
@@ -1497,32 +1500,32 @@ def generate_pdf_report(db_conn, workspace_name, session_id, report_ids=None, su
             
             # If it's the start of a new row and we are near the bottom
             if col_idx == 0 and i > 0:
-                current_y += row_height
-                if current_y > 250:
+                current_y += box_h + row_gap
+                if current_y > 255:
                     pdf.add_page()
                     current_y = pdf.get_y()
             
-            x = start_x + (col_idx * (col_width + 5))
+            x = start_x + (col_idx * (col_width + 3.3))
             pdf.set_xy(x, current_y)
             
             # Draw box
             pdf.set_fill_color(248, 250, 252) # Slate-50
             pdf.set_draw_color(226, 232, 240) # Slate-200
-            pdf.rect(x, current_y, col_width, 25, style='DF')
+            pdf.rect(x, current_y, col_width, box_h, style='DF')
             
             # Label
-            pdf.set_xy(x + 2, current_y + 4)
-            pdf.set_font("Arial", 'B', 8)
+            pdf.set_xy(x + 2, current_y + 3)
+            pdf.set_font("Arial", 'B', 7.5)
             pdf.set_text_color(100, 116, 139) # Slate-500
-            pdf.cell(col_width - 4, 5, kpi['label'][:25].upper(), ln=True, align='L')
+            pdf.cell(col_width - 4, 4.5, kpi['label'][:25].upper(), ln=True, align='L')
             
             # Value
-            pdf.set_xy(x + 2, current_y + 12)
-            pdf.set_font("Arial", 'B', 12)
+            pdf.set_xy(x + 2, current_y + 10)
+            pdf.set_font("Arial", 'B', 11.5)
             pdf.set_text_color(15, 23, 42) # Slate-900
-            pdf.cell(col_width - 4, 8, str(kpi['value']), ln=True, align='L')
+            pdf.cell(col_width - 4, 7, str(kpi['value']), ln=True, align='L')
             
-        pdf.set_y(current_y + 30)
+        pdf.set_y(current_y + box_h + 4)
 
     # Helper for smart chart placement: Fits 2 charts per page cleanly whenever possible;
     # automatically moves to a new page only when space runs out
