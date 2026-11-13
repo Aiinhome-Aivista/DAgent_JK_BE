@@ -117,34 +117,44 @@ def draw_category_sales_cards(pdf, title, data_list):
     """
     Renders Category Sales as clean compact cards in a 3-column grid
     matching the Engagement Zone UI (Screenshot 3).
+    All cards in the same row share the exact same horizontal baseline (no staggering).
     """
     if not data_list:
         return
-    if pdf.get_y() > 190:
+    card_w = 60
+    card_h = 16
+    gutter_x = 5
+    gutter_y = 3.5
+    start_x = 10
+    cols = 3
+    
+    card_rows = (len(data_list) + cols - 1) // cols
+    needed_h = 12 + card_rows * (card_h + gutter_y) + 6
+    if pdf.get_y() + needed_h > 275:
         pdf.add_page()
+    else:
+        pdf.ln(2)
+        
     pdf.set_font("Arial", 'B', 13)
     pdf.set_text_color(30, 41, 59) # Slate-800
     pdf.cell(0, 10, title, ln=True)
     pdf.ln(2)
-
-    card_w = 60
-    card_h = 17
-    gutter = 5
-    start_x = 10
+    
+    current_row_y = pdf.get_y()
     
     for i, item in enumerate(data_list):
         lbl, nums, strs = extract_label_and_numbers(item)
         val = nums[0] if nums else 0.0
         
-        col_idx = i % 3
+        col_idx = i % cols
         if col_idx == 0 and i > 0:
-            pdf.ln(card_h + 3)
-            if pdf.get_y() > 260:
+            current_row_y += card_h + gutter_y
+            if current_row_y + card_h > 275:
                 pdf.add_page()
-                pdf.ln(2)
+                current_row_y = 15
         
-        x = start_x + col_idx * (card_w + gutter)
-        y = pdf.get_y()
+        x = start_x + col_idx * (card_w + gutter_x)
+        y = current_row_y
         
         # Soft Slate Card Background & Border
         pdf.set_fill_color(248, 250, 252) # Slate-50
@@ -159,46 +169,56 @@ def draw_category_sales_cards(pdf, title, data_list):
         pdf.cell(card_w, 5, val_txt, align='C')
         
         # Category Code Badge Below
-        pdf.set_xy(x, y + 8.5)
+        pdf.set_xy(x, y + 8)
         pdf.set_font("Arial", 'B', 7)
         pdf.set_text_color(100, 116, 139) # Slate-500
         pdf.cell(card_w, 4.5, str(lbl)[:18].upper(), align='C')
 
-    pdf.ln(card_h + 8)
+    pdf.set_xy(start_x, current_row_y + card_h + 6)
 
 
 def draw_account_category_cards(pdf, title, data_list):
     """
     Renders Actual Sales by Account Category as clean compact cards in a 2-column grid
     with warm cream styling matching the Engagement Zone UI (Screenshot 4).
+    Both cards in the same row share the exact same horizontal baseline (no staggering).
     """
     if not data_list:
         return
-    if pdf.get_y() > 200:
+    card_w = 92
+    card_h = 16
+    gutter_x = 6
+    gutter_y = 3.5
+    start_x = 10
+    cols = 2
+    
+    card_rows = (len(data_list) + cols - 1) // cols
+    needed_h = 12 + card_rows * (card_h + gutter_y) + 6
+    if pdf.get_y() + needed_h > 275:
         pdf.add_page()
+    else:
+        pdf.ln(2)
+        
     pdf.set_font("Arial", 'B', 13)
     pdf.set_text_color(30, 41, 59)
     pdf.cell(0, 10, title, ln=True)
     pdf.ln(2)
-
-    card_w = 92
-    card_h = 17
-    gutter = 6
-    start_x = 10
+    
+    current_row_y = pdf.get_y()
     
     for i, item in enumerate(data_list):
         lbl, nums, strs = extract_label_and_numbers(item)
         val = nums[0] if nums else 0.0
         
-        col_idx = i % 2
+        col_idx = i % cols
         if col_idx == 0 and i > 0:
-            pdf.ln(card_h + 3)
-            if pdf.get_y() > 260:
+            current_row_y += card_h + gutter_y
+            if current_row_y + card_h > 275:
                 pdf.add_page()
-                pdf.ln(2)
+                current_row_y = 15
         
-        x = start_x + col_idx * (card_w + gutter)
-        y = pdf.get_y()
+        x = start_x + col_idx * (card_w + gutter_x)
+        y = current_row_y
         
         # Warm Cream Card Background & Amber Border
         pdf.set_fill_color(255, 253, 240) # Warm Amber-50 tint
@@ -212,13 +232,13 @@ def draw_account_category_cards(pdf, title, data_list):
         pdf.cell(card_w, 4, str(lbl)[:18].upper(), align='C')
         
         # Value below
-        pdf.set_xy(x, y + 8)
+        pdf.set_xy(x, y + 7.5)
         pdf.set_font("Arial", 'B', 10)
         pdf.set_text_color(15, 23, 42) # Slate-900
         val_txt = f"Rs. {val:,.2f} Cr" if val >= 1 else f"Rs. {val:.2f} Cr"
         pdf.cell(card_w, 5.5, val_txt, align='C')
 
-    pdf.ln(card_h + 8)
+    pdf.set_xy(start_x, current_row_y + card_h + 6)
 
 
 def draw_data_table(pdf, title, data, col1_header, col2_header):
@@ -420,57 +440,127 @@ def draw_full_summary_report(pdf, summary_text: str):
             i += 1
             continue
 
-        # Numbered Subsection (e.g. "### 1. Overall Performance" or "1. Overall Performance")
-        sub_m = re.match(r'^(?:###\s*)?(\d+\.\s+[A-Za-z &]+)', line)
-        if sub_m:
-            current_section_type = "normal"
-            if pdf.get_y() > 250:
-                pdf.add_page()
-            pdf.ln(1)
-            pdf.set_font("Arial", 'B', 9.5)
-            pdf.set_text_color(15, 23, 42)
-            pdf.cell(0, 5, sub_m.group(1).upper(), ln=True)
-            pdf.ln(0.5)
-            i += 1
-            continue
+        # Check Main Section Header: e.g. "### 1. Overall Performance" or "1. Overall Performance"
+        main_sec_m = re.match(r'^(?:###\s*)?([1-8])\.\s+([^:-]+)$', line)
+        if main_sec_m:
+            title_p = main_sec_m.group(2).strip()
+            if any(k in title_p.lower() for k in ["performance", "trend", "product", "customer", "churn", "geography", "distribution", "target"]):
+                current_section_type = "normal"
+                if pdf.get_y() > 258:
+                    pdf.add_page()
+                pdf.ln(1)
+                pdf.set_font("Arial", 'B', 9)
+                pdf.set_text_color(15, 23, 42) # Slate-900
+                pdf.cell(0, 4.5, f"{main_sec_m.group(1)}. {title_p.upper()}", ln=True)
+                pdf.ln(0.3)
+                i += 1
+                continue
 
-        # Sub-sub heading (e.g. "**Top 5 SKUs by Top Category**" or "Top 5 vs Worst 5 Customers")
-        sub_sub_m = re.match(r'^(?:\*\*)?([A-Za-z0-9 &()/-]+(?:\(Last \d+ Days\))?)(?:\*\*)?$', line)
-        if sub_sub_m and any(k in line.lower() for k in ["top 5", "worst 5", "steepest", "account group breakdown", "materials"]):
-            if pdf.get_y() > 255:
+        # Check Sub-headings: e.g. "**Worst 5 Customers (Last 30 Days)**"
+        # Rendered slightly less bold than main points as requested ("main point er theke ektu kom bold")
+        clean_subhead = line.replace("**", "").replace("#", "").strip()
+        if any(k in clean_subhead.lower() for k in ["top 5", "worst 5", "steepest", "top category", "account group breakdown"]) and not line.startswith(('-', '*')) and not re.match(r'^\d+\.', line):
+            if pdf.get_y() > 258:
                 pdf.add_page()
+            pdf.ln(0.8)
             pdf.set_font("Arial", 'B', 8.5)
-            pdf.set_text_color(71, 85, 105) # Slate-600
-            pdf.cell(0, 4.5, line.replace("**", "").strip(), ln=True)
+            if "worst" in clean_subhead.lower() or "decline" in clean_subhead.lower():
+                pdf.set_text_color(180, 83, 9) # Amber-700
+            else:
+                pdf.set_text_color(71, 85, 105) # Slate-600
+            pdf.cell(0, 4.0, clean_subhead, ln=True)
+            pdf.ln(0.3)
             i += 1
             continue
 
-        # Bullet point or numbered item line
-        if line.startswith(('-', '*', '•')) or (len(line) > 2 and line[:2].isdigit() and line[2] == '.'):
-            bullet_txt = re.sub(r'^[-*•\d\.]+\s*', '', line).strip()
-            if bullet_txt:
+        # Check Numbered items: e.g. "4. B.P.M.CYCLE & TYRES - Sales Value: Rs. 233"
+        # Accurately preserves all full names (including dots, ampersands) and sales values
+        num_m = re.match(r'^(\d+)[\.\t]\s*(.*)', line)
+        if num_m:
+            rank_no = num_m.group(1)
+            body = num_m.group(2).strip()
+            if " - " in body:
+                name_p, val_p = body.split(" - ", 1)
+            elif " (" in body:
+                pts = body.split(" (", 1)
+                name_p = pts[0].strip()
+                val_p = "(" + pts[1].strip()
+            else:
+                name_p = body
+                val_p = ""
+                
+            if pdf.get_y() > 265:
+                pdf.add_page()
+            pdf.set_x(12)
+            pdf.set_font("Arial", 'B', 8)
+            pdf.set_text_color(100, 116, 139) # Slate-500
+            pdf.cell(5, 3.8, f"{rank_no}.", ln=0)
+            
+            pdf.set_font("Arial", 'B', 8)
+            pdf.set_text_color(30, 41, 59) # Slate-800
+            pdf.write(3.8, name_p)
+            
+            if val_p:
+                pdf.set_font("Arial", '', 8)
+                pdf.set_text_color(71, 85, 105) # Slate-600
+                pdf.write(3.8, f"  -  {val_p}\n")
+            else:
+                pdf.write(3.8, "\n")
+            pdf.ln(0.3)
+            i += 1
+            continue
+
+        # Bullet points or Key-Value lines: e.g. "- Total Revenue: Rs. 9785.68 Cr"
+        # Formatted with high-contrast bold dark labels and clear values for enhanced readability
+        is_bullet = line.startswith(('-', '*', '•'))
+        has_colon = (":" in line) and not line.startswith(("#", "###"))
+        if is_bullet or has_colon:
+            b_txt = re.sub(r'^[-*•\d\.]+\s*', '', line) if is_bullet else line.strip()
+            if b_txt:
+                if pdf.get_y() > 265:
+                    pdf.add_page()
+                pdf.set_x(10)
+                
+                # Split Key and Value if contains ':'
+                if ":" in b_txt:
+                    k_part, v_part = b_txt.split(":", 1)
+                    k_str = k_part.strip() + ":"
+                    v_str = v_part.strip()
+                else:
+                    k_str = b_txt
+                    v_str = ""
+
                 if current_section_type == "risk":
                     pdf.set_font("Arial", 'B', 8)
                     pdf.set_text_color(190, 18, 60) # Rose-700
-                    pdf.cell(4, 4.0, "!", ln=0)
+                    pdf.cell(4, 3.8, "!", ln=0)
+                    pdf.set_font("Arial", 'B', 8)
+                    pdf.set_text_color(159, 18, 57) # Rose-800
+                    pdf.write(3.8, k_str + " ")
                     pdf.set_font("Arial", '', 8)
                     pdf.set_text_color(76, 5, 25)
-                    pdf.multi_cell(186, 4.0, bullet_txt)
+                    pdf.write(3.8, v_str + "\n")
                 elif current_section_type == "rec":
                     pdf.set_font("Arial", 'B', 8)
                     pdf.set_text_color(16, 185, 129) # Emerald-500
-                    pdf.cell(4, 4.0, ">", ln=0)
+                    pdf.cell(4, 3.8, ">", ln=0)
+                    pdf.set_font("Arial", 'B', 8)
+                    pdf.set_text_color(22, 101, 52) # Green-800
+                    pdf.write(3.8, k_str + " ")
                     pdf.set_font("Arial", '', 8)
                     pdf.set_text_color(6, 78, 59)
-                    pdf.multi_cell(186, 4.0, bullet_txt)
+                    pdf.write(3.8, v_str + "\n")
                 else:
                     pdf.set_font("Arial", 'B', 8)
-                    pdf.set_text_color(100, 116, 139)
-                    pdf.cell(4, 4.0, "-", ln=0)
+                    pdf.set_text_color(100, 116, 139) # Slate-500
+                    pdf.cell(4, 3.8, "-", ln=0)
+                    pdf.set_font("Arial", 'B', 8)
+                    pdf.set_text_color(15, 23, 42) # Slate-900 (Bold Key)
+                    pdf.write(3.8, k_str + " ")
                     pdf.set_font("Arial", '', 8)
-                    pdf.set_text_color(30, 41, 59)
-                    pdf.multi_cell(186, 4.0, bullet_txt)
-                pdf.ln(0.5)
+                    pdf.set_text_color(51, 65, 85) # Slate-700 (Clear Value)
+                    pdf.write(3.8, v_str + "\n")
+                pdf.ln(0.4)
             i += 1
             continue
 
@@ -1051,7 +1141,7 @@ def generate_pdf_report(db_conn, workspace_name, session_id, report_ids=None, su
     unit1 = " (Cr)" if scale1 == 10000000 else ""
     plot_vals1 = [round(v / scale1, 2) for v in vals1]
     
-    plt.figure(figsize=(11, 5.5))
+    plt.figure(figsize=(11, 4.8))
     bars1 = plt.bar(list(chart_data_1.keys()), plot_vals1, color='#8B5CF6', width=0.45)
     plt.bar_label(bars1, fmt='%.2f Cr' if scale1 == 10000000 else '%.2f', padding=4, fontsize=9, fontweight='bold', color='#6D28D9')
     
@@ -1069,7 +1159,7 @@ def generate_pdf_report(db_conn, workspace_name, session_id, report_ids=None, su
     plt.close()
     
     # Chart 2: Sales by Zone (2026) - All Zones with Sales Value & % cleanly displayed
-    fig, ax = plt.subplots(figsize=(11, 5.8))
+    fig, ax = plt.subplots(figsize=(11, 4.8))
     colors2 = ['#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#EC4899', '#14B8A6']
     
     vals2 = list(chart_data_2.values())
@@ -1102,7 +1192,7 @@ def generate_pdf_report(db_conn, workspace_name, session_id, report_ids=None, su
     scale3 = 10000000 if max_val3 >= 10000000 else 1
     plot_vals3 = [round(v / scale3, 2) for v in vals3]
     
-    plt.figure(figsize=(11, 5.6))
+    plt.figure(figsize=(11, 4.8))
     colors3 = ['#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#EC4899', '#14B8A6', '#6366F1', '#F97316', '#64748B']
     bars3 = plt.barh(list(chart_data_3.keys())[::-1], plot_vals3[::-1], color=colors3[:len(chart_data_3)], height=0.55)
     plt.bar_label(bars3, labels=[f"{v:,.2f} Cr" for v in plot_vals3[::-1]], padding=5, fontsize=9, fontweight='bold', color='#1E293B')
@@ -1154,7 +1244,7 @@ def generate_pdf_report(db_conn, workspace_name, session_id, report_ids=None, su
         
         x = list(range(len(labels4)))
         
-        fig, ax1 = plt.subplots(figsize=(11, 5.8))
+        fig, ax1 = plt.subplots(figsize=(11, 4.9))
         
         # Primary axis: Sale Value (Bars shifted slightly left) & Plan Value (Line)
         bar_w = 0.32
@@ -1244,12 +1334,18 @@ def generate_pdf_report(db_conn, workspace_name, session_id, report_ids=None, su
         t_list = dim_info.get("top_10", [])
         b_list = dim_info.get("bottom_10", [])
         if t_list and b_list:
-            fig, (ax_top, ax_bot) = plt.subplots(1, 2, figsize=(11.5, 5.2))
+            fig, (ax_top, ax_bot) = plt.subplots(1, 2, figsize=(11.5, 4.6))
             
+            # Robust conversion from raw Rupees to Crores
+            # Any value > 50 is raw Rupees (since no single entity sells > 50 Cr in 2 days)
+            def _val_to_cr(v):
+                num = float(v or 0)
+                return (num / 10000000.0) if num > 50.0 else num
+
             # Top 10 Entities
             top_names = [str(r.get('name', r.get('entity_name', 'Unknown')))[:18] for r in t_list[::-1]]
             top_raw_vals = [float(r.get('sales_value', 0)) for r in t_list[::-1]]
-            top_vals_cr = [v / 10000000.0 if v >= 100000 else v for v in top_raw_vals]
+            top_vals_cr = [_val_to_cr(v) for v in top_raw_vals]
             
             bars_top = ax_top.barh(top_names, top_vals_cr, color=top_colors[:len(top_names)], height=0.55)
             ax_top.bar_label(bars_top, labels=[f"{v:.2f} Cr" for v in top_vals_cr], padding=4, fontsize=8.5, fontweight='bold', color='#0369A1')
@@ -1264,10 +1360,17 @@ def generate_pdf_report(db_conn, workspace_name, session_id, report_ids=None, su
             # Bottom 10 Entities
             bot_names = [str(r.get('name', r.get('entity_name', 'Unknown')))[:18] for r in b_list[::-1]]
             bot_raw_vals = [float(r.get('sales_value', 0)) for r in b_list[::-1]]
-            bot_vals_cr = [v / 10000000.0 if v >= 100000 else v for v in bot_raw_vals]
+            bot_vals_cr = [_val_to_cr(v) for v in bot_raw_vals]
             
             bars_bot = ax_bot.barh(bot_names, bot_vals_cr, color=bot_colors[:len(bot_names)], height=0.55)
-            bot_lbls = [f"{v:.4f} Cr" if v < 0.01 else f"{v:.2f} Cr" for v in bot_vals_cr]
+            bot_lbls = []
+            for v in bot_vals_cr:
+                if v == 0:
+                    bot_lbls.append("0.00 Cr")
+                elif v < 0.01:
+                    bot_lbls.append(f"{v:.4f} Cr")
+                else:
+                    bot_lbls.append(f"{v:.2f} Cr")
             ax_bot.bar_label(bars_bot, labels=bot_lbls, padding=4, fontsize=8, fontweight='bold', color='#B45309')
             ax_bot.set_title(f'Bottom 10 {dim_t} (Last 2 Days)', fontsize=11, fontweight='bold', color='#0F172A', pad=10)
             ax_bot.set_xlabel('Sales Value (Rs. Cr)', fontsize=9, fontweight='bold', color='#1E293B')
@@ -1419,65 +1522,56 @@ def generate_pdf_report(db_conn, workspace_name, session_id, report_ids=None, su
             pdf.set_text_color(15, 23, 42) # Slate-900
             pdf.cell(col_width - 4, 8, str(kpi['value']), ln=True, align='L')
             
-        pdf.set_y(current_y + 35)
+        pdf.set_y(current_y + 30)
+
+    # Helper for smart chart placement: Fits 2 charts per page cleanly whenever possible;
+    # automatically moves to a new page only when space runs out
+    def place_chart_section(title, img_path, approx_h=83, title_h=7):
+        if not img_path or not os.path.exists(img_path):
+            return
+        needed_h = title_h + approx_h + 6
+        if pdf.get_y() + needed_h > 272:
+            pdf.add_page()
+        else:
+            pdf.ln(2)
+        pdf.set_font("Arial", 'B', 12)
+        pdf.set_text_color(30, 41, 59)
+        pdf.cell(0, title_h, title, ln=True)
+        pdf.image(img_path, x=10, w=190)
+        pdf.ln(3)
 
     # 2. Sales Revenue (Cr) - Report ID '8'
     if '8' in report_ids and os.path.exists(img4_path):
-        pdf.add_page()
-        pdf.set_font("Arial", 'B', 13)
-        pdf.set_text_color(30, 41, 59)
-        pdf.cell(0, 10, "Sales Revenue (Cr) by Zone 2026 YTD", ln=True)
-        pdf.image(img4_path, x=10, w=190)
-        pdf.ln(6)
+        place_chart_section("Sales Revenue (Cr) by Zone 2026 YTD", img4_path, approx_h=85)
 
     # 3. Year-wise Sales Comparison - Report ID '1'
     if '1' in report_ids and os.path.exists(img1_path):
-        pdf.add_page()
-        pdf.set_font("Arial", 'B', 13)
-        pdf.set_text_color(30, 41, 59)
-        pdf.cell(0, 10, f"Year-wise Sales Comparison ({current_year_num})", ln=True)
-        pdf.image(img1_path, x=10, w=190)
-        pdf.ln(6)
+        place_chart_section(f"Year-wise Sales Comparison ({current_year_num})", img1_path, approx_h=83)
     
     # 4. Sales by Zone - Report ID '2'
     if '2' in report_ids and os.path.exists(img2_path):
-        pdf.add_page()
-        pdf.set_font("Arial", 'B', 13)
-        pdf.set_text_color(30, 41, 59)
-        pdf.cell(0, 10, f"Sales by Zone ({current_year_num})", ln=True)
-        pdf.image(img2_path, x=10, w=190)
-        pdf.ln(6)
+        place_chart_section(f"Sales by Zone ({current_year_num})", img2_path, approx_h=83)
     
     # 5. Top 10 Tyre Types by Sales - Report ID '3'
     if '3' in report_ids and os.path.exists(img3_path):
-        pdf.add_page()
-        pdf.set_font("Arial", 'B', 13)
-        pdf.set_text_color(30, 41, 59)
-        pdf.cell(0, 10, f"Top 10 Tyre Types by Sales ({current_year_num})", ln=True)
-        pdf.image(img3_path, x=10, w=190)
-        pdf.ln(6)
+        place_chart_section(f"Top 10 Tyre Types by Sales ({current_year_num})", img3_path, approx_h=83)
 
-    # 6. Category Sales & Actual Sales by Account Category (Cr) - Report ID '4'
-    # Rendered as clean, compact cards matching Engagement Zone UI (Screenshots 3 & 4)
-    if '4' in report_ids and (chart_data_5_cat or chart_data_5_acc):
-        pdf.add_page()
-        if chart_data_5_cat:
-            draw_category_sales_cards(pdf, f"Category Sales ({current_year_num})", chart_data_5_cat)
-        if chart_data_5_acc:
-            draw_account_category_cards(pdf, f"Actual Sales by Account Category (Cr) - {current_year_num}", chart_data_5_acc)
-
-    # 7. Toppers & Draggers (2 Days Performance) - Report ID '12'
+    # 6. Toppers & Draggers (2 Days Performance) - Report ID '12' (Placed right after Top 10 Tyre Types)
     # Sequential order: Customers -> Tyres -> Territories -> Regions -> Materials
+    # Two dimensions per page whenever they fit cleanly!
     if '12' in report_ids:
         for dim_k, dim_t, ent_l in tb_dims_sequence:
             dim_img = tb_img_paths.get(dim_k)
             if dim_img and os.path.exists(dim_img):
-                pdf.add_page()
-                pdf.set_font("Arial", 'B', 13)
-                pdf.set_text_color(30, 41, 59)
-                pdf.cell(0, 10, f"TOPPERS & DRAGGERS - {dim_t} (LAST 2 DAYS)", ln=True)
-                pdf.image(dim_img, x=10, w=190)
-                pdf.ln(6)
+                place_chart_section(f"TOPPERS & DRAGGERS - {dim_t} (LAST 2 DAYS)", dim_img, approx_h=76)
+
+    # 7. Category Sales & Actual Sales by Account Category (Cr) - Report ID '4' (Placed at the very end as requested)
+    # Rendered as clean, compact cards matching Engagement Zone UI (Screenshots 3 & 4)
+    if '4' in report_ids and (chart_data_5_cat or chart_data_5_acc):
+        if chart_data_5_cat:
+            draw_category_sales_cards(pdf, f"Category Sales ({current_year_num})", chart_data_5_cat)
+        if chart_data_5_acc:
+            draw_account_category_cards(pdf, f"Actual Sales by Account Category (Cr) - {current_year_num}", chart_data_5_acc)
 
     # Non Billed Accounts (5), Overdue (6), Exposure (7) are COMMENTED OUT:
     # "akn comment kore rakho overdue, non bill acc, exposure ota mail e jabe na"
