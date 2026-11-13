@@ -629,16 +629,16 @@ def check_and_send_scheduled_reports():
             if pdf_path: attachments.append(pdf_path)
             if excel_path: attachments.append(excel_path)
             
-            if not attachments and not summary_html:
-                print(f"[Mailer] No attachments or summary generated for {schedule['email']}, skipping email.", flush=True)
+            if not attachments:
+                print(f"[Mailer] No attachments generated for {schedule['email']}, skipping email.", flush=True)
                 continue
 
-            # 2. Send the Email
+            # 2. Send the Email (Summary removed from email body as requested; full summary is inside the PDF)
             send_report_email(
                 to_email=schedule['email'],
                 attachment_paths=attachments,
                 recipient_name=schedule['name'],
-                summary_html=summary_html
+                summary_html=""
             )
             
             # 3. Cleanup temp files
