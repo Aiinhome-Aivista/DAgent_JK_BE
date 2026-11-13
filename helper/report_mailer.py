@@ -124,29 +124,35 @@ def _fetch_session_analysis_summary(conn, session_id: str = None, workspace_id: 
 
         # 1. Direct query on session_analysis_cache by session_id
         if session_id and str(session_id).strip() not in ("", "null", "None"):
-            cur.execute(
-                """SELECT report FROM session_analysis_cache 
-                   WHERE session_id = %s AND report IS NOT NULL AND report != '' 
-                   ORDER BY updated_at DESC, id DESC LIMIT 1""",
-                (str(session_id).strip(),)
-            )
-            row = cur.fetchone()
-            if row:
-                raw = row.get("report") if isinstance(row, dict) else row[0]
-
-            # 2. Check session_chat_history for this session_id
-            if not raw:
+            try:
                 cur.execute(
-                    """SELECT answer FROM session_chat_history 
-                       WHERE session_id = %s 
-                         AND (question LIKE 'default_%%' OR answer LIKE '%%Executive Summary%%' OR (visit_number = 1 AND turn_index = 0))
-                         AND answer IS NOT NULL AND answer != ''
+                    """SELECT report FROM session_analysis_cache 
+                       WHERE session_id = %s AND report IS NOT NULL AND report != '' 
                        ORDER BY id DESC LIMIT 1""",
                     (str(session_id).strip(),)
                 )
                 row = cur.fetchone()
                 if row:
-                    raw = row.get("answer") if isinstance(row, dict) else row[0]
+                    raw = row.get("report") if isinstance(row, dict) else row[0]
+            except Exception as e1:
+                print(f"[Mailer] Cache query error: {e1}", flush=True)
+
+            # 2. Check session_chat_history for this session_id
+            if not raw:
+                try:
+                    cur.execute(
+                        """SELECT answer FROM session_chat_history 
+                           WHERE session_id = %s 
+                             AND (question LIKE 'default_%%' OR answer LIKE '%%Executive Summary%%' OR (visit_number = 1 AND turn_index = 0))
+                             AND answer IS NOT NULL AND answer != ''
+                           ORDER BY id DESC LIMIT 1""",
+                        (str(session_id).strip(),)
+                    )
+                    row = cur.fetchone()
+                    if row:
+                        raw = row.get("answer") if isinstance(row, dict) else row[0]
+                except Exception as e2:
+                    print(f"[Mailer] Chat history query error: {e2}", flush=True)
 
         # 3. Resolve session_id from workspace_id if raw is still empty
         resolved_sid = None
@@ -160,7 +166,7 @@ def _fetch_session_analysis_summary(conn, session_id: str = None, workspace_id: 
                         cur.execute(
                             """SELECT report FROM session_analysis_cache 
                                WHERE session_id = %s AND report IS NOT NULL AND report != '' 
-                               ORDER BY updated_at DESC, id DESC LIMIT 1""",
+                               ORDER BY id DESC LIMIT 1""",
                             (resolved_sid,)
                         )
                         row = cur.fetchone()
@@ -183,26 +189,32 @@ def _fetch_session_analysis_summary(conn, session_id: str = None, workspace_id: 
 
         # 4. Global fallback: get the latest summary from ANY session in session_analysis_cache
         if not raw:
-            cur.execute(
-                """SELECT report FROM session_analysis_cache 
-                   WHERE report IS NOT NULL AND report != '' 
-                   ORDER BY updated_at DESC, id DESC LIMIT 1"""
-            )
-            row = cur.fetchone()
-            if row:
-                raw = row.get("report") if isinstance(row, dict) else row[0]
+            try:
+                cur.execute(
+                    """SELECT report FROM session_analysis_cache 
+                       WHERE report IS NOT NULL AND report != '' 
+                       ORDER BY id DESC LIMIT 1"""
+                )
+                row = cur.fetchone()
+                if row:
+                    raw = row.get("report") if isinstance(row, dict) else row[0]
+            except Exception as e4:
+                print(f"[Mailer] Global cache query error: {e4}", flush=True)
 
         # 5. Global fallback: get the latest summary from ANY session in session_chat_history
         if not raw:
-            cur.execute(
-                """SELECT answer FROM session_chat_history 
-                   WHERE (question LIKE 'default_%%' OR answer LIKE '%%Executive Summary%%' OR (visit_number = 1 AND turn_index = 0))
-                     AND answer IS NOT NULL AND answer != ''
-                   ORDER BY id DESC LIMIT 1"""
-            )
-            row = cur.fetchone()
-            if row:
-                raw = row.get("answer") if isinstance(row, dict) else row[0]
+            try:
+                cur.execute(
+                    """SELECT answer FROM session_chat_history 
+                       WHERE (question LIKE 'default_%%' OR answer LIKE '%%Executive Summary%%' OR (visit_number = 1 AND turn_index = 0))
+                         AND answer IS NOT NULL AND answer != ''
+                       ORDER BY id DESC LIMIT 1"""
+                )
+                row = cur.fetchone()
+                if row:
+                    raw = row.get("answer") if isinstance(row, dict) else row[0]
+            except Exception as e5:
+                print(f"[Mailer] Global chat history query error: {e5}", flush=True)
 
         # 6. If STILL empty, dynamically generate it!
         if not raw:
@@ -214,10 +226,14 @@ def _fetch_session_analysis_summary(conn, session_id: str = None, workspace_id: 
                 cur.execute(
                     """SELECT report FROM session_analysis_cache 
                        WHERE session_id = %s AND report IS NOT NULL AND report != '' 
-                       ORDER BY updated_at DESC, id DESC LIMIT 1""",
+                       ORDER BY id DESC LIMIT 1""",
                     (target_sid,)
                 )
                 row = cur.fetchone()
+                if row:
+                    raw = row.get("report") if isinstance(row, dict) else row[0]
+            except Exception as gen_err:
+                print(f"[Mailer] Dynamic summary generation fallback note: {gen_err}", flush=True)
                 if row:
                     raw = row.get("report") if isinstance(row, dict) else row[0]
             except Exception as gen_err:
