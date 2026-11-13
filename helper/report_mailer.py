@@ -206,7 +206,7 @@ def _fetch_session_analysis_summary(conn, session_id: str = None, workspace_id: 
             try:
                 cur.execute(
                     """SELECT answer FROM session_chat_history 
-                       WHERE (question LIKE 'default_%%' OR answer LIKE '%%Executive Summary%%' OR (visit_number = 1 AND turn_index = 0))
+                       WHERE (question LIKE 'default_%%' OR answer LIKE '%%Sales performance analysis%%' OR answer LIKE '%%Performance Analysis%%' OR answer LIKE '%%Executive Summary%%' OR (visit_number = 1 AND turn_index = 0))
                          AND answer IS NOT NULL AND answer != ''
                        ORDER BY id DESC LIMIT 1"""
                 )
@@ -218,7 +218,7 @@ def _fetch_session_analysis_summary(conn, session_id: str = None, workspace_id: 
 
         # 6. If STILL empty, dynamically generate it!
         if not raw:
-            target_sid = session_id or resolved_sid or "42d4f4e5-e66d-4c2a-9ad4-ea637e90fc91"
+            target_sid = session_id or resolved_sid or "default_13_11_2026"
             try:
                 from controllers.session_analysis_controller import run_daily_session_analysis_scheduler
                 print(f"[Mailer] No summary found anywhere. Generating fresh analysis for session {target_sid}...", flush=True)
@@ -234,10 +234,6 @@ def _fetch_session_analysis_summary(conn, session_id: str = None, workspace_id: 
                     raw = row.get("report") if isinstance(row, dict) else row[0]
             except Exception as gen_err:
                 print(f"[Mailer] Dynamic summary generation fallback note: {gen_err}", flush=True)
-                if row:
-                    raw = row.get("report") if isinstance(row, dict) else row[0]
-            except Exception as gen_err:
-                print(f"[Mailer] Dynamic summary generation fallback note: {gen_err}", flush=True)
 
     except Exception as e:
         print(f"[Mailer] Could not fetch session analysis summary: {e}", flush=True)
@@ -246,8 +242,12 @@ def _fetch_session_analysis_summary(conn, session_id: str = None, workspace_id: 
             try: cur.close()
             except: pass
 
-    if not raw:
-        return ""
+    if not raw or len(str(raw).strip()) < 50:
+        try:
+            from helper.pdf_generator import _get_default_verified_summary
+            return _get_default_verified_summary()
+        except Exception:
+            return ""
 
     # If raw is a dict or stringified JSON, extract the text
     if isinstance(raw, dict):
@@ -586,7 +586,7 @@ def check_and_send_scheduled_reports():
             print(f"[Mailer] Executive Analysis Summary prepared for {schedule['email']} (chars: {len(summary_md)}, html_chars: {len(summary_html)})", flush=True)
 
             pdf_path = None
-            should_gen_pdf = (not parsed_rids) or any(rid in parsed_rids for rid in ('1', '2', '3', '4', '5', '6', '7', '8', '11'))
+            should_gen_pdf = (not parsed_rids) or any(rid in parsed_rids for rid in ('1', '2', '3', '4', '8', '11', '12'))
             if should_gen_pdf:
                 print(f"[Mailer] Generating PDF report for {schedule['email']}...", flush=True)
                 # 1. Generate PDF Report (with executive summary embedded, no hyperlinks)
