@@ -1418,12 +1418,23 @@ def _compute_core_kpis(cursor) -> dict:
                 {sales_where}
                 GROUP BY sd.{col_cust}
                 HAVING SUM(CASE WHEN sd.{col_date} BETWEEN DATE_SUB(md.max_dt, INTERVAL 59 DAY) AND DATE_SUB(md.max_dt, INTERVAL 30 DAY) THEN sd.{col_revenue} ELSE 0 END) > 0
+            ),
+            filtered_cust AS (
+                SELECT 
+                    c.cust_code,
+                    c.curr_rev,
+                    c.prev_rev
+                FROM customer_30d c
+                LEFT JOIN `{cust_tbl}` cm 
+                    ON (c.cust_code = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(c.cust_code AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))
+                WHERE 1=1 {cust_filter_klabc}
+                GROUP BY c.cust_code, c.curr_rev, c.prev_rev
             )
             SELECT 
                 COUNT(CASE WHEN (prev_rev - curr_rev) / prev_rev > 0.05 THEN 1 END) AS accounts_with_decline_gt_5pct,
                 COUNT(CASE WHEN (prev_rev - curr_rev) / prev_rev > 0.10 THEN 1 END) AS accounts_with_decline_gt_10pct
-            FROM customer_30d
-        """, required_tables=[sales_tbl])
+            FROM filtered_cust
+        """, required_tables=[sales_tbl, cust_tbl])
 
         run("worst_customers_steepest_decline_30d", f"""
             WITH customer_30d AS (
@@ -1458,12 +1469,23 @@ def _compute_core_kpis(cursor) -> dict:
                 CROSS JOIN (SELECT MAX(sd_max.{col_date}) AS max_dt FROM `{sales_tbl}` sd_max) md
                 {sales_where}
                 GROUP BY sd.{col_cust}
+            ),
+            filtered_cust AS (
+                SELECT 
+                    cb.cust_code,
+                    cb.curr_rev,
+                    cb.total_historical_rev
+                FROM cust_billing cb
+                LEFT JOIN `{cust_tbl}` cm 
+                    ON (cb.cust_code = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(cb.cust_code AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))
+                WHERE 1=1 {cust_filter_klabc}
+                GROUP BY cb.cust_code, cb.curr_rev, cb.total_historical_rev
             )
             SELECT 
                 COUNT(CASE WHEN curr_rev = 0 AND total_historical_rev >= 200000 THEN 1 END) AS high_risk_inactive_accounts_2lakh_plus,
                 COUNT(CASE WHEN curr_rev = 0 AND total_historical_rev > 0 THEN 1 END) AS total_zero_billing_accounts
-            FROM cust_billing
-        """, required_tables=[sales_tbl])
+            FROM filtered_cust
+        """, required_tables=[sales_tbl, cust_tbl])
 
         run("zero_units_30d_accounts", f"""
             WITH cust_units AS (
@@ -1475,11 +1497,22 @@ def _compute_core_kpis(cursor) -> dict:
                 CROSS JOIN (SELECT MAX(sd_max.{col_date}) AS max_dt FROM `{sales_tbl}` sd_max) md
                 {sales_where}
                 GROUP BY sd.{col_cust}
+            ),
+            filtered_units AS (
+                SELECT 
+                    cu.cust_code,
+                    cu.curr_units,
+                    cu.total_historical_units
+                FROM cust_units cu
+                LEFT JOIN `{cust_tbl}` cm 
+                    ON (cu.cust_code = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(cu.cust_code AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))
+                WHERE 1=1 {cust_filter_klabc}
+                GROUP BY cu.cust_code, cu.curr_units, cu.total_historical_units
             )
             SELECT 
                 COUNT(CASE WHEN curr_units = 0 AND total_historical_units > 0 THEN 1 END) AS zero_unit_active_counters
-            FROM cust_units
-        """, required_tables=[sales_tbl])
+            FROM filtered_units
+        """, required_tables=[sales_tbl, cust_tbl])
 
 
     # ---------- 5. Geography ----------
@@ -2601,11 +2634,22 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
                 AND s."invoice_date" BETWEEN '{dt_60d_str}' AND '{max_dt_str}'
                 GROUP BY s."dealer_code"
                 HAVING SUM(CASE WHEN s."invoice_date" BETWEEN '{dt_60d_str}' AND '{dt_31d_prev_str}' THEN COALESCE(s."invoice_value", 0) ELSE 0 END) > 0
+            ),
+            filtered_cust AS (
+                SELECT 
+                    c."dealer_code",
+                    c.curr_rev,
+                    c.prev_rev
+                FROM customer_30d c
+                LEFT JOIN "{schema}"."{cust_view}" cm 
+                    ON (c."dealer_code" = cm."KUNNR" OR LTRIM(c."dealer_code", '0') = LTRIM(cm."KUNNR", '0'))
+                WHERE (cm."KLABC" IS NULL OR cm."KLABC" <> 'X')
+                GROUP BY c."dealer_code", c.curr_rev, c.prev_rev
             )
             SELECT 
                 COUNT(CASE WHEN (prev_rev - curr_rev) * 1.0 / prev_rev > 0.05 THEN 1 END) AS accounts_with_decline_gt_5pct,
                 COUNT(CASE WHEN (prev_rev - curr_rev) * 1.0 / prev_rev > 0.10 THEN 1 END) AS accounts_with_decline_gt_10pct
-            FROM customer_30d
+            FROM filtered_cust
         """)
 
         run("worst_customers_steepest_decline_30d", f"""
@@ -2640,11 +2684,22 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
                 FROM {sales_source} s
                 {sales_where}
                 GROUP BY s."dealer_code"
+            ),
+            filtered_cust AS (
+                SELECT 
+                    cb."dealer_code",
+                    cb.curr_rev,
+                    cb.total_historical_rev
+                FROM cust_billing cb
+                LEFT JOIN "{schema}"."{cust_view}" cm 
+                    ON (cb."dealer_code" = cm."KUNNR" OR LTRIM(cb."dealer_code", '0') = LTRIM(cm."KUNNR", '0'))
+                WHERE (cm."KLABC" IS NULL OR cm."KLABC" <> 'X')
+                GROUP BY cb."dealer_code", cb.curr_rev, cb.total_historical_rev
             )
             SELECT 
                 COUNT(CASE WHEN curr_rev = 0 AND total_historical_rev >= 200000 THEN 1 END) AS high_risk_inactive_accounts_2lakh_plus,
                 COUNT(CASE WHEN curr_rev = 0 AND total_historical_rev > 0 THEN 1 END) AS total_zero_billing_accounts
-            FROM cust_billing
+            FROM filtered_cust
         """)
 
         run("zero_units_30d_accounts", f"""
@@ -2656,10 +2711,21 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
                 FROM {sales_source} s
                 {sales_where}
                 GROUP BY s."dealer_code"
+            ),
+            filtered_units AS (
+                SELECT 
+                    cu."dealer_code",
+                    cu.curr_units,
+                    cu.total_historical_units
+                FROM cust_units cu
+                LEFT JOIN "{schema}"."{cust_view}" cm 
+                    ON (cu."dealer_code" = cm."KUNNR" OR LTRIM(cu."dealer_code", '0') = LTRIM(cm."KUNNR", '0'))
+                WHERE (cm."KLABC" IS NULL OR cm."KLABC" <> 'X')
+                GROUP BY cu."dealer_code", cu.curr_units, cu.total_historical_units
             )
             SELECT 
                 COUNT(CASE WHEN curr_units = 0 AND total_historical_units > 0 THEN 1 END) AS zero_unit_active_counters
-            FROM cust_units
+            FROM filtered_units
         """)
 
     # ---------- 5. Geography ----------
