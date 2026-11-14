@@ -372,7 +372,18 @@ def bulk_sync_tyre_sales_permutations(mysql_conn, session_id: str, user_id=None)
                     COALESCE(NULLIF(TRIM(rm."region_code"), ''), NULLIF(TRIM(tm."REGIO"), ''), NULLIF(TRIM(cm."BZIRK"), ''), 'UNKNOWN') AS REGION_CODE,
                     COALESCE(NULLIF(TRIM(rm."region_name"), ''), '') AS REGION_NAME,
                     COALESCE(NULLIF(TRIM(cm."CH_TYPE"), ''), 'UNKNOWN') AS CUSTOMER_CATEGORY,
-                    COALESCE(NULLIF(TRIM(sku."CONSTUCTION"), ''), 'UNKNOWN') AS CONSTRUCTION_TYPE,
+                    COALESCE(
+                        CASE TRIM(sku."CONSTUCTION")
+                            WHEN '1' THEN 'Bias'
+                            WHEN '2' THEN 'Radial'
+                            WHEN '3' THEN 'Bias'
+                            WHEN '4' THEN 'Bias'
+                            WHEN '5' THEN 'Radial'
+                            WHEN '6' THEN 'Bias'
+                            ELSE 'Others'
+                        END,
+                        'UNKNOWN'
+                    ) AS CONSTRUCTION_TYPE,
                     COALESCE(NULLIF(TRIM(cat."CAT_DESC"), ''), NULLIF(TRIM(sku."TYRE_TYPE"), ''), 'UNKNOWN') AS TYRE_TYPE,
                     YEAR(s."invoice_date") AS SALES_YEAR,
                     ROUND(SUM(COALESCE(s."invoice_value", s."ndp_value", s."taxable_value", 0)), 2) AS TOTAL_SALES
@@ -400,7 +411,18 @@ def bulk_sync_tyre_sales_permutations(mysql_conn, session_id: str, user_id=None)
                     COALESCE(NULLIF(TRIM(rm."region_code"), ''), NULLIF(TRIM(tm."REGIO"), ''), NULLIF(TRIM(cm."BZIRK"), ''), 'UNKNOWN'),
                     COALESCE(NULLIF(TRIM(rm."region_name"), ''), ''),
                     COALESCE(NULLIF(TRIM(cm."CH_TYPE"), ''), 'UNKNOWN'),
-                    COALESCE(NULLIF(TRIM(sku."CONSTUCTION"), ''), 'UNKNOWN'),
+                    COALESCE(
+                        CASE TRIM(sku."CONSTUCTION")
+                            WHEN '1' THEN 'Bias'
+                            WHEN '2' THEN 'Radial'
+                            WHEN '3' THEN 'Bias'
+                            WHEN '4' THEN 'Bias'
+                            WHEN '5' THEN 'Radial'
+                            WHEN '6' THEN 'Bias'
+                            ELSE 'Others'
+                        END,
+                        'UNKNOWN'
+                    ),
                     COALESCE(NULLIF(TRIM(cat."CAT_DESC"), ''), NULLIF(TRIM(sku."TYRE_TYPE"), ''), 'UNKNOWN'),
                     YEAR(s."invoice_date")
             """
@@ -437,7 +459,18 @@ def bulk_sync_tyre_sales_permutations(mysql_conn, session_id: str, user_id=None)
                     COALESCE(NULLIF(TRIM(rm.region), ''), NULLIF(TRIM(cm.sales_office), ''), 'UNKNOWN') AS REGION_CODE,
                     COALESCE(NULLIF(TRIM(rm.region_name), ''), '') AS REGION_NAME,
                     COALESCE(NULLIF(TRIM(cm.ch_type), ''), 'UNKNOWN') AS CUSTOMER_CATEGORY,
-                    COALESCE(NULLIF(TRIM(s.constuction), ''), 'UNKNOWN') AS CONSTRUCTION_TYPE,
+                    COALESCE(
+                        CASE TRIM(s.constuction)
+                            WHEN '1' THEN 'Bias'
+                            WHEN '2' THEN 'Radial'
+                            WHEN '3' THEN 'Bias'
+                            WHEN '4' THEN 'Bias'
+                            WHEN '5' THEN 'Radial'
+                            WHEN '6' THEN 'Bias'
+                            ELSE 'Others'
+                        END,
+                        'UNKNOWN'
+                    ) AS CONSTRUCTION_TYPE,
                     COALESCE(NULLIF(TRIM(s.tyre_type), ''), 'UNKNOWN') AS TYRE_TYPE,
                     YEAR(s.billing__doc_date) AS SALES_YEAR,
                     ROUND(SUM(COALESCE(s.net__value, 0)), 2) AS TOTAL_SALES
@@ -453,7 +486,18 @@ def bulk_sync_tyre_sales_permutations(mysql_conn, session_id: str, user_id=None)
                     COALESCE(NULLIF(TRIM(rm.region), ''), NULLIF(TRIM(cm.sales_office), ''), 'UNKNOWN'),
                     COALESCE(NULLIF(TRIM(rm.region_name), ''), ''),
                     COALESCE(NULLIF(TRIM(cm.ch_type), ''), 'UNKNOWN'),
-                    COALESCE(NULLIF(TRIM(s.constuction), ''), 'UNKNOWN'),
+                    COALESCE(
+                        CASE TRIM(s.constuction)
+                            WHEN '1' THEN 'Bias'
+                            WHEN '2' THEN 'Radial'
+                            WHEN '3' THEN 'Bias'
+                            WHEN '4' THEN 'Bias'
+                            WHEN '5' THEN 'Radial'
+                            WHEN '6' THEN 'Bias'
+                            ELSE 'Others'
+                        END,
+                        'UNKNOWN'
+                    ),
                     COALESCE(NULLIF(TRIM(s.tyre_type), ''), 'UNKNOWN'),
                     YEAR(s.billing__doc_date)
             """
@@ -617,6 +661,13 @@ def get_tyre_sales_data_controller(get_db_connection):
     selected_cust = normalize_filter_val(cust_raw).upper()
     selected_const = normalize_filter_val(const_raw).upper()
 
+    const_candidates = [selected_const]
+    if selected_const == 'RADIAL':
+        const_candidates.extend(['2', '5'])
+    elif selected_const == 'BIAS':
+        const_candidates.extend(['1', '3', '4', '6'])
+    const_ph = ", ".join(["%s"] * len(const_candidates))
+
     conn = get_db_connection()
     if not conn:
         return jsonify({"error": "Failed to connect to database."}), 500
@@ -628,7 +679,7 @@ def get_tyre_sales_data_controller(get_db_connection):
         cur = conn.cursor(dictionary=True) if hasattr(conn, "cursor") else conn.cursor()
 
         # Direct indexed lookup from pre-calculated MySQL table
-        query_sql = """
+        query_sql = f"""
             SELECT
                 rank_no,
                 tyre_type,
@@ -640,16 +691,17 @@ def get_tyre_sales_data_controller(get_db_connection):
               AND zone_code = %s
               AND region_code = %s
               AND customer_category = %s
-              AND construction_type = %s
+              AND construction_type IN ({const_ph})
             ORDER BY sales_value DESC
             LIMIT 10
         """
-        cur.execute(query_sql, (effective_session, selected_year, selected_zone, selected_region, selected_cust, selected_const))
+        params_exact = [effective_session, selected_year, selected_zone, selected_region, selected_cust] + const_candidates
+        cur.execute(query_sql, tuple(params_exact))
         rows = cur.fetchall()
 
         if not rows:
             # Fallback if region was stored as name or code
-            query_sql_fuzzy = """
+            query_sql_fuzzy = f"""
                 SELECT
                     rank_no,
                     tyre_type,
@@ -661,17 +713,17 @@ def get_tyre_sales_data_controller(get_db_connection):
                   AND (zone_code = %s OR UPPER(TRIM(zone_code)) = %s)
                   AND (region_code = %s OR UPPER(TRIM(region_code)) = %s)
                   AND (customer_category = %s OR UPPER(TRIM(customer_category)) = %s)
-                  AND (construction_type = %s OR UPPER(TRIM(construction_type)) = %s)
+                  AND (construction_type IN ({const_ph}) OR UPPER(TRIM(construction_type)) IN ({const_ph}))
                 ORDER BY sales_value DESC
                 LIMIT 10
             """
-            cur.execute(query_sql_fuzzy, (
+            params_fuzzy = [
                 effective_session, selected_year,
                 selected_zone, selected_zone,
                 selected_region, selected_region,
-                selected_cust, selected_cust,
-                selected_const, selected_const
-            ))
+                selected_cust, selected_cust
+            ] + const_candidates + const_candidates
+            cur.execute(query_sql_fuzzy, tuple(params_fuzzy))
             rows = cur.fetchall()
 
         cur.close()

@@ -343,53 +343,119 @@ def fetch_master_tyre_types(cursor, is_hana, schema, user_db):
 
 
 def fetch_master_construction_types(cursor, is_hana, schema, user_db):
-    """User's exact query for Distinct CONSTUCTION from ZIVR_SKUMaster_01_TR."""
+    """User's exact query for Construction Types from ZIVR_SKUMaster_01_TR with sort order."""
     constructions = []
     if is_hana:
         sql = f"""
+            SELECT 'All' AS "label", 'ALL' AS "value", 1 AS "sort_order"
+            FROM DUMMY
+
+            UNION ALL
+
             SELECT DISTINCT
-                TRIM(M."CONSTUCTION") AS CONSTRUCTION_TYPE
-            FROM (
-                SELECT "SKU"
-                FROM "{schema}"."ZPVF_SD_SalesHistory_01_TR"
-                WHERE "distribution_channel" = '10'
+                CASE TRIM("CONSTUCTION")
+                    WHEN '1' THEN 'Bias'
+                    WHEN '2' THEN 'Radial'
+                    WHEN '3' THEN 'Bias'
+                    WHEN '4' THEN 'Bias'
+                    WHEN '5' THEN 'Radial'
+                    WHEN '6' THEN 'Bias'
+                    ELSE 'Others'
+                END AS "label",
+                
+                CASE TRIM("CONSTUCTION")
+                    WHEN '1' THEN 'Bias'
+                    WHEN '2' THEN 'Radial'
+                    WHEN '3' THEN 'Bias'
+                    WHEN '4' THEN 'Bias'
+                    WHEN '5' THEN 'Radial'
+                    WHEN '6' THEN 'Bias'
+                    ELSE 'Others'
+                END AS "value",
+                
+                CASE 
+                    WHEN TRIM("CONSTUCTION") IN ('2', '5')           THEN 2  
+                    WHEN TRIM("CONSTUCTION") IN ('1', '3', '4', '6') THEN 3  
+                    ELSE 4                                                  
+                END AS "sort_order"
 
-                UNION
+            FROM "{schema}"."ZIVR_SKUMaster_01_TR"
+            WHERE "CONSTUCTION" IS NOT NULL 
+              AND TRIM("CONSTUCTION") <> ''
 
-                SELECT "SKU"
-                FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR"
-                WHERE "distribution_channel" = '10'
-            ) S
-            INNER JOIN "{schema}"."ZIVR_SKUMaster_01_TR" M
-                ON TRIM(S."SKU") = TRIM(M."MATNR")
-            WHERE M."CONSTUCTION" IS NOT NULL
-              AND TRIM(M."CONSTUCTION") <> ''
-            ORDER BY CONSTRUCTION_TYPE
+            ORDER BY "sort_order"
         """
-        cursor.execute(sql)
-        for r in fetchall_dict(cursor):
-            ct = _val(r, "construction_type")
-            if ct and str(ct).strip():
-                val_str = str(ct).strip()
-                constructions.append({"label": val_str, "value": val_str})
+        try:
+            cursor.execute(sql)
+            for r in fetchall_dict(cursor):
+                lbl = _val(r, "label")
+                val = _val(r, "value")
+                if lbl and val:
+                    constructions.append({"label": str(lbl).strip(), "value": str(val).strip()})
+        except Exception as e:
+            print(f"[Sales by Zone Filters] Error fetching HANA construction types: {e}", flush=True)
     else:
         try:
             sql = f"""
-                SELECT DISTINCT TRIM(constuction) as construction_type
+                SELECT 'All' AS `label`, 'ALL' AS `value`, 1 AS `sort_order`
+                UNION ALL
+                SELECT DISTINCT
+                    CASE TRIM(constuction)
+                        WHEN '1' THEN 'Bias'
+                        WHEN '2' THEN 'Radial'
+                        WHEN '3' THEN 'Bias'
+                        WHEN '4' THEN 'Bias'
+                        WHEN '5' THEN 'Radial'
+                        WHEN '6' THEN 'Bias'
+                        ELSE 'Others'
+                    END AS `label`,
+                    CASE TRIM(constuction)
+                        WHEN '1' THEN 'Bias'
+                        WHEN '2' THEN 'Radial'
+                        WHEN '3' THEN 'Bias'
+                        WHEN '4' THEN 'Bias'
+                        WHEN '5' THEN 'Radial'
+                        WHEN '6' THEN 'Bias'
+                        ELSE 'Others'
+                    END AS `value`,
+                    CASE 
+                        WHEN TRIM(constuction) IN ('2', '5')           THEN 2  
+                        WHEN TRIM(constuction) IN ('1', '3', '4', '6') THEN 3  
+                        ELSE 4                                                  
+                    END AS `sort_order`
                 FROM `{user_db}`.`sales_data`
-                WHERE constuction IS NOT NULL AND constuction <> ''
-                ORDER BY construction_type
+                WHERE constuction IS NOT NULL AND TRIM(constuction) <> ''
+                ORDER BY `sort_order`
             """
             cursor.execute(sql)
             for r in fetchall_dict(cursor):
-                ct = _val(r, "construction_type")
-                if ct and str(ct).strip():
-                    val_str = str(ct).strip()
-                    constructions.append({"label": val_str, "value": val_str})
+                lbl = _val(r, "label")
+                val = _val(r, "value")
+                if lbl and val:
+                    constructions.append({"label": str(lbl).strip(), "value": str(val).strip()})
         except Exception:
             pass
 
-    return [{"label": "ALL", "value": "ALL"}] + constructions
+    # Ensure "All" is first and preserve order without duplicate values
+    seen = set()
+    deduped = []
+    for c in constructions:
+        v = c.get("value")
+        if v and v not in seen:
+            seen.add(v)
+            deduped.append(c)
+
+    if not deduped:
+        deduped = [
+            {"label": "All", "value": "ALL"},
+            {"label": "Radial", "value": "Radial"},
+            {"label": "Bias", "value": "Bias"},
+            {"label": "Others", "value": "Others"}
+        ]
+    elif not any(str(c.get("value")).upper() == "ALL" for c in deduped):
+        deduped.insert(0, {"label": "All", "value": "ALL"})
+
+    return deduped
 
 
 def get_sales_by_zone_filters_controller(get_db_connection):
@@ -585,7 +651,18 @@ def bulk_sync_sales_by_zone_permutations(mysql_conn, session_id: str, user_id=No
                     COALESCE(NULLIF(TRIM(zm."NAME"), ''), zm."P_ZONE") AS ZONE_NAME,
                     YEAR(s."invoice_date") AS SALES_YEAR,
                     MONTH(s."invoice_date") AS MONTH_NO,
-                    COALESCE(NULLIF(TRIM(sku."CONSTUCTION"), ''), 'UNKNOWN') AS CONSTRUCTION_TYPE,
+                    COALESCE(
+                        CASE TRIM(sku."CONSTUCTION")
+                            WHEN '1' THEN 'Bias'
+                            WHEN '2' THEN 'Radial'
+                            WHEN '3' THEN 'Bias'
+                            WHEN '4' THEN 'Bias'
+                            WHEN '5' THEN 'Radial'
+                            WHEN '6' THEN 'Bias'
+                            ELSE 'Others'
+                        END,
+                        'UNKNOWN'
+                    ) AS CONSTRUCTION_TYPE,
                     COALESCE(NULLIF(TRIM(cat."CAT_CODE"), ''), NULLIF(TRIM(sku."TYRE_TYPE"), ''), 'UNKNOWN') AS TYRE_TYPE,
                     COALESCE(NULLIF(TRIM(cat."CAT_DESC"), ''), 'UNKNOWN') AS TYRE_DESC,
                     ROUND(SUM(COALESCE(s."invoice_value", s."ndp_value", s."taxable_value", 0)), 2) AS TOTAL_SALES,
@@ -630,7 +707,18 @@ def bulk_sync_sales_by_zone_permutations(mysql_conn, session_id: str, user_id=No
                     COALESCE(NULLIF(TRIM(zm."NAME"), ''), zm."P_ZONE"),
                     YEAR(s."invoice_date"),
                     MONTH(s."invoice_date"),
-                    COALESCE(NULLIF(TRIM(sku."CONSTUCTION"), ''), 'UNKNOWN'),
+                    COALESCE(
+                        CASE TRIM(sku."CONSTUCTION")
+                            WHEN '1' THEN 'Bias'
+                            WHEN '2' THEN 'Radial'
+                            WHEN '3' THEN 'Bias'
+                            WHEN '4' THEN 'Bias'
+                            WHEN '5' THEN 'Radial'
+                            WHEN '6' THEN 'Bias'
+                            ELSE 'Others'
+                        END,
+                        'UNKNOWN'
+                    ),
                     COALESCE(NULLIF(TRIM(cat."CAT_CODE"), ''), NULLIF(TRIM(sku."TYRE_TYPE"), ''), 'UNKNOWN'),
                     COALESCE(NULLIF(TRIM(cat."CAT_DESC"), ''), 'UNKNOWN')
             """
@@ -667,7 +755,18 @@ def bulk_sync_sales_by_zone_permutations(mysql_conn, session_id: str, user_id=No
                     COALESCE(NULLIF(TRIM(rm.zone), ''), 'UNKNOWN') AS ZONE_NAME,
                     YEAR(s.billing__doc_date) AS SALES_YEAR,
                     MONTH(s.billing__doc_date) AS MONTH_NO,
-                    COALESCE(NULLIF(TRIM(s.constuction), ''), 'UNKNOWN') AS CONSTRUCTION_TYPE,
+                    COALESCE(
+                        CASE TRIM(s.constuction)
+                            WHEN '1' THEN 'Bias'
+                            WHEN '2' THEN 'Radial'
+                            WHEN '3' THEN 'Bias'
+                            WHEN '4' THEN 'Bias'
+                            WHEN '5' THEN 'Radial'
+                            WHEN '6' THEN 'Bias'
+                            ELSE 'Others'
+                        END,
+                        'UNKNOWN'
+                    ) AS CONSTRUCTION_TYPE,
                     COALESCE(NULLIF(TRIM(s.tyre_type), ''), 'UNKNOWN') AS TYRE_TYPE,
                     ROUND(SUM(COALESCE(s.net__value, 0)), 2) AS TOTAL_SALES,
                     ROUND(SUM(COALESCE(s.billing_qty_in_sku, 0)), 2) AS TOTAL_QUANTITY
@@ -682,7 +781,18 @@ def bulk_sync_sales_by_zone_permutations(mysql_conn, session_id: str, user_id=No
                     COALESCE(NULLIF(TRIM(rm.zone), ''), 'UNKNOWN'),
                     YEAR(s.billing__doc_date),
                     MONTH(s.billing__doc_date),
-                    COALESCE(NULLIF(TRIM(s.constuction), ''), 'UNKNOWN'),
+                    COALESCE(
+                        CASE TRIM(s.constuction)
+                            WHEN '1' THEN 'Bias'
+                            WHEN '2' THEN 'Radial'
+                            WHEN '3' THEN 'Bias'
+                            WHEN '4' THEN 'Bias'
+                            WHEN '5' THEN 'Radial'
+                            WHEN '6' THEN 'Bias'
+                            ELSE 'Others'
+                        END,
+                        'UNKNOWN'
+                    ),
                     COALESCE(NULLIF(TRIM(s.tyre_type), ''), 'UNKNOWN')
             """
             cursor.execute(mysql_sql)
@@ -865,6 +975,13 @@ def get_sales_by_zone_data_controller(get_db_connection):
     selected_const = normalize_filter_val(const_raw).upper()
     selected_tyre = normalize_filter_val(tyre_raw).upper()
 
+    const_candidates = [selected_const]
+    if selected_const == 'RADIAL':
+        const_candidates.extend(['2', '5'])
+    elif selected_const == 'BIAS':
+        const_candidates.extend(['1', '3', '4', '6'])
+    const_ph = ", ".join(["%s"] * len(const_candidates))
+
     # Zone filter (optional single zone)
     raw_zones = data.get("selected_zones") or data.get("zones") or data.get("zone")
     zone_filter = normalize_filter_val(raw_zones)
@@ -880,7 +997,7 @@ def get_sales_by_zone_data_controller(get_db_connection):
         cur = conn.cursor(dictionary=True) if hasattr(conn, "cursor") else conn.cursor()
 
         # Direct indexed lookup from pre-calculated MySQL table
-        query_sql = """
+        query_sql = f"""
             SELECT
                 zone_code,
                 zone_name,
@@ -892,17 +1009,18 @@ def get_sales_by_zone_data_controller(get_db_connection):
             WHERE session_id = %s
               AND year_val = %s
               AND month_val = %s
-              AND construction_type = %s
+              AND construction_type IN ({const_ph})
               AND tyre_type = %s
               AND zone_code != 'UNKNOWN'
             ORDER BY sales_value DESC
         """
-        cur.execute(query_sql, (effective_session, selected_year, selected_month, selected_const, selected_tyre))
+        params_exact = [effective_session, selected_year, selected_month] + const_candidates + [selected_tyre]
+        cur.execute(query_sql, tuple(params_exact))
         rows = cur.fetchall()
 
         if not rows:
             # Fallback if specific construction/tyre had different casing or space
-            query_sql_fuzzy = """
+            query_sql_fuzzy = f"""
                 SELECT
                     zone_code,
                     zone_name,
@@ -914,11 +1032,11 @@ def get_sales_by_zone_data_controller(get_db_connection):
                 WHERE session_id = %s
                   AND year_val = %s
                   AND month_val = %s
-                  AND UPPER(TRIM(construction_type)) = %s
+                  AND UPPER(TRIM(construction_type)) IN ({const_ph})
                   AND UPPER(TRIM(tyre_type)) = %s
                 ORDER BY sales_value DESC
             """
-            cur.execute(query_sql_fuzzy, (effective_session, selected_year, selected_month, selected_const, selected_tyre))
+            cur.execute(query_sql_fuzzy, tuple(params_exact))
             rows = cur.fetchall()
 
         cur.close()

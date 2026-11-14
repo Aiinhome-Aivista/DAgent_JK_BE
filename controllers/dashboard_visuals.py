@@ -940,15 +940,18 @@ def tyre_sales_data_controller(get_db_connection):
 
         # Construction Filter
         if actual_construction and selected_constructions:
-            label_to_id = {
-                "bias": "1", "radial": "2", "tubeless bias": "3", "tubeless radial": "4",
-                "radial (tube type)": "5", "radial (tubeless)": "6", "solid / otr": "7"
-            }
             valid_constructions = []
             for c in selected_constructions:
                 if not c or str(c).strip().lower() == "all": continue
-                s_c = str(c).strip()
-                valid_constructions.append(label_to_id.get(s_c.lower(), s_c))
+                s_c = str(c).strip().lower()
+                if s_c == "radial":
+                    valid_constructions.extend(["2", "5", "Radial", "RADIAL"])
+                elif s_c == "bias":
+                    valid_constructions.extend(["1", "3", "4", "6", "Bias", "BIAS"])
+                elif s_c == "others":
+                    valid_constructions.extend(["Others", "OTHERS"])
+                else:
+                    valid_constructions.append(c)
             if valid_constructions:
                 placeholders = ",".join(["%s"] * len(valid_constructions))
                 where_clauses.append(f"{actual_construction} IN ({placeholders})")
@@ -1218,17 +1221,21 @@ def sales_by_zone_data_controller(get_db_connection):
 
                 # Construction Type filter
                 if construction_type and str(construction_type).strip().lower() != 'all':
-                    label_to_id = {
-                        "bias": "1", "radial": "2", "tubeless bias": "3", "tubeless radial": "4",
-                        "radial (tube type)": "5", "radial (tubeless)": "6", "solid / otr": "7"
-                    }
-                    c_val = str(construction_type).strip()
-                    c_val_mapped = label_to_id.get(c_val.lower(), c_val).replace("'", "''")
-                    c_val_raw = c_val.replace("'", "''")
+                    c_val = str(construction_type).strip().lower()
+                    if c_val == 'radial':
+                        cond_const = "SKU.\"CONSTUCTION\" IN ('2', '5') OR UPPER(TRIM(SKU.\"CONSTUCTION\")) = 'RADIAL'"
+                    elif c_val == 'bias':
+                        cond_const = "SKU.\"CONSTUCTION\" IN ('1', '3', '4', '6') OR UPPER(TRIM(SKU.\"CONSTUCTION\")) = 'BIAS'"
+                    elif c_val == 'others':
+                        cond_const = "SKU.\"CONSTUCTION\" NOT IN ('1', '2', '3', '4', '5', '6') OR UPPER(TRIM(SKU.\"CONSTUCTION\")) = 'OTHERS'"
+                    else:
+                        c_val_esc = c_val.replace("'", "''")
+                        cond_const = f"UPPER(TRIM(SKU.\"CONSTUCTION\")) = '{c_val_esc.upper()}'"
+
                     filter_conds.append(f"""EXISTS (
                         SELECT 1 FROM "{schema}"."{sku_tbl}" SKU
                         WHERE SKU."MATNR" = S."SKU"
-                          AND (SKU."CONSTUCTION" = '{c_val_mapped}' OR UPPER(TRIM(SKU."CONSTUCTION")) = '{c_val_raw.upper()}')
+                          AND ({cond_const})
                     )""")
 
                 # Vehicle / Tyre Type filter
@@ -1968,30 +1975,18 @@ def available_years_controller(get_db_connection):
                     # print(f"[Available Years] Customer types error: {e}")
                     pass
 
-        # 5. Fetch Construction Types
-        construction_labels = {
-            1: "Bias", 2: "Radial", 3: "Tubeless Bias", 4: "Tubeless Radial",
-            5: "Radial (Tube Type)", 6: "Radial (Tubeless)", 7: "Solid / OTR"
-        }
-        for tbl in all_tables:
-            t_name = q_tbl(tbl)
-            actual_construction_type = get_actual_column_name(cursor, t_name, ["constuction", "construction_type", "construction"], is_hana=is_hana)
-            if actual_construction_type and any(s in tbl.lower() for s in ["sku", "skumaster", "material", "construction"]):
-                try:
-                    q_con = f"SELECT DISTINCT {actual_construction_type} as val FROM {t_name} WHERE {actual_construction_type} IS NOT NULL AND {actual_construction_type} <> '' ORDER BY val ASC"
-                    execute_query(cursor, q_con, is_hana=is_hana)
-                    for r in fetchall_dict(cursor):
-                        raw_val = r["val"]
-                        try:
-                            val_int = int(raw_val)
-                            lbl = construction_labels.get(val_int, f"Type {raw_val}")
-                        except (ValueError, TypeError):
-                            lbl = str(raw_val)
-                        construction_types.append({"value": raw_val, "label": lbl})
-                    if construction_types: break
-                except Exception as e:
-                    # print(f"[Available Years] Construction types error: {e}")
-                    pass
+        # 5. Fetch Construction Types (Mapped: 1,3,4,6 -> Bias; 2,5 -> Radial; else Others)
+        try:
+            from controllers.sales_by_zone_dashboard_controller import fetch_master_construction_types
+            schema_name = sap_schema if is_hana and 'sap_schema' in locals() and sap_schema else (user_db if 'user_db' in locals() and user_db else "")
+            construction_types = fetch_master_construction_types(cursor, is_hana, schema_name, user_db)
+        except Exception:
+            construction_types = [
+                {"label": "All", "value": "ALL"},
+                {"label": "Radial", "value": "Radial"},
+                {"label": "Bias", "value": "Bias"},
+                {"label": "Others", "value": "Others"}
+            ]
 
         resp_data = {
             "status": "success",
