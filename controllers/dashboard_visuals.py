@@ -2279,6 +2279,7 @@ def default_dashboard_metrics_controller(get_db_connection):
 
     year_param = data.get("year")
     month_param = data.get("month")
+    months_param = data.get("months") or data.get("selected_months")
     start_date = data.get("start_date")
     end_date = data.get("end_date")
 
@@ -2292,8 +2293,19 @@ def default_dashboard_metrics_controller(get_db_connection):
     if str(end_date).strip() in ("", "None", "null"):
         end_date = None
 
-    is_filtered = bool(year_param or month_param or start_date or end_date)
-    filter_context = f"filter_{year_param or 'all'}_{month_param or 'all'}_{start_date or 'none'}_{end_date or 'none'}" if is_filtered else "all"
+    cleaned_months = []
+    if months_param:
+        if isinstance(months_param, (list, tuple, set)):
+            cleaned_months = [int(m) for m in months_param if str(m).strip().isdigit()]
+        elif isinstance(months_param, str):
+            cleaned_months = [int(m.strip()) for m in months_param.split(",") if m.strip().isdigit()]
+    elif month_param and str(month_param).strip().isdigit():
+        cleaned_months = [int(month_param)]
+    cleaned_months = sorted(list(set(cleaned_months)))
+
+    is_filtered = bool(year_param or cleaned_months or start_date or end_date)
+    months_ctx = "-".join(str(m) for m in cleaned_months) if cleaned_months else "all"
+    filter_context = f"filter_{year_param or 'all'}_{months_ctx}_{start_date or 'none'}_{end_date or 'none'}" if is_filtered else "all"
 
     conn = None
     hana_conn = None
@@ -2380,24 +2392,38 @@ def default_dashboard_metrics_controller(get_db_connection):
                 }), 200
 
         # Build dynamic date condition based on filter
+        m_names = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
         if start_date and end_date:
             date_cond = f"t.\"invoice_date\" >= '{start_date}' AND t.\"invoice_date\" <= '{end_date}'"
             filter_subtext = f"{start_date} to {end_date}"
-        elif year_param and month_param:
-            date_cond = f"YEAR(t.\"invoice_date\") = {int(year_param)} AND MONTH(t.\"invoice_date\") = {int(month_param)}"
-            m_names = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-            m_idx = int(month_param)
-            m_lbl = m_names[m_idx] if 0 < m_idx < len(m_names) else str(month_param)
-            filter_subtext = f"{m_lbl} {year_param}"
+        elif year_param and cleaned_months:
+            if len(cleaned_months) == 1:
+                date_cond = f"YEAR(t.\"invoice_date\") = {int(year_param)} AND MONTH(t.\"invoice_date\") = {cleaned_months[0]}"
+                m_idx = cleaned_months[0]
+                m_lbl = m_names[m_idx] if 0 < m_idx < len(m_names) else str(m_idx)
+                filter_subtext = f"{m_lbl} {year_param}"
+            else:
+                months_in = ", ".join(str(m) for m in cleaned_months)
+                date_cond = f"YEAR(t.\"invoice_date\") = {int(year_param)} AND MONTH(t.\"invoice_date\") IN ({months_in})"
+                month_labels = [m_names[m] for m in cleaned_months if 0 < m < len(m_names)]
+                if cleaned_months == [1, 2, 3]:
+                    filter_subtext = f"Q1 (Jan-Mar) {year_param}"
+                elif cleaned_months == [4, 5, 6]:
+                    filter_subtext = f"Q2 (Apr-Jun) {year_param}"
+                elif cleaned_months == [7, 8, 9]:
+                    filter_subtext = f"Q3 (Jul-Sep) {year_param}"
+                elif cleaned_months == [10, 11, 12]:
+                    filter_subtext = f"Q4 (Oct-Dec) {year_param}"
+                else:
+                    filter_subtext = f"{', '.join(month_labels[:3])}{'...' if len(month_labels) > 3 else ''} {year_param}"
         elif year_param:
             date_cond = f"YEAR(t.\"invoice_date\") = {int(year_param)}"
             filter_subtext = f"Year {year_param}"
-        elif month_param:
-            date_cond = f"MONTH(t.\"invoice_date\") = {int(month_param)}"
-            m_names = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-            m_idx = int(month_param)
-            m_lbl = m_names[m_idx] if 0 < m_idx < len(m_names) else str(month_param)
-            filter_subtext = f"Month: {m_lbl}"
+        elif cleaned_months:
+            months_in = ", ".join(str(m) for m in cleaned_months)
+            date_cond = f"MONTH(t.\"invoice_date\") IN ({months_in})"
+            month_labels = [m_names[m] for m in cleaned_months if 0 < m < len(m_names)]
+            filter_subtext = f"Months: {', '.join(month_labels[:3])}"
         else:
             date_cond = "t.\"invoice_date\" >= '2020-01-01'"
             filter_subtext = None
@@ -4094,6 +4120,53 @@ def bulk_sync_key_metrics_permutations(mysql_conn, session_id: str, user_id=None
 
                 month_ctx = f"filter_{yr}_{m}_none_none"
                 set_cached_component_data(mysql_conn, session_id, "key_metrics", month_kpis, filter_context=month_ctx, duration_sec=0.01)
+                synced_count += 1
+
+            # C. Quarter Permutations: Q1 (1,2,3), Q2 (4,5,6), Q3 (7,8,9), Q4 (10,11,12)
+            quarters = [
+                ("Q1 (Jan-Mar)", [1, 2, 3]),
+                ("Q2 (Apr-Jun)", [4, 5, 6]),
+                ("Q3 (Jul-Sep)", [7, 8, 9]),
+                ("Q4 (Oct-Dec)", [10, 11, 12]),
+            ]
+            for q_name, q_months in quarters:
+                q_rev = round(sum(monthly_rev.get((yr, m), 0.0) for m in q_months), 2)
+                prev_q_rev = round(sum(monthly_rev.get((yr - 1, m), 0.0) for m in q_months), 2)
+                q_yoy_val = "N/A"
+                if prev_q_rev > 0:
+                    yoy_calc = ((q_rev - prev_q_rev) / prev_q_rev) * 100
+                    q_yoy_val = f"{yoy_calc:+0.2f}%"
+
+                q_top_tyres = [monthly_top_tyre.get((yr, m)) for m in q_months if (yr, m) in monthly_top_tyre]
+                q_tyre = max(set(q_top_tyres), key=q_top_tyres.count) if q_top_tyres else "TBR"
+
+                q_regions = [monthly_lead_reg.get((yr, m)) for m in q_months if (yr, m) in monthly_lead_reg]
+                q_reg = max(set(q_regions), key=q_regions.count) if q_regions else "JAIPUR"
+
+                q_kpis = copy.deepcopy(base_metrics)
+                q_kpis["metric_1"] = {
+                    "label": "Total Sales Revenue",
+                    "value": f"{q_rev:,.2f} Cr" if q_rev > 0 else (f"₹0.00 Cr" if yr < 2026 else (year_kpis.get("metric_1", {}).get("value") or "N/A")),
+                    "subtext": f"{q_name} {yr}"
+                }
+                q_kpis["metric_2"] = {
+                    "label": "Top Performing Tyre",
+                    "value": q_tyre,
+                    "subtext": "Highest revenue generator"
+                }
+                q_kpis["metric_3"] = {
+                    "label": "Leading Region",
+                    "value": q_reg,
+                    "subtext": "Most profitable region"
+                }
+                q_kpis["metric_4"] = {
+                    "label": "Year-over-Year Growth",
+                    "value": q_yoy_val,
+                    "subtext": f"Compared to {q_name} {yr - 1}"
+                }
+
+                q_ctx = f"filter_{yr}_{'-'.join(str(m) for m in q_months)}_none_none"
+                set_cached_component_data(mysql_conn, session_id, "key_metrics", q_kpis, filter_context=q_ctx, duration_sec=0.01)
                 synced_count += 1
 
         print(f"[Bulk Sync Key Metrics] ✅ Committed {synced_count} permutations into dashboard_cached_metrics.", flush=True)
