@@ -123,13 +123,15 @@ def _execute_sync_task(origin: str = "scheduled"):
             print(f"[Scheduler] ====================================================================", flush=True)
             ws_start_t = time.time()
 
-            # 1. Key Metrics (16 KPIs)
+            # 1. Key Metrics (16 KPIs & All Permutations)
             t_step = time.time()
-            print(f"[Scheduler] ⏳ [1/13] Syncing Key Metrics (16 KPIs)...", flush=True)
+            print(f"[Scheduler] ⏳ [1/13] Syncing Key Metrics (16 KPIs & All Permutations)...", flush=True)
             try:
                 with _app_instance.test_request_context(json={"session_id": s_id, "user_id": u_id, "force_refresh": True}):
                     default_dashboard_metrics_controller(_get_db_conn_func)
-                print(f"[Scheduler] ✅ [1/13] Key Metrics synced in {round(time.time() - t_step, 2)}s", flush=True)
+                from controllers.dashboard_visuals import bulk_sync_key_metrics_permutations
+                bulk_sync_key_metrics_permutations(conn, s_id, u_id, _app_instance, _get_db_conn_func)
+                print(f"[Scheduler] ✅ [1/13] Key Metrics all permutations synced in {round(time.time() - t_step, 2)}s", flush=True)
             except Exception as e:
                 print(f"[Scheduler] ❌ [1/13] Error syncing key_metrics: {e}", flush=True)
                 try: log_system_error(session_id=s_id, module_name="scheduler:key_metrics", error_msg=str(e))
