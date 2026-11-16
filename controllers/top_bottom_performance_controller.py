@@ -148,19 +148,30 @@ def _compute_top_bottom_slice_hana(cursor, schema, dimension: str, days: int):
         group_by = entity_expr
     elif dimension in ("Category", "Categories", "Tyres", "Tyre Types"):
         cat_view = "ZIVF_CategoryMaster_01_TR"
-        entity_expr = f'COALESCE(NULLIF(TRIM(cat."CAT_DESC"), \'\'), NULLIF(TRIM(cat."SHORT_DESC"), \'\'), NULLIF(TRIM(sk."TYRE_TYPE"), \'\'))'
+        entity_expr = 'TRIM(cat."CAT_DESC")'
         joins = f"""
             JOIN "{schema}"."{sku_view}" sk ON TRIM(s."SKU") = TRIM(sk."MATNR")
-            LEFT JOIN "{schema}"."{cat_view}" cat ON TRIM(sk."CAT_CODE") = TRIM(cat."CAT_CODE")
+            JOIN "{schema}"."{cat_view}" cat ON TRIM(sk."CAT_CODE") = TRIM(cat."CAT_CODE")
+            JOIN "{schema}"."{cust_view}" cm ON (
+                s."dealer_code" = cm."KUNNR"
+                OR LPAD(TRIM(TO_VARCHAR(s."dealer_code")), 10, '0') = cm."KUNNR"
+                OR LTRIM(TO_VARCHAR(s."dealer_code"), '0') = LTRIM(cm."KUNNR", '0')
+            )
         """
-        extra_filter = f'AND {entity_expr} IS NOT NULL AND TRIM({entity_expr}) <> \'\' AND UPPER(TRIM({entity_expr})) NOT IN (\'UNKNOWN\', \'UNKNOWN TYRE\', \'NULL\', \'NONE\')'
+        extra_filter = f'AND (cm."KLABC" IS NULL OR cm."KLABC" <> \'X\') AND cat."CAT_DESC" IS NOT NULL AND TRIM(cat."CAT_DESC") <> \'\' AND UPPER(TRIM(cat."CAT_DESC")) NOT IN (\'ALL\', \'UNKNOWN\', \'UNKNOWN TYRE\', \'NULL\', \'NONE\', \'0\')'
         select_expr = f'{entity_expr} AS entity_name'
         group_by = entity_expr
     elif dimension == "Materials":
         entity_expr = f'COALESCE(NULLIF(TRIM(sk."MAKTX"), \'\'), NULLIF(TRIM(sk."PROD_TITLE"), \'\'), TRIM(s."SKU"))'
         joins = f"""
             JOIN "{schema}"."{sku_view}" sk ON TRIM(s."SKU") = TRIM(sk."MATNR")
+            JOIN "{schema}"."{cust_view}" cm ON (
+                s."dealer_code" = cm."KUNNR"
+                OR LPAD(TRIM(TO_VARCHAR(s."dealer_code")), 10, '0') = cm."KUNNR"
+                OR LTRIM(TO_VARCHAR(s."dealer_code"), '0') = LTRIM(cm."KUNNR", '0')
+            )
         """
+        extra_filter = 'AND (cm."KLABC" IS NULL OR cm."KLABC" <> \'X\')'
         select_expr = f'{entity_expr} AS entity_name'
         group_by = entity_expr
     else:
@@ -257,13 +268,20 @@ def _compute_top_bottom_slice_mysql(cursor, user_db: str, dimension: str, days: 
         group_by = entity_expr
     elif dimension in ("Category", "Categories", "Tyres", "Tyre Types"):
         entity_expr = "COALESCE(NULLIF(TRIM(sk.tyre_type), ''), NULLIF(TRIM(sk.prod_title), ''))"
-        joins = f"JOIN {sku_tbl} sk ON sd.SKU = sk.MATNR"
-        extra_filter = f"AND {entity_expr} IS NOT NULL AND TRIM({entity_expr}) <> '' AND UPPER(TRIM({entity_expr})) NOT IN ('UNKNOWN', 'UNKNOWN TYRE', 'NULL', 'NONE')"
+        joins = f"""
+            JOIN {sku_tbl} sk ON sd.SKU = sk.MATNR
+            JOIN {cust_tbl} cm ON (sd.dealer_code = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(sd.dealer_code AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))
+        """
+        extra_filter = f"AND (cm.KLABC IS NULL OR cm.KLABC <> 'X') AND {entity_expr} IS NOT NULL AND TRIM({entity_expr}) <> '' AND UPPER(TRIM({entity_expr})) NOT IN ('ALL', 'UNKNOWN', 'UNKNOWN TYRE', 'NULL', 'NONE', '0')"
         select_expr = f"{entity_expr} AS entity_name"
         group_by = entity_expr
     elif dimension == "Materials":
         entity_expr = "COALESCE(NULLIF(TRIM(sk.MAKTX), ''), NULLIF(TRIM(sk.PROD_TITLE), ''), CAST(sd.SKU AS CHAR))"
-        joins = f"JOIN {sku_tbl} sk ON sd.SKU = sk.MATNR"
+        joins = f"""
+            JOIN {sku_tbl} sk ON sd.SKU = sk.MATNR
+            JOIN {cust_tbl} cm ON (sd.dealer_code = cm.KUNNR OR TRIM(LEADING '0' FROM CAST(sd.dealer_code AS CHAR)) = TRIM(LEADING '0' FROM CAST(cm.KUNNR AS CHAR)))
+        """
+        extra_filter = "AND (cm.KLABC IS NULL OR cm.KLABC <> 'X')"
         select_expr = f"{entity_expr} AS entity_name"
         group_by = entity_expr
     else:
@@ -303,16 +321,14 @@ def _compute_top_bottom_slice_mysql(cursor, user_db: str, dimension: str, days: 
     bottom_10 = [{"rank": i + 1, "name": item["name"], "sales_value": item["sales_value"]} for i, item in enumerate(bottom_sorted)]
 
     return top_10, bottom_10
-    bottom_10 = [{"rank": i + 1, "name": item["name"], "sales_value": item["sales_value"]} for i, item in enumerate(bottom_sorted)]
-
-    return top_10, bottom_10
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Bulk Sync Function (Called by Scheduler & On-Demand)
 # ─────────────────────────────────────────────────────────────────────────────
 
-SUPPORTED_DIMENSIONS = ["Customers", "Category", "Tyres", "Territories", "Regions", "Materials"]
+SUPPORTED_DIMENSIONS = ["Customers", "Categories", "Category", "Tyres", "Territories", "Regions", "Materials"]
+CORE_DIMENSIONS = ["Customers", "Categories", "Territories", "Regions", "Materials"]
 SUPPORTED_DAYS = [2, 3, 4, 5, 6]
 
 
@@ -368,7 +384,7 @@ def bulk_sync_top_bottom_performance(mysql_conn, session_id: str, user_id=None):
     try:
         t0 = time.time()
         print(f"[Bulk Sync Top/Bottom] Starting sync for session={effective_session}, is_hana={is_hana}, schema={sap_schema}...", flush=True)
-        for dim in SUPPORTED_DIMENSIONS:
+        for dim in CORE_DIMENSIONS:
             for d in SUPPORTED_DAYS:
                 try:
                     if is_hana:
@@ -378,14 +394,19 @@ def bulk_sync_top_bottom_performance(mysql_conn, session_id: str, user_id=None):
 
                     print(f"[Bulk Sync Top/Bottom] Slice {dim} ({d} days): {len(top_10)} top, {len(bottom_10)} bottom", flush=True)
 
-                    for item in top_10:
-                        records_to_insert.append((
-                            effective_session, dim, d, "TOP", item["rank"], item["name"], item["sales_value"]
-                        ))
-                    for item in bottom_10:
-                        records_to_insert.append((
-                            effective_session, dim, d, "BOTTOM", item["rank"], item["name"], item["sales_value"]
-                        ))
+                    dims_to_save = [dim]
+                    if dim == "Categories":
+                        dims_to_save = ["Categories", "Category", "Tyres"]
+
+                    for save_dim in dims_to_save:
+                        for item in top_10:
+                            records_to_insert.append((
+                                effective_session, save_dim, d, "TOP", item["rank"], item["name"], item["sales_value"]
+                            ))
+                        for item in bottom_10:
+                            records_to_insert.append((
+                                effective_session, save_dim, d, "BOTTOM", item["rank"], item["name"], item["sales_value"]
+                            ))
                 except Exception as slice_err:
                     print(f"[Bulk Sync Top/Bottom] Error on {dim} ({d} days): {slice_err}", flush=True)
                     try:
@@ -409,7 +430,7 @@ def bulk_sync_top_bottom_performance(mysql_conn, session_id: str, user_id=None):
             print(f"[Bulk Sync Top/Bottom] ✅ Saved {len(records_to_insert)} records in {round(time.time() - t0, 2)}s", flush=True)
             return True
         else:
-            print(f"[Bulk Sync Top/Bottom] ⚠️ No records collected across 25 permutations!", flush=True)
+            print(f"[Bulk Sync Top/Bottom] ⚠️ No records collected across slices!", flush=True)
     except Exception as e:
         print(f"[Bulk Sync Top/Bottom] Main execution error: {e}", flush=True)
         try:
@@ -442,7 +463,7 @@ def get_top_bottom_performance_controller(get_db_connection):
     {
         "session_id": "...",
         "user_id": "...",
-        "dimension": "Customers" | "Dealers" | "Territories" | "Regions" | "Materials",
+        "dimension": "Customers" | "Categories" | "Category" | "Territories" | "Regions" | "Materials",
         "days": 2 | 3 | 4 | 5 | 6,
         "force_refresh": false
     }
@@ -469,38 +490,55 @@ def get_top_bottom_performance_controller(get_db_connection):
     try:
         # 1. Check pre-calculated cache table first (< 5ms response)
         if not force_refresh:
-            dim_candidates = [dimension]
-            if dimension in ("Category", "Tyres"):
-                dim_candidates = ["Category", "Tyres"]
-            dim_ph = ", ".join(["%s"] * len(dim_candidates))
+            dim_query_order = [dimension]
+            if dimension in ("Categories", "Category", "Tyres"):
+                dim_query_order = [dimension, "Categories", "Category", "Tyres"]
+                dim_query_order = list(dict.fromkeys(dim_query_order))
 
             cur = mysql_conn.cursor(dictionary=True) if hasattr(mysql_conn, "cursor") else mysql_conn.cursor()
-            cur.execute(f"""
-                SELECT ranking_type, rank_no, entity_name, sales_value
-                FROM `dashboard_top_bottom_performance`
-                WHERE session_id = %s AND dimension IN ({dim_ph}) AND days_window = %s
-                ORDER BY rank_no ASC
-            """, tuple([effective_session] + dim_candidates + [days]))
-            cached_rows = cur.fetchall()
+            cached_rows = []
+
+            for candidate_dim in dim_query_order:
+                cur.execute("""
+                    SELECT ranking_type, rank_no, entity_name, sales_value
+                    FROM `dashboard_top_bottom_performance`
+                    WHERE session_id = %s AND dimension = %s AND days_window = %s
+                    ORDER BY rank_no ASC
+                """, (effective_session, candidate_dim, days))
+                rows = cur.fetchall()
+                if rows:
+                    cached_rows = rows
+                    break
+
             cur.close()
 
             if cached_rows:
                 top_10 = []
                 bottom_10 = []
+                seen_top = set()
+                seen_bottom = set()
+
                 for r in cached_rows:
                     rtype = str(r.get("ranking_type", "")).upper()
                     entity_name = str(r.get("entity_name", "")).strip()
-                    if not entity_name or entity_name.upper() in ("UNKNOWN", "UNKNOWN TYRE", "NULL", "NONE"):
+                    if not entity_name or entity_name.upper() in ("UNKNOWN", "UNKNOWN TYRE", "NULL", "NONE", "0"):
                         continue
+                    
                     item = {
                         "rank": int(r.get("rank_no", 1)),
                         "name": entity_name,
                         "sales_value": float(r.get("sales_value", 0.0))
                     }
+
+                    name_norm = entity_name.upper()
                     if rtype == "TOP":
-                        top_10.append(item)
+                        if name_norm not in seen_top:
+                            seen_top.add(name_norm)
+                            top_10.append(item)
                     elif rtype == "BOTTOM":
-                        bottom_10.append(item)
+                        if name_norm not in seen_bottom:
+                            seen_bottom.add(name_norm)
+                            bottom_10.append(item)
 
                 # Re-index ranks 1 to N after filtering unknown entities
                 top_10 = [{"rank": idx + 1, "name": it["name"], "sales_value": it["sales_value"]} for idx, it in enumerate(top_10[:10])]
@@ -546,21 +584,28 @@ def get_top_bottom_performance_controller(get_db_connection):
         # Cache newly computed results into table
         if top_10 or bottom_10:
             try:
+                dims_to_save = [dimension]
+                if dimension in ("Categories", "Category", "Tyres"):
+                    dims_to_save = list(dict.fromkeys([dimension, "Categories", "Category", "Tyres"]))
+
                 c_cur = mysql_conn.cursor()
-                c_cur.execute("""
-                    DELETE FROM `dashboard_top_bottom_performance`
-                    WHERE session_id = %s AND dimension = %s AND days_window = %s
-                """, (effective_session, dimension, days))
+                for save_dim in dims_to_save:
+                    c_cur.execute("""
+                        DELETE FROM `dashboard_top_bottom_performance`
+                        WHERE session_id = %s AND dimension = %s AND days_window = %s
+                    """, (effective_session, save_dim, days))
+
                 ins_sql = """
                     INSERT INTO `dashboard_top_bottom_performance`
                     (`session_id`, `dimension`, `days_window`, `ranking_type`, `rank_no`, `entity_name`, `sales_value`)
                     VALUES (%s, %s, %s, %s, %s, %s, %s)
                 """
                 to_save = []
-                for item in top_10:
-                    to_save.append((effective_session, dimension, days, "TOP", item["rank"], item["name"], item["sales_value"]))
-                for item in bottom_10:
-                    to_save.append((effective_session, dimension, days, "BOTTOM", item["rank"], item["name"], item["sales_value"]))
+                for save_dim in dims_to_save:
+                    for item in top_10:
+                        to_save.append((effective_session, save_dim, days, "TOP", item["rank"], item["name"], item["sales_value"]))
+                    for item in bottom_10:
+                        to_save.append((effective_session, save_dim, days, "BOTTOM", item["rank"], item["name"], item["sales_value"]))
                 c_cur.executemany(ins_sql, to_save)
                 mysql_conn.commit()
                 c_cur.close()
