@@ -759,10 +759,10 @@ def get_tyre_sales_data_controller(get_db_connection):
                 "visualizations": [{
                     "data": chart_data,
                     "seriesKey": "",
-                    "title": "Top 10 Tyre Types by Sales",
+                    "title": "Top 10 Categories by Sales",
                     "type": "horizontal_bar_chart",
                     "xKey": "sales_value",
-                    "yKey": "vehicle_type"
+                    "yKey": "category"
                 }],
                 "data": chart_data,
                 "message": "Data retrieved successfully.",

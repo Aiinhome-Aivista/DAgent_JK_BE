@@ -812,10 +812,10 @@ def tyre_sales_data_controller(get_db_connection):
                     "visualizations": [{
                         "data": tbl_tyre["data"],
                         "seriesKey": "",
-                        "title": "Top 10 Tyre Types by Sales",
+                        "title": "Top 10 Categories by Sales",
                         "type": "horizontal_bar_chart",
                         "xKey": "sales_value",
-                        "yKey": "vehicle_type"
+                        "yKey": "category"
                     }],
                     "data": tbl_tyre["data"],
                     "message": "Data retrieved successfully.",
@@ -1005,10 +1005,10 @@ def tyre_sales_data_controller(get_db_connection):
             visualizations.append({
                 "data": chart_data,
                 "seriesKey": "",
-                "title": "Top 10 Tyre Types by Sales",
+                "title": "Top 10 Categories by Sales",
                 "type": "horizontal_bar_chart",
                 "xKey": "sales_value",
-                "yKey": "vehicle_type"
+                "yKey": "category"
             })
 
         if chart_data and not error_msg:
