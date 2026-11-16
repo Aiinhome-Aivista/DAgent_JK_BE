@@ -18,26 +18,6 @@
 #   - Cross-encoder reranking top-40 → keep best 20
 #   - MAX_CTX_CHARS reduced to 15000 for faster LLM
 #   - Auto chat history save after every answer
-
-# controllers/session_rag_chat_controller.py
-# ADVANCED HYBRID RAG
-#
-# Architecture:
-#   1. Query Understanding  — extract intent, entities, table hints
-#   2. Hybrid Retrieval     — BM25 keyword + semantic vector search + metadata filter
-#   3. Re-ranking           — cross-encoder reranking (ms-marco-MiniLM-L-6-v2)
-#   4. Answer Generation    — strict grounding, deep business analysis
-#
-# Optimizations applied:
-#   - Global SentenceTransformer model (loaded once at startup)
-#   - Global CrossEncoder model (loaded once at startup)
-#   - Embedding cache for repeated queries
-#   - Batch embedding for multiple queries
-#   - Duplicate chunk deduplication before ranking
-#   - Cross-encoder reranking top-40 → keep best 20
-#   - MAX_CTX_CHARS reduced to 15000 for faster LLM
-#   - Auto chat history save after every answer
-
 import re, json, time, datetime, hashlib, math, requests, mysql.connector, threading, os
 from collections import defaultdict
 
@@ -482,7 +462,8 @@ SAP S/4HANA Sales & Distribution (SD) Architecture and Table Context:
    - Customer Status: ALWAYS filter (cm.KLABC IS NULL OR cm.KLABC <> 'X') on ZIVF_CustomerMaster_01_MD (exclude deleted/test/scrap customers).
 4. Business Metrics:
    - Sales / Revenue = SUM(fact."invoice_value")
-   - Volume / Quantity = SUM(fact."Tyre_Quantity") or SUM(fact."volume")
+   - Volume = SUM(fact."volume")
+   - Tyre Quantity = SUM(fact."Tyre_Quantity")
    - Net Sales = SUM(fact."invoice_value") - SUM(COALESCE(fact."total_discount", 0))
    - Average Realization = SUM(fact."invoice_value") / NULLIF(SUM(fact."Tyre_Quantity"), 0)
    - Planned Target Value = SUM(tgt.PLAN_VALUE), Planned Qty = SUM(tgt.ORG_PLAN)
@@ -1454,12 +1435,7 @@ CANONICAL DATA MODEL & RELATIONSHIP GRAPH (OFFICIAL):
      * "STU" (State Transport Undertakings / Govt Fleet): fact."distribution_channel" = '30'
      * "DEF" (Defense sales): fact."distribution_channel" = '40'
      * "Export" / "Other": fact."distribution_channel" = '50'
-      * "Replacement" / "Dealer channel" / "Domestic sales": fact."distribution_channel" = '10'
-      * "OEM" (Original Equipment Manufacturer): fact."distribution_channel" = '20'
-      * "STU" (State Transport Undertakings / Govt Fleet): fact."distribution_channel" = '30'
-      * "DEF" (Defense sales): fact."distribution_channel" = '40'
-      * "Export" / "Other": fact."distribution_channel" = '50'
-      * NO UNREQUESTED DISTRIBUTION CHANNEL FILTER: Filter by distribution channel ONLY IF the user explicitly requested a specific channel (e.g. Replacement, OEM, STU, DEF). If not mentioned, DO NOT filter by distribution channel so all valid sales are captured!
+     * DEFAULT CHANNEL RULE: Always filter fact."distribution_channel" = '10' (Replacement/Domestic sales default) UNLESS the user explicitly mentions another channel (OEM=20, STU=30, DEF=40, Export=50) or asks for all channels.
 
     - VEHICLE SEGMENT & CATEGORY MAPPING (from Category Master cat & SKU Master sk):
       * "Scooter" tyres: UPPER(TRIM(cat.CAT_DESC)) = 'SCOOTER'
@@ -1481,13 +1457,19 @@ CANONICAL DATA MODEL & RELATIONSHIP GRAPH (OFFICIAL):
       * "Taxable Value" / "Taxable Sales": SUM(fact."taxable_value")
       * "Discount" / "Total Discount": SUM(fact."total_discount")
       * "GST" / "Tax": SUM(fact."gst")
-      * "Quantity" / "Volume" / "Units": SUM(fact."Tyre_Quantity")
+      * "Volume": SUM(fact."volume") AS total_volume
+      * "Quantity" / "Tyre Quantity" / "Units" / "Qty": SUM(fact."Tyre_Quantity") AS total_tyre_quantity
    - SUBQUERY & CTE JOIN KEY HYGIENE (LEADING ZEROS):
      Whenever comparing dealer/customer codes between CTEs, tables, or subqueries, ALWAYS wrap in LTRIM:
      ON (LTRIM(ad.dealer_code, '0') = LTRIM(rs.dealer_code, '0'))
    - TARGET VS ACTUAL / PLAN ACHIEVEMENT RULES (STRICT CTE ARCHITECTURE):
      Target view ("SAP_S4"."ZIVF_SD_Sales_Plan_Target_01_TR") is at monthly planning grain (TERR_CODE, REG_CODE, YMONTH, MAT_TYPE).
-     Target metrics: PLAN_VALUE = Target Revenue, ORG_PLAN = Target Quantity.
+     Target & Plan Metrics (from ZIVF_SD_Sales_Plan_Target_01_TR tgt):
+     * Standard Target / Plan Value: When user asks for 'Plan Value', 'Target Value', 'Target', or 'Plan Revenue', ALWAYS use SUM(tgt.PLAN_VALUE) AS target_sales_value (or plan_value).
+     * Standard Target / Plan Quantity: When user asks for 'Target Quantity', 'Plan Quantity', or 'Target Qty', ALWAYS use SUM(tgt.ORG_PLAN) AS target_sales_qty (or plan_qty).
+     * Revised Plan Value: ONLY IF user explicitly mentions 'revised' (e.g. 'Revised Plan Value', 'Revised Target Value', 'Revised Plan'), use SUM(COALESCE(NULLIF(tgt.REV_PLAN_VAL, 0), tgt.PLAN_VALUE, 0)) AS revised_plan_value.
+     * Revised Plan Quantity: ONLY IF user explicitly mentions 'revised' quantity (e.g. 'Revised Quantity', 'Revised Plan Qty'), use SUM(COALESCE(NULLIF(tgt.REV_PLAN, 0), tgt.ORG_PLAN, 0)) AS revised_plan_qty.
+     * Actual Sales Quantity is ALWAYS SUM(fact."Tyre_Quantity") from the sales fact view.
      NEVER join Sales Fact directly to Target Fact with an INNER/LEFT JOIN — this causes catastrophic Cartesian product and duplicates numbers!
      ALWAYS use Common Table Expressions (CTEs):
      * CTE 1: actual_sales — Aggregate actual sales from ZPVF_SD_SalesHistory_01_TR (or CurrentSales if current month).
@@ -2188,7 +2170,7 @@ def _build_business_map(table_cols, workspace_id):
         "dealer": "NAME1", "customer": "NAME1", "dealer name": "NAME1", "customer name": "NAME1",
         "dealer code": "dealer_code", "customer code": "KUNNR",
         "month": "YMONTH", "year": "CAL_YEAR", "quarter": "QTR",
-        "sales": "invoice_value", "revenue": "invoice_value", "volume": "Tyre_Quantity", "quantity": "Tyre_Quantity",
+        "sales": "invoice_value", "revenue": "invoice_value", "volume": "volume", "quantity": "Tyre_Quantity", "tyre quantity": "Tyre_Quantity", "tyre qty": "Tyre_Quantity",
         "ndp": "ndp_value", "ndp value": "ndp_value", "taxable": "taxable_value", "taxable value": "taxable_value",
         "discount": "total_discount", "total discount": "total_discount", "gst": "gst",
         "plan value": "PLAN_VALUE", "target value": "PLAN_VALUE", "target revenue": "PLAN_VALUE", "plan revenue": "PLAN_VALUE",
@@ -3168,11 +3150,10 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                 "ALWAYS select BOTH the human-readable Name (for UI display) AND the Code (for safe JOINs across CTEs/subqueries)!\n\n"
                 "CRITICAL RULES FOR ACTUAL VS TARGET / PLAN COMPARISONS:\n"
                 "1. TARGET-ONLY QUERIES (NO ACTUAL SALES REQUESTED):\n"
-                "   - If the user asks ONLY for target or sales plan (e.g. 'what is the total target for July 2026', 'target revenue for 2026', 'sales plan for April 2026'):\n"
+                "   - If the user asks ONLY for target or sales plan (e.g. 'what is the total target for July 2026', 'target revenue for 2026', 'revised plan value for April 2026'):\n"
                 "     DO NOT create an actual_sales CTE! DO NOT query sales history or current sales! Query ONLY 'ZIVF_SD_Sales_Plan_Target_01_TR' directly:\n"
-                "     SELECT SUM(tgt.PLAN_VALUE) AS target_sales_value, SUM(tgt.ORG_PLAN) AS target_sales_qty\n"
-                "     FROM \"SAP_S4\".\"ZIVF_SD_Sales_Plan_Target_01_TR\" tgt\n"
-                "     WHERE (CAST(tgt.YMONTH AS VARCHAR) = '202607' OR tgt.YMONTH = 202607);\n"
+                "     * Default (Target / Plan Value / Target Qty): SELECT SUM(tgt.PLAN_VALUE) AS target_sales_value, SUM(tgt.ORG_PLAN) AS target_sales_qty FROM \"SAP_S4\".\"ZIVF_SD_Sales_Plan_Target_01_TR\" tgt WHERE CAST(tgt.YMONTH AS VARCHAR) = '202607';\n"
+                "     * ONLY IF user explicitly asks for Revised (e.g. 'revised plan value', 'revised target', 'revised quantity'): SELECT SUM(COALESCE(NULLIF(tgt.REV_PLAN_VAL, 0), tgt.PLAN_VALUE, 0)) AS revised_plan_value, SUM(COALESCE(NULLIF(tgt.REV_PLAN, 0), tgt.ORG_PLAN, 0)) AS revised_plan_qty FROM \"SAP_S4\".\"ZIVF_SD_Sales_Plan_Target_01_TR\" tgt WHERE CAST(tgt.YMONTH AS VARCHAR) = '202604';\n"
                 "2. TARGET VS ACTUAL COMPARISON QUERIES:\n"
                 "   - NEVER EVER USE 'CROSS JOIN'! If actual sales has 0 invoices for that period, CROSS JOIN deletes all rows and returns 0 rows total!\n"
                 "   - For overall/single territory/zone aggregation without GROUP BY, use scalar subqueries on FROM DUMMY:\n"
@@ -3187,7 +3168,7 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                 "     and in SELECT and WHERE, use COALESCE(t.zone_name, a.zone_name, 'Unknown')! NEVER use actual_sales LEFT JOIN target_plans!\n"
                 "3. TARGET VIEW 'ZIVF_SD_Sales_Plan_Target_01_TR' RULES:\n"
                 "   - Target view ALREADY has 'YMONTH' directly on the view! NEVER join 'ZITR_DayAttribute_01_TR' to the target view (Cartesian blow-up)!\n"
-                "   - In YMONTH filter, match both string and int: (CAST(tgt.YMONTH AS VARCHAR) = '202607' OR tgt.YMONTH = 202607 OR tgt.YMONTH = '202607').\n"
+                "   - In YMONTH filter: CAST(tgt.YMONTH AS VARCHAR) = '202607'.\n"
                 "4. 2026 ACTUAL SALES FACT VIEW:\n"
                 "   - Note: Recent/rolling-month invoices (e.g. 2026-04 onwards) exist in 'ZPVF_SD_CurrentSales_01_TR'. For historical periods use 'ZPVF_SD_SalesHistory_01_TR'. If querying 2026 actual sales and unsure, combine with UNION ALL.\n"
                 "5. TARGET VS ACTUAL GRAIN & FILTER RULES:\n"
@@ -3206,7 +3187,7 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                 "     * IN ACTUAL_SALES: Filter cm.BZIRK = '1101' on Customer Master.\n"
                 "     * IN TARGET_PLANS: Filter tgt.TERR_CODE = '1101'.\n"
                 "   - TIME PERIOD FILTERING:\n"
-                "     * Specific Month (e.g. July 2026): in actual_sales filter fact.\"invoice_date\" >= '2026-07-01' AND fact.\"invoice_date\" < '2026-08-01'. In target_plans filter (CAST(tgt.YMONTH AS VARCHAR) = '202607' OR tgt.YMONTH = 202607).\n"
+                "     * Specific Month (e.g. July 2026): in actual_sales filter fact.\"invoice_date\" >= '2026-07-01' AND fact.\"invoice_date\" < '2026-08-01'. In target_plans filter CAST(tgt.YMONTH AS VARCHAR) = '202607'.\n"
                 "     * Full Year (e.g. 2026): in actual_sales filter fact.\"invoice_date\" >= '2026-01-01' AND fact.\"invoice_date\" < '2027-01-01'. In target_plans filter CAST(tgt.YMONTH AS VARCHAR) LIKE '2026%'.\n"
             )
         else:
@@ -3696,14 +3677,62 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                 # Apply customer/cancel filters safely without corrupting subqueries or UNION statements
                                 SQL_RESERVED = {'where', 'group', 'order', 'inner', 'left', 'right', 'join', 'on', 'union', 'having', 'limit', 'as', 'from', 'select', 'set', 'by'}
 
+                                def _inject_into_single_branch(branch_sql, question_str):
+                                    if not ("ZPVF_SD_CurrentSales_01_TR" in branch_sql or "ZPVF_SD_SalesHistory_01_TR" in branch_sql):
+                                        return branch_sql
+                                    m_f = re.search(r'("?ZPVF_SD_(?:CurrentSales|SalesHistory)_01_TR"?)\s+(?:AS\s+)?([a-zA-Z0-9_]+)', branch_sql, re.I)
+                                    if m_f and m_f.group(2).lower() not in SQL_RESERVED:
+                                        f_alias = m_f.group(2)
+                                    else:
+                                        branch_sql = re.sub(r'("?ZPVF_SD_(?:CurrentSales|SalesHistory)_01_TR"?)(?!\s+AS |\s+[a-zA-Z0-9_]+)', r'\1 AS fact', branch_sql, count=1, flags=re.I)
+                                        f_alias = "fact"
+
+                                    if "ZIVF_CustomerMaster_01_MD" not in branch_sql:
+                                        cm_join = f' LEFT JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm ON TRIM(LEADING \'0\' FROM cm."KUNNR") = TRIM(LEADING \'0\' FROM {f_alias}."dealer_code") '
+                                        if re.search(r'\bWHERE\b', branch_sql, re.I):
+                                            branch_sql = re.sub(r'(\bWHERE\b)', f'{cm_join}WHERE', branch_sql, count=1, flags=re.I)
+                                        else:
+                                            branch_sql += f'{cm_join}'
+
+                                        if "KLABC" not in branch_sql:
+                                            k_filter = "(cm.\"KLABC\" IS NULL OR cm.\"KLABC\" <> 'X')"
+                                            if re.search(r'\bWHERE\s+', branch_sql, re.I):
+                                                branch_sql = re.sub(r'(\bWHERE\s+)', f'\\1{k_filter} AND ', branch_sql, count=1, flags=re.I)
+                                            else:
+                                                branch_sql += f' WHERE {k_filter}'
+                                    elif "KLABC" not in branch_sql:
+                                        cm_m = re.search(r'"?ZIVF_CustomerMaster_01_MD"?\s+(?:AS\s+)?([a-zA-Z0-9_]+)', branch_sql, re.I)
+                                        cm_alias = cm_m.group(1) if cm_m and cm_m.group(1).lower() not in SQL_RESERVED else "cm"
+                                        k_filter = f'({cm_alias}."KLABC" IS NULL OR {cm_alias}."KLABC" <> \'X\')'
+                                        if re.search(r'\bWHERE\s+', branch_sql, re.I):
+                                            branch_sql = re.sub(r'(\bWHERE\s+)', f'\\1{k_filter} AND ', branch_sql, count=1, flags=re.I)
+                                        else:
+                                            branch_sql += f' WHERE {k_filter}'
+
+                                    if "indicator_cancel" not in branch_sql.lower():
+                                        canc_filter = f'({f_alias}."indicator_cancel" IS NULL OR {f_alias}."indicator_cancel" NOT IN (\'X\', \'Y\', \'1\'))'
+                                        if re.search(r'\bWHERE\s+', branch_sql, re.I):
+                                            branch_sql = re.sub(r'(\bWHERE\s+)', f'\\1{canc_filter} AND ', branch_sql, count=1, flags=re.I)
+                                        else:
+                                            branch_sql += f' WHERE {canc_filter}'
+
+                                    if "distribution_channel" not in branch_sql.lower() and not re.search(r'\b(oem|stu|def|export|all\s+channels)\b', question_str, re.I):
+                                        dc_filter = f'{f_alias}."distribution_channel" = \'10\''
+                                        if re.search(r'\bWHERE\s+', branch_sql, re.I):
+                                            branch_sql = re.sub(r'(\bWHERE\s+)', f'\\1{dc_filter} AND ', branch_sql, count=1, flags=re.I)
+                                        else:
+                                            branch_sql += f' WHERE {dc_filter}'
+
+                                    return branch_sql
+
                                 if is_hana and ("ZPVF_SD_CurrentSales_01_TR" in run_query or "ZPVF_SD_SalesHistory_01_TR" in run_query):
                                     is_subquery_union = bool(re.search(r'\bUNION\b', run_query, re.I))
 
                                     if is_subquery_union:
-                                        # Auto-inject CustomerMaster & KLABC for UNION subqueries: FROM ( SELECT ... UNION ALL ... ) AS fact
-                                        try:
-                                            m_open = re.search(r'\bFROM\s*\(', run_query, re.I)
-                                            if m_open:
+                                        m_open = re.search(r'\bFROM\s*\(', run_query, re.I)
+                                        if m_open:
+                                            # Subquery UNION: FROM ( SELECT ... UNION ALL ... ) AS fact
+                                            try:
                                                 open_idx = m_open.end() - 1
                                                 depth = 0
                                                 in_q = False
@@ -3758,51 +3787,15 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                                         else:
                                                             outer_p += f'\nWHERE {k_filter}'
                                                         run_query = run_query[:end_alias_idx] + outer_p
-                                        except Exception as inj_err:
-                                            print(f"[SQL_INJECT] Subquery UNION injection note: {inj_err}")
-                                    else:
-                                        m_f = re.search(r'("?ZPVF_SD_(?:CurrentSales|SalesHistory)_01_TR"?)\s+(?:AS\s+)?([a-zA-Z0-9_]+)', run_query, re.I)
-                                        if m_f and m_f.group(2).lower() not in SQL_RESERVED:
-                                            f_alias = m_f.group(2)
+                                            except Exception as inj_err:
+                                                print(f"[SQL_INJECT] Subquery UNION injection note: {inj_err}")
                                         else:
-                                            run_query = re.sub(r'("?ZPVF_SD_(?:CurrentSales|SalesHistory)_01_TR"?)(?!\s+AS |\s+[a-zA-Z0-9_]+)', r'\1 AS fact', run_query, count=1, flags=re.I)
-                                            f_alias = "fact"
-
-                                        if "ZIVF_CustomerMaster_01_MD" not in run_query:
-                                            cm_join = f' LEFT JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm ON TRIM(LEADING \'0\' FROM cm."KUNNR") = TRIM(LEADING \'0\' FROM {f_alias}."dealer_code") '
-                                            if re.search(r'\bWHERE\b', run_query, re.I):
-                                                run_query = re.sub(r'(\bWHERE\b)', f'{cm_join}WHERE', run_query, count=1, flags=re.I)
-                                            else:
-                                                run_query += f'{cm_join}'
-
-                                            if "KLABC" not in run_query:
-                                                k_filter = "(cm.\"KLABC\" IS NULL OR cm.\"KLABC\" <> 'X')"
-                                                if re.search(r'\bWHERE\s+', run_query, re.I):
-                                                    run_query = re.sub(r'(\bWHERE\s+)', f'\\1{k_filter} AND ', run_query, count=1, flags=re.I)
-                                                else:
-                                                    run_query += f' WHERE {k_filter}'
-                                        elif "KLABC" not in run_query:
-                                            cm_m = re.search(r'"?ZIVF_CustomerMaster_01_MD"?\s+(?:AS\s+)?([a-zA-Z0-9_]+)', run_query, re.I)
-                                            cm_alias = cm_m.group(1) if cm_m and cm_m.group(1).lower() not in SQL_RESERVED else "cm"
-                                            k_filter = f'({cm_alias}."KLABC" IS NULL OR {cm_alias}."KLABC" <> \'X\')'
-                                            if re.search(r'\bWHERE\s+', run_query, re.I):
-                                                run_query = re.sub(r'(\bWHERE\s+)', f'\\1{k_filter} AND ', run_query, count=1, flags=re.I)
-                                            else:
-                                                run_query += f' WHERE {k_filter}'
-
-                                        if "indicator_cancel" not in run_query.lower():
-                                            canc_filter = f'({f_alias}."indicator_cancel" IS NULL OR {f_alias}."indicator_cancel" NOT IN (\'X\', \'Y\', \'1\'))'
-                                            if re.search(r'\bWHERE\s+', run_query, re.I):
-                                                run_query = re.sub(r'(\bWHERE\s+)', f'\\1{canc_filter} AND ', run_query, count=1, flags=re.I)
-                                            else:
-                                                run_query += f' WHERE {canc_filter}'
-
-                                        if "distribution_channel" not in run_query.lower() and not re.search(r'\b(oem|stu|def|export|all\s+channels)\b', question, re.I):
-                                            dc_filter = f'{f_alias}."distribution_channel" = \'10\''
-                                            if re.search(r'\bWHERE\s+', run_query, re.I):
-                                                run_query = re.sub(r'(\bWHERE\s+)', f'\\1{dc_filter} AND ', run_query, count=1, flags=re.I)
-                                            else:
-                                                run_query += f' WHERE {dc_filter}'
+                                            # Top-level UNION ALL query (split by UNION and inject into each branch)
+                                            parts = re.split(r'(\bUNION\s+(?:ALL\s+)?\b)', run_query, flags=re.I)
+                                            run_query = "".join([p if re.match(r'^\s*UNION\b', p, re.I) else _inject_into_single_branch(p, question) for p in parts])
+                                    else:
+                                        # Single query (no UNION)
+                                        run_query = _inject_into_single_branch(run_query, question)
 
                                 run_query = re.sub(r'\n{3,}', '\n\n', run_query).strip()
                                 sql_query = run_query
