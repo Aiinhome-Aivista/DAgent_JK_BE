@@ -146,13 +146,14 @@ def _compute_top_bottom_slice_hana(cursor, schema, dimension: str, days: int):
         extra_filter = 'AND (cm."KLABC" IS NULL OR cm."KLABC" <> \'X\') AND rm."region_name" IS NOT NULL AND TRIM(rm."region_name") <> \'\''
         select_expr = f'{entity_expr} AS entity_name'
         group_by = entity_expr
-    elif dimension in ("Tyres", "Tyre Types"):
+    elif dimension in ("Category", "Categories", "Tyres", "Tyre Types"):
         cat_view = "ZIVF_CategoryMaster_01_TR"
-        entity_expr = f'COALESCE(NULLIF(TRIM(cat."CAT_DESC"), \'\'), NULLIF(TRIM(cat."SHORT_DESC"), \'\'), \'Unknown Tyre\')'
+        entity_expr = f'COALESCE(NULLIF(TRIM(cat."CAT_DESC"), \'\'), NULLIF(TRIM(cat."SHORT_DESC"), \'\'), NULLIF(TRIM(sk."TYRE_TYPE"), \'\'))'
         joins = f"""
             JOIN "{schema}"."{sku_view}" sk ON TRIM(s."SKU") = TRIM(sk."MATNR")
             LEFT JOIN "{schema}"."{cat_view}" cat ON TRIM(sk."CAT_CODE") = TRIM(cat."CAT_CODE")
         """
+        extra_filter = f'AND {entity_expr} IS NOT NULL AND TRIM({entity_expr}) <> \'\' AND UPPER(TRIM({entity_expr})) NOT IN (\'UNKNOWN\', \'UNKNOWN TYRE\', \'NULL\', \'NONE\')'
         select_expr = f'{entity_expr} AS entity_name'
         group_by = entity_expr
     elif dimension == "Materials":
@@ -194,9 +195,11 @@ def _compute_top_bottom_slice_hana(cursor, schema, dimension: str, days: int):
 
     clean_rows = []
     for r in rows:
-        name = r.get("entity_name") or r.get("ENTITY_NAME") or "Unknown"
+        name = str(r.get("entity_name") or r.get("ENTITY_NAME") or "").strip()
+        if not name or name.upper() in ("UNKNOWN", "UNKNOWN TYRE", "NULL", "NONE"):
+            continue
         val = float(r.get("sales_value") or r.get("SALES_VALUE") or 0.0)
-        clean_rows.append({"name": str(name).strip(), "sales_value": round(val, 2)})
+        clean_rows.append({"name": name, "sales_value": round(val, 2)})
 
     top_10 = [{"rank": i + 1, "name": item["name"], "sales_value": item["sales_value"]} for i, item in enumerate(clean_rows[:10])]
     
@@ -252,9 +255,10 @@ def _compute_top_bottom_slice_mysql(cursor, user_db: str, dimension: str, days: 
         extra_filter = "AND (cm.KLABC IS NULL OR cm.KLABC <> 'X') AND rm.region_name IS NOT NULL AND TRIM(rm.region_name) <> ''"
         select_expr = f"{entity_expr} AS entity_name"
         group_by = entity_expr
-    elif dimension in ("Tyres", "Tyre Types"):
-        entity_expr = "COALESCE(NULLIF(TRIM(sk.tyre_type), ''), 'Unknown Tyre')"
+    elif dimension in ("Category", "Categories", "Tyres", "Tyre Types"):
+        entity_expr = "COALESCE(NULLIF(TRIM(sk.tyre_type), ''), NULLIF(TRIM(sk.prod_title), ''))"
         joins = f"JOIN {sku_tbl} sk ON sd.SKU = sk.MATNR"
+        extra_filter = f"AND {entity_expr} IS NOT NULL AND TRIM({entity_expr}) <> '' AND UPPER(TRIM({entity_expr})) NOT IN ('UNKNOWN', 'UNKNOWN TYRE', 'NULL', 'NONE')"
         select_expr = f"{entity_expr} AS entity_name"
         group_by = entity_expr
     elif dimension == "Materials":
@@ -288,9 +292,11 @@ def _compute_top_bottom_slice_mysql(cursor, user_db: str, dimension: str, days: 
 
     clean_rows = []
     for r in rows:
-        name = r.get("entity_name") or "Unknown"
+        name = str(r.get("entity_name") or "").strip()
+        if not name or name.upper() in ("UNKNOWN", "UNKNOWN TYRE", "NULL", "NONE"):
+            continue
         val = float(r.get("sales_value") or 0.0)
-        clean_rows.append({"name": str(name).strip(), "sales_value": round(val, 2)})
+        clean_rows.append({"name": name, "sales_value": round(val, 2)})
 
     top_10 = [{"rank": i + 1, "name": item["name"], "sales_value": item["sales_value"]} for i, item in enumerate(clean_rows[:10])]
     bottom_sorted = sorted(clean_rows, key=lambda x: x["sales_value"])[:10]
@@ -306,7 +312,7 @@ def _compute_top_bottom_slice_mysql(cursor, user_db: str, dimension: str, days: 
 # Bulk Sync Function (Called by Scheduler & On-Demand)
 # ─────────────────────────────────────────────────────────────────────────────
 
-SUPPORTED_DIMENSIONS = ["Customers", "Tyres", "Territories", "Regions", "Materials"]
+SUPPORTED_DIMENSIONS = ["Customers", "Category", "Tyres", "Territories", "Regions", "Materials"]
 SUPPORTED_DAYS = [2, 3, 4, 5, 6]
 
 
@@ -463,13 +469,18 @@ def get_top_bottom_performance_controller(get_db_connection):
     try:
         # 1. Check pre-calculated cache table first (< 5ms response)
         if not force_refresh:
+            dim_candidates = [dimension]
+            if dimension in ("Category", "Tyres"):
+                dim_candidates = ["Category", "Tyres"]
+            dim_ph = ", ".join(["%s"] * len(dim_candidates))
+
             cur = mysql_conn.cursor(dictionary=True) if hasattr(mysql_conn, "cursor") else mysql_conn.cursor()
-            cur.execute("""
+            cur.execute(f"""
                 SELECT ranking_type, rank_no, entity_name, sales_value
                 FROM `dashboard_top_bottom_performance`
-                WHERE session_id = %s AND dimension = %s AND days_window = %s
+                WHERE session_id = %s AND dimension IN ({dim_ph}) AND days_window = %s
                 ORDER BY rank_no ASC
-            """, (effective_session, dimension, days))
+            """, tuple([effective_session] + dim_candidates + [days]))
             cached_rows = cur.fetchall()
             cur.close()
 
@@ -478,15 +489,22 @@ def get_top_bottom_performance_controller(get_db_connection):
                 bottom_10 = []
                 for r in cached_rows:
                     rtype = str(r.get("ranking_type", "")).upper()
+                    entity_name = str(r.get("entity_name", "")).strip()
+                    if not entity_name or entity_name.upper() in ("UNKNOWN", "UNKNOWN TYRE", "NULL", "NONE"):
+                        continue
                     item = {
                         "rank": int(r.get("rank_no", 1)),
-                        "name": r.get("entity_name", "Unknown"),
+                        "name": entity_name,
                         "sales_value": float(r.get("sales_value", 0.0))
                     }
                     if rtype == "TOP":
                         top_10.append(item)
                     elif rtype == "BOTTOM":
                         bottom_10.append(item)
+
+                # Re-index ranks 1 to N after filtering unknown entities
+                top_10 = [{"rank": idx + 1, "name": it["name"], "sales_value": it["sales_value"]} for idx, it in enumerate(top_10[:10])]
+                bottom_10 = [{"rank": idx + 1, "name": it["name"], "sales_value": it["sales_value"]} for idx, it in enumerate(bottom_10[:10])]
 
                 if top_10 or bottom_10:
                     return jsonify({

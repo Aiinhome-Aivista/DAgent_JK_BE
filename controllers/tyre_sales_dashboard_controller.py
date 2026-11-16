@@ -733,7 +733,10 @@ def get_tyre_sales_data_controller(get_db_connection):
             chart_data = []
 
             for r in rows:
-                tt = _val(r, "tyre_type", default="Unknown")
+                tt = _val(r, "tyre_type", default="")
+                if not tt or str(tt).strip().upper() in ("UNKNOWN", "UNKNOWN TYRE", "NULL", "NONE"):
+                    continue
+                tt = str(tt).strip()
                 sv = float(_val(r, "sales_value", default=0.0) or 0.0)
                 sync_dt = _val(r, "last_synced_at")
                 if sync_dt and not last_synced:
