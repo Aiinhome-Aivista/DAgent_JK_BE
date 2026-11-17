@@ -63,6 +63,24 @@ def ensure_hierarchy_tables(conn):
 
         # 3. Create user_hierarchy_access mapping table
         cursor.execute(USER_HIERARCHY_ACCESS_SQL)
+
+        # 4. Auto-heal any existing imported users missing role_id or company_id
+        try:
+            cursor.execute("""
+                UPDATE users 
+                SET role_id = 2, company_id = 1 
+                WHERE role_id IS NULL OR company_id IS NULL;
+            """)
+            cursor.execute("""
+                INSERT IGNORE INTO workspace_users (workspace_id, workspace_name, session_id, user_id)
+                SELECT w.id, COALESCE(w.workspace_name, 'jk_sales'), w.session_id, u.id
+                FROM users u
+                CROSS JOIN (SELECT id, workspace_name, session_id FROM workspaces ORDER BY id ASC LIMIT 1) w
+                WHERE u.id NOT IN (SELECT user_id FROM workspace_users WHERE user_id IS NOT NULL);
+            """)
+        except Exception as heal_err:
+            pass
+
         conn.commit()
         print("[Auto-Setup] Hierarchy master & access mapping tables verified successfully.", flush=True)
 

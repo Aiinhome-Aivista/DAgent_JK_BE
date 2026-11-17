@@ -101,6 +101,31 @@ def login():
         cursor.execute(fallback_query, (user_id, user_id))
         active_workspace = cursor.fetchone()
 
+    # Fetch hierarchy access mapping
+    hierarchy_data = None
+    try:
+        cursor.execute("""
+            SELECT uha.rank_id, hr.rank_name, uha.designation, uha.department,
+                   uha.zone_code, uha.region_code, uha.territory_code
+            FROM user_hierarchy_access uha
+            LEFT JOIN hierarchy_ranks hr ON uha.rank_id = hr.id
+            WHERE uha.user_id = %s
+            LIMIT 1
+        """, (user_id,))
+        hierarchy_data = cursor.fetchone()
+    except Exception:
+        pass
+
+    if not hierarchy_data:
+        hierarchy_data = {
+            "rank_id": 1 if role_name == 'Admin' else 4,
+            "rank_name": "National Head" if role_name == 'Admin' else "Standard User",
+            "designation": "Admin" if role_name == 'Admin' else "User",
+            "department": "Management" if role_name == 'Admin' else "General",
+            "zone_code": "ALL",
+            "region_code": "ALL",
+            "territory_code": "ALL"
+        }
 
     user_db = existing_db["new_user_db"] if existing_db else None
     cursor.close()
@@ -110,6 +135,10 @@ def login():
     if vis_val is None:
         vis_val = 2 if (role_id == 4 or role_name == 'Admin') else 1
 
+    if not role_id:
+        role_id = 2
+        role_name = "End User"
+
     response_data = {
         "user_id": user_id,
         "name": user_name,
@@ -117,7 +146,8 @@ def login():
         "role_name": role_name,
         "visibility": vis_val,
         "user_database": user_db,
-        "active_workspace": active_workspace
+        "active_workspace": active_workspace,
+        "hierarchy": hierarchy_data
     }
 
     if existing_db and existing_db["new_user_db"]:

@@ -27,16 +27,18 @@ def generate_secure_temporary_password(length=10) -> str:
 def send_welcome_user_email(to_email: str, user_name: str, temp_password: str, portal_url: str = "https://jkagentic.jktyre.co.in") -> bool:
     """
     Sends a welcome email with credentials to newly created user.
-    Falls back gracefully if SMTP is not configured.
+    Reads email parameters directly from .env (MAIL_SERVER, MAIL_PORT, MAIL_USERNAME / NOREPLY_EMAIL, etc.)
+    exactly identical to helper/report_mailer.py.
     """
-    smtp_host = os.environ.get("SMTP_HOST")
-    smtp_port = int(os.environ.get("SMTP_PORT", 587))
-    smtp_user = os.environ.get("SMTP_USER")
-    smtp_pass = os.environ.get("SMTP_PASS")
-    from_email = os.environ.get("SMTP_FROM", "no-reply@jktyre.com")
+    smtp_host = os.getenv("MAIL_SERVER") or os.getenv("SMTP_HOST") or "smtp.gmail.com"
+    smtp_port = int(os.getenv("MAIL_PORT") or os.getenv("SMTP_PORT") or 587)
+    smtp_user = os.getenv("MAIL_USERNAME") or os.getenv("NOREPLY_EMAIL") or os.getenv("SMTP_USER")
+    smtp_pass = os.getenv("MAIL_PASSWORD") or os.getenv("NOREPLY_PASSWORD") or os.getenv("SMTP_PASS")
+    smtp_use_tls = os.getenv("MAIL_USE_TLS", "true").lower() in ("true", "1", "yes")
+    from_email = smtp_user or os.getenv("SMTP_FROM", "no-reply@jktyre.com")
 
-    # If SMTP is not yet configured, log for admin audit and return True
-    if not smtp_host or not smtp_user:
+    # If email credentials are not present in .env, log for audit and return True
+    if not smtp_host or not smtp_user or not smtp_pass:
         print(f"[Email Notification Log] ✉️ Simulated Welcome Email to {to_email} ({user_name}) | Temp Password: {temp_password}", flush=True)
         return True
 
@@ -45,6 +47,22 @@ def send_welcome_user_email(to_email: str, user_name: str, temp_password: str, p
         msg["Subject"] = "Welcome to JK Tyre Analytics Portal - Your Login Credentials"
         msg["From"] = from_email
         msg["To"] = to_email
+
+        plain_text = f"""Hello {user_name},
+
+Your user account has been successfully provisioned for the JK Tyre AI Analytics Portal.
+
+Login Details:
+Portal URL: {portal_url}
+Email: {to_email}
+Temporary Password: {temp_password}
+
+For your security, please login and change your password upon your first login.
+
+Regards,
+JK Tyre & Industries Ltd.
+"""
+        msg.attach(MIMEText(plain_text, "plain", "utf-8"))
 
         html_content = f"""
         <html>
@@ -78,13 +96,30 @@ def send_welcome_user_email(to_email: str, user_name: str, temp_password: str, p
         </body>
         </html>
         """
-        msg.attach(MIMEText(html_content, "html"))
+        msg.attach(MIMEText(html_content, "html", "utf-8"))
 
-        with smtplib.SMTP(smtp_host, smtp_port, timeout=10) as server:
-            server.starttls()
-            server.login(smtp_user, smtp_pass)
-            server.sendmail(from_email, [to_email], msg.as_string())
-            
+        # Connect and send matching helper/report_mailer.py
+        if smtp_port == 465:
+            with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=30) as server:
+                if smtp_pass:
+                    server.login(from_email, smtp_pass)
+                server.send_message(msg)
+        else:
+            with smtplib.SMTP(smtp_host, smtp_port, timeout=30) as server:
+                server.ehlo()
+                if smtp_use_tls or smtp_port == 587:
+                    try:
+                        server.starttls()
+                        server.ehlo()
+                    except Exception:
+                        pass
+                if smtp_pass:
+                    try:
+                        server.login(from_email, smtp_pass)
+                    except Exception:
+                        pass
+                server.send_message(msg)
+
         print(f"[Email Service] ✅ Welcome email dispatched to {to_email}", flush=True)
         return True
 

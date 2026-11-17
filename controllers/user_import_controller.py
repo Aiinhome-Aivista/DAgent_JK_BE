@@ -65,15 +65,39 @@ def import_users_excel(get_db_connection):
         # 4. Atomic Database Insert
         cursor = conn.cursor(dictionary=True) if hasattr(conn, "cursor") else conn.cursor()
         
-        # Check default workspace to assign users to
+        # Check default workspace and company to assign users to
         default_session_id = None
         default_workspace_id = None
+        default_workspace_name = "jk_sales"
+        default_company_id = 1
         try:
-            cursor.execute("SELECT id, session_id FROM workspaces WHERE is_active = 1 OR is_active IS NULL ORDER BY id ASC LIMIT 1")
+            cursor.execute("SELECT id, session_id, workspace_name FROM workspaces WHERE is_active = 1 OR is_active IS NULL ORDER BY id ASC LIMIT 1")
             ws_row = cursor.fetchone()
             if ws_row:
                 default_workspace_id = ws_row.get("id") if isinstance(ws_row, dict) else ws_row[0]
                 default_session_id = ws_row.get("session_id") if isinstance(ws_row, dict) else ws_row[1]
+                default_workspace_name = (ws_row.get("workspace_name") if isinstance(ws_row, dict) else ws_row[2]) or "jk_sales"
+        except Exception:
+            pass
+
+        try:
+            cursor.execute("SELECT id FROM companies ORDER BY id ASC LIMIT 1")
+            comp_row = cursor.fetchone()
+            if comp_row:
+                default_company_id = comp_row.get("id") if isinstance(comp_row, dict) else comp_row[0]
+        except Exception:
+            pass
+
+        # Also auto-heal existing users missing role_id or company_id
+        try:
+            cursor.execute("UPDATE users SET role_id = 2, company_id = %s WHERE role_id IS NULL OR company_id IS NULL", (default_company_id,))
+            if default_workspace_id and default_session_id:
+                cursor.execute("""
+                    INSERT IGNORE INTO workspace_users (workspace_id, workspace_name, session_id, user_id)
+                    SELECT %s, %s, %s, u.id
+                    FROM users u
+                    WHERE u.id NOT IN (SELECT user_id FROM workspace_users WHERE user_id IS NOT NULL)
+                """, (default_workspace_id, default_workspace_name, default_session_id))
         except Exception:
             pass
 
@@ -82,15 +106,16 @@ def import_users_excel(get_db_connection):
             raw_password = generate_secure_temporary_password(length=10)
             encrypted_pwd = encrypt_password(raw_password)
 
-            # Insert into core `users` table (existing schema unchanged)
+            # Insert into core `users` table with standard user role (role_id = 2) and company
             insert_user_sql = """
-                INSERT INTO users (name, email, password, visibility)
-                VALUES (%s, %s, %s, 1)
+                INSERT INTO users (name, email, password, role_id, visibility, company_id)
+                VALUES (%s, %s, %s, 2, 1, %s)
             """
             cursor.execute(insert_user_sql, (
                 user_item["name"],
                 user_item["email"],
-                encrypted_pwd
+                encrypted_pwd,
+                default_company_id
             ))
             new_uid = cursor.lastrowid
 
@@ -122,9 +147,9 @@ def import_users_excel(get_db_connection):
             if default_workspace_id and default_session_id:
                 try:
                     cursor.execute("""
-                        INSERT INTO workspace_users (workspace_id, session_id, user_id)
-                        VALUES (%s, %s, %s)
-                    """, (default_workspace_id, default_session_id, new_uid))
+                        INSERT INTO workspace_users (workspace_id, workspace_name, session_id, user_id)
+                        VALUES (%s, %s, %s, %s)
+                    """, (default_workspace_id, default_workspace_name, default_session_id, new_uid))
                 except Exception:
                     pass
 
