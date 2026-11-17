@@ -2282,6 +2282,8 @@ def default_dashboard_metrics_controller(get_db_connection):
     months_param = data.get("months") or data.get("selected_months")
     start_date = data.get("start_date")
     end_date = data.get("end_date")
+    zone_param = data.get("zone")
+    region_param = data.get("region")
 
     # Clean filter params
     if str(year_param).strip().upper() in ("ALL", "", "NONE", "NULL"):
@@ -2292,6 +2294,10 @@ def default_dashboard_metrics_controller(get_db_connection):
         start_date = None
     if str(end_date).strip() in ("", "None", "null"):
         end_date = None
+    if str(zone_param).strip().upper() in ("ALL", "", "NONE", "NULL"):
+        zone_param = None
+    if str(region_param).strip().upper() in ("ALL", "", "NONE", "NULL"):
+        region_param = None
 
     cleaned_months = []
     if months_param:
@@ -2303,9 +2309,10 @@ def default_dashboard_metrics_controller(get_db_connection):
         cleaned_months = [int(month_param)]
     cleaned_months = sorted(list(set(cleaned_months)))
 
-    is_filtered = bool(year_param or cleaned_months or start_date or end_date)
+    is_filtered = bool(year_param or cleaned_months or start_date or end_date or zone_param or region_param)
     months_ctx = "-".join(str(m) for m in cleaned_months) if cleaned_months else "all"
-    filter_context = f"filter_{year_param or 'all'}_{months_ctx}_{start_date or 'none'}_{end_date or 'none'}" if is_filtered else "all"
+    geo_ctx = f"geo_{zone_param or 'all'}_{region_param or 'all'}"
+    filter_context = f"{geo_ctx}_filter_{year_param or 'all'}_{months_ctx}_{start_date or 'none'}_{end_date or 'none'}" if is_filtered else "all"
 
     conn = None
     hana_conn = None
@@ -2335,6 +2342,32 @@ def default_dashboard_metrics_controller(get_db_connection):
         conn = get_db_connection()
         if not conn:
             return jsonify({"error": "Failed to connect to database."}), 500
+
+        # Dynamically resolve user hierarchy boundary if zone/region not in payload
+        if (not zone_param or not region_param) and user_id:
+            try:
+                cur_h = conn.cursor(dictionary=True) if hasattr(conn, "cursor") else conn.cursor()
+                cur_h.execute("""
+                    SELECT zone_code, region_code, territory_code, rank_id
+                    FROM user_hierarchy_access
+                    WHERE user_id = %s
+                    LIMIT 1
+                """, (user_id,))
+                h_row = cur_h.fetchone()
+                cur_h.close()
+                if h_row:
+                    z = h_row.get("zone_code") if isinstance(h_row, dict) else h_row[0]
+                    r = h_row.get("region_code") if isinstance(h_row, dict) else h_row[1]
+                    if not zone_param and z and str(z).strip().upper() != "ALL":
+                        zone_param = str(z).strip()
+                    if not region_param and r and str(r).strip().upper() != "ALL":
+                        region_param = str(r).strip()
+                    if zone_param or region_param:
+                        is_filtered = True
+                        geo_ctx = f"geo_{zone_param or 'all'}_{region_param or 'all'}"
+                        filter_context = f"{geo_ctx}_{filter_context}"
+            except Exception:
+                pass
 
         from helper.dashboard_cache_service import (
             get_cached_component_data,
@@ -2768,6 +2801,23 @@ def default_dashboard_metrics_controller(get_db_connection):
                           SELECT 1 FROM {q_tbl(cust_tbl_rev)} cm
                           WHERE cm."KUNNR" = t."dealer_code"
                             AND UPPER(TRIM(cm."KLABC")) = 'X'
+                      )"""
+
+                    if (zone_param or region_param) and cust_tbl_rev:
+                        geo_filters = []
+                        if zone_param:
+                            geo_filters.append(f"(zm.P_ZONE = '{zone_param}' OR UPPER(TRIM(zm.NAME)) = UPPER(TRIM('{zone_param}')))")
+                        if region_param:
+                            geo_filters.append(f"(rm.REGION_CODE = '{region_param}' OR UPPER(TRIM(rm.REGION_NAME)) = UPPER(TRIM('{region_param}')))")
+                        
+                        rev_q += f"""
+                      AND EXISTS (
+                          SELECT 1 FROM {q_tbl(cust_tbl_rev)} cm
+                          LEFT JOIN "{user_db}"."ZIVF_TerritoryMaster_01_TR" tm_bz ON (cm.BZIRK = tm_bz.BZIRK)
+                          LEFT JOIN "{user_db}"."ZIVF_RegionMaster_MD_01" rm ON (rm.REGION_CODE = COALESCE(NULLIF(TRIM(tm_bz.REGIO), ''), NULLIF(TRIM(TO_VARCHAR(cm.REGIO)), '')))
+                          LEFT JOIN "{user_db}"."ZIVF_ZoneMaster_01_TR" zm ON (zm.P_ZONE = COALESCE(NULLIF(TRIM(tm_bz.P_ZONE), ''), NULLIF(TRIM(rm.ZONE_CODE), '')))
+                          WHERE cm."KUNNR" = t."dealer_code"
+                            AND {' AND '.join(geo_filters)}
                       )"""
 
                     execute_query(cursor, rev_q, is_hana=True)

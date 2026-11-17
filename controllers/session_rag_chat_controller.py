@@ -2934,6 +2934,43 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
     if not system_prompt or not system_prompt.strip():
         system_prompt = SYS
 
+    # Dynamic Hierarchy Authorization Rule (Row-Level Security)
+    if user_id:
+        try:
+            conn_uha = get_connection_func()
+            cur_uha = _dict_cursor(conn_uha)
+            cur_uha.execute("""
+                SELECT uha.zone_code, uha.region_code, uha.territory_code, hr.rank_name, uha.designation
+                FROM user_hierarchy_access uha
+                LEFT JOIN hierarchy_ranks hr ON uha.rank_id = hr.id
+                WHERE uha.user_id = %s
+                LIMIT 1
+            """, (user_id,))
+            uha_row = cur_uha.fetchone()
+            cur_uha.close()
+            conn_uha.close()
+            if uha_row:
+                z = uha_row.get("zone_code")
+                r = uha_row.get("region_code")
+                t = uha_row.get("territory_code")
+                sec_rules = []
+                if z and str(z).strip().upper() != "ALL":
+                    sec_rules.append(f"- MANDATORY ZONE FILTER: Restrict all queries to ZONE '{str(z).strip()}' (using Zone master or territory mapping zm.P_ZONE = '{str(z).strip()}').")
+                if r and str(r).strip().upper() != "ALL":
+                    sec_rules.append(f"- MANDATORY REGION FILTER: Restrict all queries to REGION_CODE '{str(r).strip()}' (rm.REGION_CODE = '{str(r).strip()}').")
+                if t and str(t).strip().upper() != "ALL":
+                    sec_rules.append(f"- MANDATORY TERRITORY FILTER: Restrict all queries to BZIRK / TERRITORY '{str(t).strip()}'.")
+                
+                if sec_rules:
+                    system_prompt += (
+                        f"\n\n[USER AUTHORIZATION & DATA ACCESS CONTROL]\n"
+                        f"Current Active User Scope: {uha_row.get('designation', 'User')} ({uha_row.get('rank_name', 'Employee')})\n"
+                        + "\n".join(sec_rules) + "\n"
+                        f"CRITICAL: NEVER return or query aggregated data outside this user's assigned scope. If the user asks general sales questions without mentioning an area, automatically apply these scope boundaries in your SQL WHERE clauses.\n"
+                    )
+        except Exception as uha_err:
+            pass
+
     # Greeting
     if question and _is_greet(question):
         suggested = []

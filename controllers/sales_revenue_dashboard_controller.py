@@ -321,6 +321,7 @@ def calculate_sales_revenue_mysql(cursor, session_id, zone=None):
 def get_sales_revenue_data_controller(get_db_connection):
     session_id = request.args.get("session_id")
     zone = request.args.get("zone")
+    user_id = request.args.get("user_id") or (request.json.get("user_id") if request.is_json and request.json else None)
     force_refresh = request.args.get("force_refresh", "").lower() in ("true", "1")
 
     mysql_conn, hana_conn, tunnel, is_hana, schema, effective_session = \
@@ -328,6 +329,20 @@ def get_sales_revenue_data_controller(get_db_connection):
 
     if not mysql_conn:
         return jsonify({"status": "error", "message": "Database connection failed"}), 500
+
+    # Dynamically resolve user hierarchy boundary if zone is not explicitly provided
+    if (not zone or str(zone).strip().lower() in ("all", "null", "none", "")) and user_id:
+        try:
+            cur_u = mysql_conn.cursor(dictionary=True) if hasattr(mysql_conn, "cursor") else mysql_conn.cursor()
+            cur_u.execute("SELECT zone_code, rank_id FROM user_hierarchy_access WHERE user_id = %s LIMIT 1", (user_id,))
+            u_row = cur_u.fetchone()
+            cur_u.close()
+            if u_row:
+                z = u_row.get("zone_code") if isinstance(u_row, dict) else u_row[0]
+                if z and str(z).strip().upper() != "ALL":
+                    zone = str(z).strip()
+        except Exception:
+            pass
 
     try:
         # 1. Check dedicated MySQL table `sales_revenue_plan_vs_sale` first
