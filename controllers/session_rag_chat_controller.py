@@ -3180,7 +3180,8 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                 f"   - CRITICAL ROLLING-MONTH SPLIT RULE:\n"
                 f"     Because month-end archiving from CurrentSales to SalesHistory happens asynchronously, ANY query for sales in the current year (2026), current quarter, or recent/rolling months (such as October, November, Q3, MTD, YTD) MUST QUERY BOTH FACT VIEWS using UNION ALL with NOT EXISTS de-duplication!\n"
                 f"     If you query only SalesHistory, you lose half the month (e.g. October); if you query only CurrentSales, you miss archived days.\n"
-                f"     MANDATORY UNIFIED FACT PATTERN:\n"
+                f"     MANDATORY UNIFIED FACT PATTERN (DO NOT OMIT SKU, DEALER_CODE, OR INVOICE_NUMBER FROM SUBQUERY SELECT):\n"
+                f"     Because SAP HANA calculation views aggregate at the SKU grain, omitting SKU causes non-SKU lines to be included and inflates NDP values.\n"
                 f"     (\n"
                 f"         SELECT \"volume\", \"ndp_value\", \"invoice_value\", \"Tyre_Quantity\", \"dealer_code\", \"invoice_number\", \"plant\", \"FKART\", \"distribution_channel\", \"indicator_cancel\", \"invoice_date\", \"SKU\"\n"
                 f"         FROM \"SAP_S4\".\"ZPVF_SD_SalesHistory_01_TR\"\n"
@@ -3849,8 +3850,10 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                                             sel_p = ub[:m_f.start()].lower() if m_f else ub.lower()
                                                             if "dealer_code" not in sel_p:
                                                                 ub = re.sub(r'(\bSELECT\s+(?:\n\s*)?)', r'\1"dealer_code",\n    ', ub, count=1, flags=re.I)
-                                                            if "invoice_number" not in sel_p and "invoice_number" in sub_text.lower():
+                                                            if "invoice_number" not in sel_p:
                                                                 ub = re.sub(r'(\bSELECT\s+(?:\n\s*)?)', r'\1"invoice_number",\n    ', ub, count=1, flags=re.I)
+                                                            if "sku" not in sel_p:
+                                                                ub = re.sub(r'(\bSELECT\s+(?:\n\s*)?)', r'\1"SKU",\n    ', ub, count=1, flags=re.I)
                                                             fixed_branches.append(ub)
                                                     sub_fixed = "".join(fixed_branches)
                                                     run_query = run_query[:open_idx] + sub_fixed + run_query[close_idx:]
