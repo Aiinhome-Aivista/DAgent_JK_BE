@@ -434,7 +434,7 @@ SAP S/4HANA Sales & Distribution (SD) Architecture and Table Context:
    - ZIVF_SD_Sales_Plan_Target_01_TR: Sales Plan & Target view (~200,000 rows). Target Value is PLAN_VALUE (or REV_PLAN_VAL), Target Qty is ORG_PLAN (or REV_PLAN).
    CRITICAL SAP HANA CASING FOR FACT COLUMNS (MUST USE DOUBLE QUOTES):
    "invoice_number", "invoice_date", "plant", "dealer_code", "ship_to_party", "SKU", "batch", "volume", "Tyre_Quantity", "ndp_value", "old_code", "invoice_value", "total_discount", "gst", "taxable_value", "FKART", "BILL_TYPE", "distribution_channel", "indicator_cancel".
-   - Customer Master: ZIVF_CustomerMaster_01_MD (~69,104 rows, columns UPPERCASE). When ranking or listing customers/dealers (Top N, Worst N, Dealers), ALWAYS use JOIN (INNER JOIN) on (fact."dealer_code" = cm.KUNNR OR LTRIM(fact."dealer_code", '0') = LTRIM(cm.KUNNR, '0')) to guarantee valid registered customer names. Customer Name is COALESCE(NULLIF(TRIM(cm.NAME1), ''), NULLIF(TRIM(cm.BNAME), ''), fact."dealer_code"). Filter: (cm.KLABC IS NULL OR cm.KLABC <> 'X'). Do NOT use cm.KUNNR IS NULL in ranking queries. (NOTE: SAP KUNNR often has 10-digit leading zeros '0001234567' while fact."dealer_code" is '1234567'. LTRIM matches them perfectly).
+   - Customer Master: ZIVF_CustomerMaster_01_MD (~69,104 rows, columns UPPERCASE). When ranking or listing customers/dealers (Top N, Worst N, Dealers), ALWAYS use JOIN (INNER JOIN) on (fact."dealer_code" = cm.KUNNR OR LTRIM(fact."dealer_code", '0') = LTRIM(cm.KUNNR, '0')) to guarantee valid registered customer names. Customer Name is COALESCE(NULLIF(TRIM(cm.NAME1), ''), NULLIF(TRIM(cm.BNAME), ''), fact."dealer_code"). Filter: cm.KLABC <> 'X' (strictly exclude scrap/test accounts, NEVER allow KLABC IS NULL). Do NOT use cm.KUNNR IS NULL in ranking queries. (NOTE: SAP KUNNR often has 10-digit leading zeros '0001234567' while fact."dealer_code" is '1234567'. LTRIM matches them perfectly).
    - SKU / Material Master: ZIVR_SKUMaster_01_TR (~30,000 rows, columns UPPERCASE). Join on fact."SKU" = sk.MATNR. Description is sk.MAKTX or sk.PROD_TITLE, Brand is sk.BRAND, Sub Brand is sk.SUB_BRAND, Category Code is sk.CAT_CODE, Construction is sk.CONSTUCTION, Tyre Type is sk.TYRE_TYPE (or sk.TYRE_TP: TRUCK, LCV, CAR, etc.).
    - Category Master: ZIVF_CategoryMaster_01_TR (columns UPPERCASE). Join on sk.CAT_CODE = cat.CAT_CODE. Category Description is cat.CAT_DESC (Tyre, Tube, Flap).
    - Territory Master: ZIVF_TerritoryMaster_01_TR (columns UPPERCASE). Join on cm.BZIRK = tm.BZIRK. Territory Name is tm.NAME, Region code is tm.REGIO, Zone code is tm.P_ZONE.
@@ -459,7 +459,7 @@ SAP S/4HANA Sales & Distribution (SD) Architecture and Table Context:
      AND (fact."indicator_cancel" IS NULL OR fact."indicator_cancel" NOT IN ('X', 'Y', '1'))
      NOTE: Both CurrentSales and SalesHistory fact views contain the indicator_cancel column ('X' indicates cancelled).
      DO NOT join ZPVF_SD_CancelledSalesInvoice_01_TR across 30M rows, as multi-column string join on 30M rows exhausts HANA memory (GLOBAL_ALLOCATION_LIMIT).
-   - Customer Status: ALWAYS filter (cm.KLABC IS NULL OR cm.KLABC <> 'X') on ZIVF_CustomerMaster_01_MD (exclude deleted/test/scrap customers).
+   - Customer Status: ALWAYS filter cm.KLABC <> 'X' on ZIVF_CustomerMaster_01_MD (strictly exclude scrap/test customers, NEVER allow KLABC IS NULL) (exclude deleted/test/scrap customers).
 4. Business Metrics:
    - Sales / Revenue = SUM(fact."invoice_value")
    - Volume = SUM(fact."volume")
@@ -1542,7 +1542,7 @@ CANONICAL DATA MODEL & RELATIONSHIP GRAPH (OFFICIAL):
      LEFT JOIN "SAP_S4"."ZIVF_TerritoryMaster_01_TR" tm ON cm.BZIRK = tm.BZIRK
      LEFT JOIN "SAP_S4"."ZIVF_RegionMaster_MD_01" rm ON (tm.REGIO = rm."region_code" OR cm.REGIO = rm."region_code")
      WHERE (fact."indicator_cancel" IS NULL OR fact."indicator_cancel" NOT IN ('X', 'Y', '1'))
-       AND (cm.KLABC IS NULL OR cm.KLABC <> 'X')
+       AND cm.KLABC <> 'X'
        AND UPPER(TRIM(rm."region_name")) LIKE UPPER('%Jaipur%')
      GROUP BY COALESCE(NULLIF(TRIM(cm.NAME1), ''), NULLIF(TRIM(cm.BNAME), ''), fact."dealer_code"), fact."dealer_code", rm."region_name"
      ORDER BY total_sales_value DESC
@@ -1557,7 +1557,7 @@ CANONICAL DATA MODEL & RELATIONSHIP GRAPH (OFFICIAL):
      JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm 
        ON (fact."dealer_code" = cm.KUNNR OR LTRIM(fact."dealer_code", '0') = LTRIM(cm.KUNNR, '0'))
      WHERE (fact."indicator_cancel" IS NULL OR fact."indicator_cancel" NOT IN ('X', 'Y', '1'))
-       AND (cm.KLABC IS NULL OR cm.KLABC <> 'X')
+       AND cm.KLABC <> 'X'
      GROUP BY COALESCE(NULLIF(TRIM(cm.NAME1), ''), NULLIF(TRIM(cm.BNAME), ''), fact."dealer_code"), fact."dealer_code"
      ORDER BY total_sales DESC
      LIMIT 2
@@ -1571,7 +1571,7 @@ CANONICAL DATA MODEL & RELATIONSHIP GRAPH (OFFICIAL):
      JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm 
        ON (fact."dealer_code" = cm.KUNNR OR LTRIM(fact."dealer_code", '0') = LTRIM(cm.KUNNR, '0'))
      WHERE (fact."indicator_cancel" IS NULL OR fact."indicator_cancel" NOT IN ('X', 'Y', '1'))
-       AND (cm.KLABC IS NULL OR cm.KLABC <> 'X')
+       AND cm.KLABC <> 'X'
      GROUP BY COALESCE(NULLIF(TRIM(cm.NAME1), ''), NULLIF(TRIM(cm.BNAME), ''), fact."dealer_code"), fact."dealer_code"
      ORDER BY total_sales ASC
      LIMIT 2
@@ -1595,7 +1595,7 @@ CANONICAL DATA MODEL & RELATIONSHIP GRAPH (OFFICIAL):
      JOIN "SAP_S4"."ZIVF_ZoneMaster_01_TR" zm ON tm.P_ZONE = zm.P_ZONE
      WHERE fact."distribution_channel" = '10'
        AND (fact."indicator_cancel" IS NULL OR fact."indicator_cancel" NOT IN ('X', 'Y', '1'))
-       AND (cm.KLABC IS NULL OR cm.KLABC <> 'X')
+       AND cm.KLABC <> 'X'
      GROUP BY zm.NAME, rm."region_name"
      ORDER BY total_sales DESC
 
@@ -1616,7 +1616,7 @@ CANONICAL DATA MODEL & RELATIONSHIP GRAPH (OFFICIAL):
        JOIN "SAP_S4"."ZIVF_ZoneMaster_01_TR" zm ON tm.P_ZONE = zm.P_ZONE
        WHERE fact."distribution_channel" = '10'
          AND (fact."indicator_cancel" IS NULL OR fact."indicator_cancel" NOT IN ('X', 'Y', '1'))
-         AND (cm.KLABC IS NULL OR cm.KLABC <> 'X')
+         AND cm.KLABC <> 'X'
        GROUP BY tm.BZIRK, tm.NAME, rm."region_name", zm.NAME
      ),
      target_plans AS (
@@ -1657,7 +1657,7 @@ CANONICAL DATA MODEL & RELATIONSHIP GRAPH (OFFICIAL):
      ) AS fact
      LEFT JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm ON TRIM(LEADING '0' FROM cm."KUNNR") = TRIM(LEADING '0' FROM fact."dealer_code")
      JOIN "SAP_S4"."ZITR_DayAttribute_01_TR" da ON fact."invoice_date" = da."Date_"
-     WHERE (cm."KLABC" IS NULL OR cm."KLABC" <> 'X')
+     WHERE cm."KLABC" <> 'X'
      GROUP BY da.CAL_YEAR, da.YMONTH
      ORDER BY da.CAL_YEAR, da.YMONTH
 
@@ -1678,7 +1678,7 @@ CANONICAL DATA MODEL & RELATIONSHIP GRAPH (OFFICIAL):
          ON (fact."dealer_code" = cm.KUNNR OR LTRIM(fact."dealer_code", '0') = LTRIM(cm.KUNNR, '0'))
        JOIN "SAP_S4"."ZITR_DayAttribute_01_TR" da ON fact."invoice_date" = da."Date_"
        WHERE (fact."indicator_cancel" IS NULL OR fact."indicator_cancel" NOT IN ('X', 'Y', '1'))
-         AND (cm.KLABC IS NULL OR cm.KLABC <> 'X')
+         AND cm.KLABC <> 'X'
        GROUP BY da.YMONTH, COALESCE(NULLIF(TRIM(cm.NAME1), ''), NULLIF(TRIM(cm.BNAME), ''), fact."dealer_code"), fact."dealer_code"
      )
      SELECT month, dealer_name, dealer_code, total_quantity, total_sales
@@ -2384,7 +2384,7 @@ def _build_geography_prompt(table_cols):
         ) if s4_tgt else ""
         return (
             f"\n\nSAP S/4HANA GEOGRAPHY CHAIN (MANDATORY):\n"
-            f"- Customer Master: \"SAP_S4\".\"{s4_cust}\" cm (JOIN: (fact.\"dealer_code\" = cm.KUNNR OR LTRIM(fact.\"dealer_code\", '0') = LTRIM(cm.KUNNR, '0')), Customer Name: COALESCE(NULLIF(TRIM(cm.NAME1), ''), NULLIF(TRIM(cm.BNAME), ''), fact.\"dealer_code\"), FILTER: (cm.KLABC IS NULL OR cm.KLABC <> 'X'))\n"
+            f"- Customer Master: \"SAP_S4\".\"{s4_cust}\" cm (JOIN: (fact.\"dealer_code\" = cm.KUNNR OR LTRIM(fact.\"dealer_code\", '0') = LTRIM(cm.KUNNR, '0')), Customer Name: COALESCE(NULLIF(TRIM(cm.NAME1), ''), NULLIF(TRIM(cm.BNAME), ''), fact.\"dealer_code\"), FILTER: cm.KLABC <> 'X')\n"
             f"- Territory Master: LEFT JOIN \"SAP_S4\".\"{s4_terr}\" tm ON cm.BZIRK = tm.BZIRK (Territory Name: tm.NAME, Region code: tm.REGIO, Zone code: tm.P_ZONE)\n"
             f"{reg_join}"
             f"{zone_join}"
@@ -2602,7 +2602,7 @@ def _resolve_canonical_churn_sql(question: str):
                 'FROM cust_units cu\n'
                 'LEFT JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm \n'
                 '    ON (cu."dealer_code" = cm."KUNNR" OR LTRIM(cu."dealer_code", \'0\') = LTRIM(cm."KUNNR", \'0\'))\n'
-                'WHERE (cm."KLABC" IS NULL OR cm."KLABC" <> \'X\')\n'
+                'WHERE cm."KLABC" <> \'X\'\n'
                 'ORDER BY cu.total_historical_units DESC'
             ),
             "reasoning": "Exact canonical query for Zero-Sale Active Counters (Last 30 Days) matching Executive Summary calculation."
@@ -2657,7 +2657,7 @@ def _resolve_canonical_churn_sql(question: str):
                 'FROM decline_calc d\n'
                 'LEFT JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm \n'
                 '    ON (d.dealer_code = cm."KUNNR" OR LTRIM(d.dealer_code, \'0\') = LTRIM(cm."KUNNR", \'0\'))\n'
-                'WHERE (cm."KLABC" IS NULL OR cm."KLABC" <> \'X\')\n'
+                'WHERE cm."KLABC" <> \'X\'\n'
                 'ORDER BY d.decline_pct DESC'
             ),
             "reasoning": "Exact canonical query for Accounts with > 5% Sales Decline matching Executive Summary calculation."
@@ -2712,7 +2712,7 @@ def _resolve_canonical_churn_sql(question: str):
                 'FROM decline_calc d\n'
                 'LEFT JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm \n'
                 '    ON (d.dealer_code = cm."KUNNR" OR LTRIM(d.dealer_code, \'0\') = LTRIM(cm."KUNNR", \'0\'))\n'
-                'WHERE (cm."KLABC" IS NULL OR cm."KLABC" <> \'X\')\n'
+                'WHERE cm."KLABC" <> \'X\'\n'
                 'ORDER BY d.decline_pct DESC'
             ),
             "reasoning": "Exact canonical query for Accounts with > 10% Sales Decline matching Executive Summary calculation."
@@ -2759,7 +2759,7 @@ def _resolve_canonical_churn_sql(question: str):
                 'FROM cust_billing cb\n'
                 'LEFT JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm \n'
                 '    ON (cb."dealer_code" = cm."KUNNR" OR LTRIM(cb."dealer_code", \'0\') = LTRIM(cm."KUNNR", \'0\'))\n'
-                'WHERE (cm."KLABC" IS NULL OR cm."KLABC" <> \'X\')\n'
+                'WHERE cm."KLABC" <> \'X\'\n'
                 'ORDER BY cb.total_historical_rev DESC'
             ),
             "reasoning": "Exact canonical query for High-Risk Inactive Accounts (₹2L+ Historical Billing) matching Executive Summary calculation."
@@ -2813,7 +2813,7 @@ def _resolve_canonical_churn_sql(question: str):
                 'FROM decline_calc d\n'
                 'LEFT JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm \n'
                 '    ON (d.dealer_code = cm."KUNNR" OR LTRIM(d.dealer_code, \'0\') = LTRIM(cm."KUNNR", \'0\'))\n'
-                'WHERE (cm."KLABC" IS NULL OR cm."KLABC" <> \'X\')\n'
+                'WHERE cm."KLABC" <> \'X\'\n'
                 'ORDER BY d.decline_pct DESC\n'
                 'LIMIT 20'
             ),
@@ -2859,7 +2859,7 @@ def _resolve_canonical_churn_sql(question: str):
                     'WHERE s."invoice_date" IS NOT NULL\n'
                     '  AND s."distribution_channel" = \'10\'\n'
                     '  AND (s."indicator_cancel" IS NULL OR s."indicator_cancel" NOT IN (\'X\', \'Y\', \'1\'))\n'
-                    '  AND (cm."KLABC" IS NULL OR cm."KLABC" <> \'X\')\n'
+                    '  AND cm."KLABC" <> \'X\'\n'
                     f'  AND (TRIM(cm."KTOKD") = \'{grp_code}\')\n'
                     'GROUP BY s."dealer_code", COALESCE(NULLIF(TRIM(cm."NAME1"), \'\'), NULLIF(TRIM(cm."BNAME"), \'\'), s."dealer_code")\n'
                     'ORDER BY sales_value_cr DESC'
@@ -3902,6 +3902,14 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                     run_query,
                                     flags=re.I
                                 )
+
+                                # Mandatory fix: Exclude unmapped/scrap customers (KLABC <> 'X') strictly. Strip any cm.KLABC <> 'X'
+                                run_query = re.sub(r'\([a-zA-Z0-9_."]*KLABC"?\s+IS\s+NULL\s+OR\s+([a-zA-Z0-9_."]*KLABC"?\s*<>\s*\'X\')\)', r'\1', run_query, flags=re.I)
+                                run_query = re.sub(r'[a-zA-Z0-9_."]*KLABC"?\s+IS\s+NULL\s+OR\s+', '', run_query, flags=re.I)
+
+                                # Mandatory fix: Exclude unmapped/scrap customers (KLABC <> 'X') strictly. Strip any cm.KLABC <> 'X'
+                                run_query = re.sub(r'\([a-zA-Z0-9_."]*KLABC"?\s+IS\s+NULL\s+OR\s+([a-zA-Z0-9_."]*KLABC"?\s*<>\s*\'X\')\)', r'\1', run_query, flags=re.I)
+                                run_query = re.sub(r'[a-zA-Z0-9_."]*KLABC"?\s+IS\s+NULL\s+OR\s+', '', run_query, flags=re.I)
 
                                 sql_query = run_query
 
