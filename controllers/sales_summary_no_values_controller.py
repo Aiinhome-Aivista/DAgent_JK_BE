@@ -205,7 +205,7 @@ def query_sales_summary_no_values_hana(cursor, schema, year_month: str, selected
     SALES_BASE AS (
         SELECT
             "invoice_date",
-            COALESCE(NULLIF("invoice_value", 0), NULLIF("taxable_value", 0), 0) AS "invoice_value",
+            COALESCE("NDP_VALUE", 0) AS "invoice_value",
             COALESCE(NULLIF("Tyre_Quantity", 0), NULLIF("volume", 0), 0) AS "qty",
             "distribution_channel",
             "dealer_code",
@@ -222,7 +222,7 @@ def query_sales_summary_no_values_hana(cursor, schema, year_month: str, selected
         UNION ALL
         SELECT
             "invoice_date",
-            COALESCE(NULLIF("invoice_value", 0), NULLIF("taxable_value", 0), 0) AS "invoice_value",
+            COALESCE("NDP_VALUE", 0) AS "invoice_value",
             COALESCE(NULLIF("Tyre_Quantity", 0), NULLIF("volume", 0), 0) AS "qty",
             "distribution_channel",
             "dealer_code",

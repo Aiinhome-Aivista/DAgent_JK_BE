@@ -264,7 +264,7 @@ def query_domestic_sales_value_achievement_hana(cursor, schema, year_month: str,
 
             AND S."invoice_date" < D.CURRENT_MTD_END
 
-            AND S."distribution_channel" = '10'
+            AND (S."distribution_channel" = '10' OR S."distribution_channel" = 10)
 
             AND COALESCE(S."indicator_cancel", '') <> 'X'
 
@@ -278,18 +278,16 @@ def query_domestic_sales_value_achievement_hana(cursor, schema, year_month: str,
             S."invoice_value",
 
             CASE
-                WHEN S."distribution_channel" = '10' THEN
-                    CASE
-                        WHEN UPPER(TRIM(C."CAT_DESC")) IN ('MOTOR', '3WH', 'SCOOTER')
-                          OR UPPER(TRIM(C."CAT_DESC")) LIKE '%SCOOTER%'
-                          OR UPPER(TRIM(C."CAT_DESC")) LIKE '%MOTOR%'
-                          OR UPPER(TRIM(C."CAT_DESC")) LIKE '%3%WH%'
-                            THEN '2/3 Wheelers'
-                        ELSE '4 Wheelers'
-                    END
-                WHEN S."distribution_channel" IN ('20', '40') THEN 'OEM + DEF'
-                WHEN S."distribution_channel" = '30' THEN 'STU'
-                ELSE 'Other'
+                WHEN (
+                    TRIM(COALESCE(M."CAT_CODE", C."CAT_CODE", '')) IN ('B1', 'H1', 'S1')
+                    OR UPPER(TRIM(COALESCE(C."CAT_DESC", ''))) IN ('MOTOR', '3WH', 'SCOOTER', '3W', 'MOTORCYCLE')
+                    OR UPPER(TRIM(COALESCE(C."CAT_DESC", ''))) LIKE '%SCOOTER%'
+                    OR UPPER(TRIM(COALESCE(C."CAT_DESC", ''))) LIKE '%MOTOR%'
+                    OR UPPER(TRIM(COALESCE(C."CAT_DESC", ''))) LIKE '%3%WH%'
+                    OR UPPER(TRIM(COALESCE(C."CAT_DESC", ''))) LIKE '%3%WHEEL%'
+                )
+                THEN '2/3 Wheelers'
+                ELSE '4 Wheelers'
             END AS MARKET_SEGMENT
 
         FROM VALID_SALES S
@@ -299,9 +297,6 @@ def query_domestic_sales_value_achievement_hana(cursor, schema, year_month: str,
 
         LEFT JOIN "{schema}"."ZIVF_CategoryMaster_01_TR" C
             ON M."CAT_CODE" = C."CAT_CODE"
-
-        WHERE
-            C."CAT_CODE" IS NULL OR C."CAT_CODE" NOT IN ('TR', 'NT', 'AL', 'IE')
     ),
 
     SALES_SUMMARY AS
@@ -359,31 +354,41 @@ def query_domestic_sales_value_achievement_hana(cursor, schema, year_month: str,
     (
         SELECT
             CASE
-                WHEN UPPER(TRIM(C."CAT_DESC")) IN
-                     ('MOTOR', '3WH', 'SCOOTER')
-                    THEN '2/3 Wheelers'
+                WHEN (
+                    TRIM(COALESCE(T."CAT_CODE", C."CAT_CODE", '')) IN ('B1', 'H1', 'S1')
+                    OR UPPER(TRIM(COALESCE(C."CAT_DESC", ''))) IN ('MOTOR', '3WH', 'SCOOTER', '3W', 'MOTORCYCLE')
+                    OR UPPER(TRIM(COALESCE(C."CAT_DESC", ''))) LIKE '%SCOOTER%'
+                    OR UPPER(TRIM(COALESCE(C."CAT_DESC", ''))) LIKE '%MOTOR%'
+                    OR UPPER(TRIM(COALESCE(C."CAT_DESC", ''))) LIKE '%3%WH%'
+                    OR UPPER(TRIM(COALESCE(C."CAT_DESC", ''))) LIKE '%3%WHEEL%'
+                )
+                THEN '2/3 Wheelers'
                 ELSE '4 Wheelers'
             END AS MARKET_SEGMENT,
 
-            SUM(T."PLAN_VALUE") AS TARGET
+            SUM(COALESCE(NULLIF(T."PLAN_VALUE", 0), NULLIF(T."REV_PLAN_VAL", 0), 0)) AS TARGET
 
-        FROM "{schema}"."ZIVF_SD_Sales_Plan_Target_01_TR" T
+        FROM "{schema}"."ZIVF_SD_SalesPlan_Target_01_TR" T
 
-        INNER JOIN "{schema}"."ZIVF_CategoryMaster_01_TR" C
+        LEFT JOIN "{schema}"."ZIVF_CategoryMaster_01_TR" C
             ON TRIM(T."CAT_CODE") = TRIM(C."CAT_CODE")
 
         CROSS JOIN DATE_PARAMS D
 
         WHERE
-            T."YMONTH" = D.P_YEAR_MONTH
-
-            AND T."CAT_CODE" NOT IN ('TR', 'NT', 'AL', 'IE')
+            (CAST(T."YMONTH" AS VARCHAR) = D.P_YEAR_MONTH OR T."YMONTH" = D.P_YEAR_MONTH)
 
         GROUP BY
             CASE
-                WHEN UPPER(TRIM(C."CAT_DESC")) IN
-                     ('MOTOR', '3WH', 'SCOOTER')
-                    THEN '2/3 Wheelers'
+                WHEN (
+                    TRIM(COALESCE(T."CAT_CODE", C."CAT_CODE", '')) IN ('B1', 'H1', 'S1')
+                    OR UPPER(TRIM(COALESCE(C."CAT_DESC", ''))) IN ('MOTOR', '3WH', 'SCOOTER', '3W', 'MOTORCYCLE')
+                    OR UPPER(TRIM(COALESCE(C."CAT_DESC", ''))) LIKE '%SCOOTER%'
+                    OR UPPER(TRIM(COALESCE(C."CAT_DESC", ''))) LIKE '%MOTOR%'
+                    OR UPPER(TRIM(COALESCE(C."CAT_DESC", ''))) LIKE '%3%WH%'
+                    OR UPPER(TRIM(COALESCE(C."CAT_DESC", ''))) LIKE '%3%WHEEL%'
+                )
+                THEN '2/3 Wheelers'
                 ELSE '4 Wheelers'
             END
     ),

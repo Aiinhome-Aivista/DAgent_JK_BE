@@ -180,7 +180,7 @@ def _compute_top_bottom_slice_hana(cursor, schema, dimension: str, days: int):
     sql = f"""
         SELECT 
             {select_expr},
-            ROUND(SUM(COALESCE(s."invoice_value", 0)), 2) AS sales_value
+            ROUND(SUM(COALESCE(s."NDP_VALUE", 0)), 2) AS sales_value
         FROM "{schema}"."{sales_view}" s
         {joins}
         CROSS JOIN (
@@ -195,7 +195,7 @@ def _compute_top_bottom_slice_hana(cursor, schema, dimension: str, days: int):
           AND (s."indicator_cancel" IS NULL OR s."indicator_cancel" NOT IN ('X', 'Y', '1'))
           {extra_filter}
         GROUP BY {group_by}
-        HAVING SUM(COALESCE(s."invoice_value", 0)) > 0
+        HAVING SUM(COALESCE(s."NDP_VALUE", 0)) > 0
         ORDER BY 2 DESC
     """
 
@@ -290,7 +290,7 @@ def _compute_top_bottom_slice_mysql(cursor, user_db: str, dimension: str, days: 
     sql = f"""
         SELECT 
             {select_expr},
-            SUM(sd.invoice_value) AS sales_value
+            ROUND(SUM(COALESCE(sd.ndp_value, 0)), 2) AS sales_value
         FROM {sales_tbl} sd
         {joins}
         CROSS JOIN (SELECT MAX(sd_max.invoice_date) AS max_dt FROM {sales_tbl} sd_max) md
@@ -299,7 +299,7 @@ def _compute_top_bottom_slice_mysql(cursor, user_db: str, dimension: str, days: 
           AND (sd.indicator_cancel IS NULL OR sd.indicator_cancel NOT IN ('X', 'Y', '1'))
           {extra_filter}
         GROUP BY {group_by}
-        HAVING SUM(sd.invoice_value) > 0
+        HAVING SUM(COALESCE(sd.ndp_value, 0)) > 0
         ORDER BY sales_value DESC
     """
 

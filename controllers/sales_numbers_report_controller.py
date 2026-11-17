@@ -246,7 +246,7 @@ def query_sales_numbers_hana(cursor, schema, year_month: str, selected_date: str
             "FKART",
             "indicator_cancel"
         FROM "{schema}"."ZPVF_SD_SalesHistory_01_TR"
-        WHERE ("distribution_channel" IN ('10', 10, '20', 20, '30', 30, '40', 40))
+        WHERE ("distribution_channel" = '10' OR "distribution_channel" = 10)
           AND (
               ("invoice_date" >= TO_DATE('{prev_from}', 'YYYY-MM-DD') AND "invoice_date" <= TO_DATE('{prev_month_end}', 'YYYY-MM-DD'))
               OR
@@ -265,7 +265,7 @@ def query_sales_numbers_hana(cursor, schema, year_month: str, selected_date: str
             "FKART",
             "indicator_cancel"
         FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR"
-        WHERE ("distribution_channel" IN ('10', 10, '20', 20, '30', 30, '40', 40))
+        WHERE ("distribution_channel" = '10' OR "distribution_channel" = 10)
           AND (
               ("invoice_date" >= TO_DATE('{prev_from}', 'YYYY-MM-DD') AND "invoice_date" <= TO_DATE('{prev_month_end}', 'YYYY-MM-DD'))
               OR

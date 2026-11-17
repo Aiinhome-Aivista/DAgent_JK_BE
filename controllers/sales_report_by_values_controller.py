@@ -186,7 +186,7 @@ def query_sales_report_by_values_hana(cursor, schema, year_month: str, selected_
     SALES_BASE AS (
         SELECT
             "invoice_date",
-            "invoice_value",
+            COALESCE("NDP_VALUE", 0) AS "invoice_value",
             "distribution_channel",
             "dealer_code",
             "SKU",
@@ -205,7 +205,7 @@ def query_sales_report_by_values_hana(cursor, schema, year_month: str, selected_
         UNION ALL
         SELECT
             "invoice_date",
-            "invoice_value",
+            COALESCE("NDP_VALUE", 0) AS "invoice_value",
             "distribution_channel",
             "dealer_code",
             "SKU",
@@ -239,13 +239,16 @@ def query_sales_report_by_values_hana(cursor, schema, year_month: str, selected_
             s."invoice_date",
             s."invoice_value",
             CASE
-                WHEN UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) IN ('SCOOTER', 'MOTOR CYCLE', 'MOTORCYCLE', '3W', '3 WHEELER', '3WH', 'MOTOR')
-                  OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%SCOOTER%'
-                  OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%MOTOR CYCLE%'
-                  OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%MOTORCYCLE%'
-                  OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%3%WH%'
-                  OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%3%WHEEL%'
-                  OR UPPER(TRIM(COALESCE(sk."TYRE_TYPE", ''))) IN ('SCOOTER', 'MOTOR CYCLE', 'MOTORCYCLE', '3W', '3 WHEELER', '3WH')
+                WHEN (
+                    TRIM(COALESCE(cat."CAT_CODE", sk."CAT_CODE", '')) IN ('B1', 'H1', 'S1')
+                    OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) IN ('SCOOTER', 'MOTOR CYCLE', 'MOTORCYCLE', '3W', '3 WHEELER', '3WH', 'MOTOR')
+                    OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%SCOOTER%'
+                    OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%MOTOR CYCLE%'
+                    OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%MOTORCYCLE%'
+                    OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%3%WH%'
+                    OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%3%WHEEL%'
+                    OR UPPER(TRIM(COALESCE(sk."TYRE_TYPE", ''))) IN ('SCOOTER', 'MOTOR CYCLE', 'MOTORCYCLE', '3W', '3 WHEELER', '3WH')
+                )
                 THEN '2_3_Whlrs'
                 ELSE '4_Whlrs'
             END AS Segment
@@ -287,7 +290,8 @@ def query_sales_report_by_values_hana(cursor, schema, year_month: str, selected_
             zm."NAME" AS Zone_Name,
             zm."P_ZONE" AS Zone_Code,
             SUM(CASE WHEN NOT (
-                UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) IN ('SCOOTER', 'MOTOR CYCLE', 'MOTORCYCLE', '3W', '3 WHEELER', '3WH', 'MOTOR', '2/3 WHEELERS')
+                TRIM(COALESCE(tgt."CAT_CODE", cat."CAT_CODE", '')) IN ('B1', 'H1', 'S1')
+                OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) IN ('SCOOTER', 'MOTOR CYCLE', 'MOTORCYCLE', '3W', '3 WHEELER', '3WH', 'MOTOR', '2/3 WHEELERS')
                 OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%SCOOTER%'
                 OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%MOTOR CYCLE%'
                 OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%MOTORCYCLE%'
@@ -304,7 +308,8 @@ def query_sales_report_by_values_hana(cursor, schema, year_month: str, selected_
             THEN COALESCE(NULLIF(tgt."REV_PLAN_VAL", 0), NULLIF(tgt."PLAN_VALUE", 0), 0)
             ELSE 0 END) / 10000000.0 AS Tgt_4W,
             SUM(CASE WHEN (
-                UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) IN ('SCOOTER', 'MOTOR CYCLE', 'MOTORCYCLE', '3W', '3 WHEELER', '3WH', 'MOTOR', '2/3 WHEELERS')
+                TRIM(COALESCE(tgt."CAT_CODE", cat."CAT_CODE", '')) IN ('B1', 'H1', 'S1')
+                OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) IN ('SCOOTER', 'MOTOR CYCLE', 'MOTORCYCLE', '3W', '3 WHEELER', '3WH', 'MOTOR', '2/3 WHEELERS')
                 OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%SCOOTER%'
                 OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%MOTOR CYCLE%'
                 OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%MOTORCYCLE%'
