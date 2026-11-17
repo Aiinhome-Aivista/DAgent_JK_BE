@@ -3912,9 +3912,9 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                                                     )
                                                             elif "saleshistory" in ub.lower():
                                                                 m_sh_al = re.search(r'"?ZPVF_SD_SalesHistory_01_TR"?\s+(?:AS\s+)?([a-zA-Z0-9_]+)', ub, re.I)
-                                                                sh_al = m_sh_al.group(1) if m_sh_al and m_sh_al.group(1).lower() not in SQL_RESERVED else "fact"
+                                                                sh_col = f'{m_sh_al.group(1)}."FKART"' if m_sh_al and m_sh_al.group(1).lower() not in SQL_RESERVED else '"FKART"'
                                                                 if "zgov" not in ub.lower():
-                                                                    fk_filter_sh = f"{sh_al}.\"FKART\" NOT IN ('ZGOV', 'ZCC', 'ZBHU')"
+                                                                    fk_filter_sh = f"{sh_col} NOT IN ('ZGOV', 'ZCC', 'ZBHU')"
                                                                     if re.search(r'\bWHERE\s+', ub, re.I):
                                                                         ub = re.sub(r'(\bWHERE\s+)', lambda m: f"{m.group(1)}{fk_filter_sh} AND ", ub, count=1, flags=re.I)
                                                                     else:
