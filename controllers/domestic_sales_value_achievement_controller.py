@@ -195,7 +195,7 @@ def query_domestic_sales_value_achievement_hana(cursor, schema, year_month: str,
     (
         SELECT
             "invoice_date",
-            COALESCE("NDP_VALUE", 0) AS "invoice_value",
+            COALESCE("ndp_value", 0) AS "invoice_value",
             "distribution_channel",
             "dealer_code",
             "SKU",
@@ -203,41 +203,30 @@ def query_domestic_sales_value_achievement_hana(cursor, schema, year_month: str,
             "plant",
             "FKART",
             "indicator_cancel"
-
         FROM "{schema}"."ZPVF_SD_SalesHistory_01_TR"
+        WHERE "distribution_channel" = '10'
+          AND ("indicator_cancel" IS NULL OR "indicator_cancel" <> 'X')
 
         UNION ALL
 
         SELECT
-            "invoice_date",
-            COALESCE("NDP_VALUE", 0) AS "invoice_value",
-            "distribution_channel",
-            "dealer_code",
-            "SKU",
-            "invoice_number",
-            "plant",
-            "FKART",
-            "indicator_cancel"
-
-        FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR"
-    ),
-
-    CUSTOMER_MAP AS
-    (
-        SELECT
-            LTRIM(TRIM("KUNNR"), '0') AS CUSTOMER_CODE,
-
-            MAX(
-                CASE
-                    WHEN "KLABC" = 'X' THEN 1
-                    ELSE 0
-                END
-            ) AS EXCLUDED_FLAG
-
-        FROM "{schema}"."ZIVF_CustomerMaster_01_MD"
-
-        GROUP BY
-            LTRIM(TRIM("KUNNR"), '0')
+            cs."invoice_date",
+            COALESCE(cs."ndp_value", 0) AS "invoice_value",
+            cs."distribution_channel",
+            cs."dealer_code",
+            cs."SKU",
+            cs."invoice_number",
+            cs."plant",
+            cs."FKART",
+            cs."indicator_cancel"
+        FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR" cs
+        WHERE cs."distribution_channel" = '10'
+          AND (cs."indicator_cancel" IS NULL OR cs."indicator_cancel" <> 'X')
+          AND NOT EXISTS (
+              SELECT 1 
+              FROM "{schema}"."ZPVF_SD_SalesHistory_01_TR" sh 
+              WHERE sh."invoice_number" = cs."invoice_number"
+          )
     ),
 
     VALID_SALES AS
@@ -251,24 +240,17 @@ def query_domestic_sales_value_achievement_hana(cursor, schema, year_month: str,
             S."invoice_number",
             S."plant",
             S."FKART"
-
         FROM SALES_DATA S
-
-        LEFT JOIN CUSTOMER_MAP C
-            ON LTRIM(TRIM(S."dealer_code"), '0') = C.CUSTOMER_CODE
-
         CROSS JOIN DATE_PARAMS D
-
         WHERE
             S."invoice_date" >= D.PREVIOUS_MONTH_START
-
             AND S."invoice_date" < D.CURRENT_MTD_END
-
-            AND (S."distribution_channel" = '10' OR S."distribution_channel" = 10)
-
-            AND COALESCE(S."indicator_cancel", '') <> 'X'
-
-            AND COALESCE(C.EXCLUDED_FLAG, 0) = 0
+            AND EXISTS (
+                SELECT 1
+                FROM "{schema}"."ZIVF_CustomerMaster_01_MD" cm
+                WHERE TRIM(LEADING '0' FROM cm."KUNNR") = TRIM(LEADING '0' FROM S."dealer_code")
+                  AND cm."KLABC" <> 'X'
+            )
     ),
 
     CLASSIFIED_SALES AS
@@ -368,7 +350,7 @@ def query_domestic_sales_value_achievement_hana(cursor, schema, year_month: str,
 
             SUM(COALESCE(NULLIF(T."PLAN_VALUE", 0), NULLIF(T."REV_PLAN_VAL", 0), 0)) AS TARGET
 
-        FROM "{schema}"."ZIVF_SD_SalesPlan_Target_01_TR" T
+        FROM "{schema}"."ZIVF_SD_Sales_Plan_Target_01_TR" T
 
         LEFT JOIN "{schema}"."ZIVF_CategoryMaster_01_TR" C
             ON TRIM(T."CAT_CODE") = TRIM(C."CAT_CODE")
@@ -401,16 +383,6 @@ def query_domestic_sales_value_achievement_hana(cursor, schema, year_month: str,
         UNION ALL
 
         SELECT '2/3 Wheelers' AS MARKET_SEGMENT
-        FROM DUMMY
-
-        UNION ALL
-
-        SELECT 'OEM + DEF' AS MARKET_SEGMENT
-        FROM DUMMY
-
-        UNION ALL
-
-        SELECT 'STU' AS MARKET_SEGMENT
         FROM DUMMY
     )
 
@@ -534,19 +506,11 @@ def query_domestic_sales_value_achievement_hana(cursor, schema, year_month: str,
     r_4w = _calc_row("4 Wheelers", four_w, is_tot=False)
     r_23w = _calc_row("2/3 Wheelers", two_three_w, is_tot=False)
     r_repl = _sum_rows("Repl (4 & 2/3 Whlrs)", r_4w, r_23w, is_tot=True)
-    r_oem_def = _calc_row("OEM + DEF", oem_def, is_tot=False)
-    r_stu = _calc_row("STU", stu, is_tot=False)
-    r_oem_stu_def = _sum_rows("OEM + STU + DEF", r_oem_def, r_stu, is_tot=True)
-    r_domestic = _sum_rows("Domestic", r_repl, r_oem_stu_def, is_tot=True)
 
     result_rows = [
         r_4w,
         r_23w,
-        r_repl,
-        r_oem_def,
-        r_stu,
-        r_oem_stu_def,
-        r_domestic
+        r_repl
     ]
     return result_rows
 
@@ -561,16 +525,13 @@ def get_cached_data(mysql_conn, session_id: str, year_month: str):
                    `selected_date`, `last_synced_at`
             FROM `{TABLE_NAME}`
             WHERE `session_id` = %s AND `year_month` = %s
+              AND `market_segment` IN ('4 Wheelers', '2/3 Wheelers', 'Repl (4 & 2/3 Whlrs)')
             ORDER BY 
                 CASE 
                     WHEN `market_segment` = '4 Wheelers' THEN 1
                     WHEN `market_segment` = '2/3 Wheelers' THEN 2
                     WHEN `market_segment` = 'Repl (4 & 2/3 Whlrs)' THEN 3
-                    WHEN `market_segment` = 'OEM + DEF' THEN 4
-                    WHEN `market_segment` = 'STU' THEN 5
-                    WHEN `market_segment` = 'OEM + STU + DEF' THEN 6
-                    WHEN `market_segment` = 'Domestic' THEN 7
-                    ELSE 8
+                    ELSE 4
                 END
         """, (str(session_id).strip(), str(year_month).strip()))
         rows = cur.fetchall()
