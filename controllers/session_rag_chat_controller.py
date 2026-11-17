@@ -3891,6 +3891,15 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                 run_query = re.sub(r'(\bNOT\s+EXISTS\s*\(\s*SELECT\s+)[^Ff]+?(\bFROM\b)', r'\1 1 \2', run_query, flags=re.I)
                                 run_query = re.sub(r'(\bEXISTS\s*\(\s*SELECT\s+)[^Ff]+?(\bFROM\b)', r'\1 1 \2', run_query, flags=re.I)
 
+                                # Mandatory fix: De-duplication between CurrentSales and SalesHistory MUST strictly match on invoice_number alone
+                                # Strip any hallucinated plant/FKART matching that causes de-duplication to fail
+                                run_query = re.sub(
+                                    r'(WHERE\s+sh\."invoice_number"\s*=\s*cs\."invoice_number")(?:\s+AND\s+sh\."[a-zA-Z0-9_]+"\s*=\s*cs\."[a-zA-Z0-9_]+")+(\s*\))',
+                                    r'\1\2',
+                                    run_query,
+                                    flags=re.I
+                                )
+
                                 sql_query = run_query
 
                                 print(f"[SQL_EXEC] Executing on SAP HANA:\n{run_query}")
