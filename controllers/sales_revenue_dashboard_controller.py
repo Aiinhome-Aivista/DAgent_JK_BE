@@ -653,7 +653,7 @@ def get_sales_revenue_data_controller(get_db_connection):
         # 3. Save into cache
         if results:
             try:
-                set_cached_component_data(mysql_conn, effective_session, "sales_revenue", cache_context, results, row_count=len(results))
+                set_cached_component_data(mysql_conn, effective_session, "sales_revenue", results, cache_context)
             except Exception as ce:
                 print(f"[Sales Revenue] Cache set note: {ce}", flush=True)
 
