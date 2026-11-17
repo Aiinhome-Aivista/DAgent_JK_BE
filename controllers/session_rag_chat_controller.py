@@ -3852,8 +3852,12 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                                                 ub = re.sub(r'(\bSELECT\s+(?:\n\s*)?)', r'\1"dealer_code",\n    ', ub, count=1, flags=re.I)
                                                             if "invoice_number" not in sel_p:
                                                                 ub = re.sub(r'(\bSELECT\s+(?:\n\s*)?)', r'\1"invoice_number",\n    ', ub, count=1, flags=re.I)
-                                                            if "sku" not in sel_p:
-                                                                ub = re.sub(r'(\bSELECT\s+(?:\n\s*)?)', r'\1"SKU",\n    ', ub, count=1, flags=re.I)
+                                                            if re.search(r'\b(sku|matnr|material|product|tyre_type|tyre type|brand|category|cat_code)\b', question, re.I):
+                                                                if "sku" not in sel_p:
+                                                                    ub = re.sub(r'(\bSELECT\s+(?:\n\s*)?)', r'\1"SKU",\n    ', ub, count=1, flags=re.I)
+                                                            else:
+                                                                # Strip SKU if not requested to prevent Calculation View header condition duplication
+                                                                ub = re.sub(r'\"?SKU\"?\s*,\s*', '', ub, flags=re.I)
 
                                                             # Mandatory: If this branch is CurrentSales, strictly enforce de-duplication against SalesHistory
                                                             if "currentsales" in ub.lower():
@@ -3931,6 +3935,13 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                 # Mandatory fix: Exclude unmapped/scrap customers (KLABC <> 'X') strictly. Strip any cm.KLABC <> 'X'
                                 run_query = re.sub(r'\([a-zA-Z0-9_."]*KLABC"?\s+IS\s+NULL\s+OR\s+([a-zA-Z0-9_."]*KLABC"?\s*<>\s*\'X\')\)', r'\1', run_query, flags=re.I)
                                 run_query = re.sub(r'[a-zA-Z0-9_."]*KLABC"?\s+IS\s+NULL\s+OR\s+', '', run_query, flags=re.I)
+
+                                # Mandatory fix: Standardize indicator_cancel to <> 'X'
+                                run_query = re.sub(r'NOT\s+IN\s*\(\s*\'X\'\s*,\s*\'Y\'\s*,\s*\'1\'\s*\)', "<> 'X'", run_query, flags=re.I)
+
+                                # Mandatory fix: If query does not ask about SKU/product, ensure SKU is not projected inside subqueries
+                                if not re.search(r'\b(sku|matnr|material|product|tyre_type|tyre type|brand|category|cat_code)\b', question, re.I):
+                                    run_query = re.sub(r'\"?SKU\"?\s*,\s*', '', run_query, flags=re.I)
 
                                 sql_query = run_query
 
