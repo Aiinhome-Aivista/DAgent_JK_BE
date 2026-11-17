@@ -3847,10 +3847,9 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                                         else:
                                                             m_f = re.search(r'\bFROM\b', ub, re.I)
                                                             sel_p = ub[:m_f.start()].lower() if m_f else ub.lower()
-                                                            if "dealer_code" not in sel_p:
-                                                                ub = re.sub(r'(\bSELECT\s+(?:\n\s*)?)', r'\1"dealer_code",\n    ', ub, count=1, flags=re.I)
-                                                            if "invoice_number" not in sel_p:
-                                                                ub = re.sub(r'(\bSELECT\s+(?:\n\s*)?)', r'\1"invoice_number",\n    ', ub, count=1, flags=re.I)
+                                                            for col_req in ["volume", "ndp_value", "invoice_value", "Tyre_Quantity", "dealer_code", "invoice_number", "distribution_channel", "indicator_cancel", "invoice_date"]:
+                                                                if col_req.lower() not in sel_p:
+                                                                    ub = re.sub(r'(\bSELECT\s+(?:\n\s*)?)', rf'\1"{col_req}",\n    ', ub, count=1, flags=re.I)
                                                             if not re.search(r'\b(plant|werks)\b', question, re.I):
                                                                 ub = re.sub(r'\"?plant\"?\s*,\s*', '', ub, flags=re.I)
                                                                 ub = re.sub(r',\s*\"?plant\"?', '', ub, flags=re.I)
