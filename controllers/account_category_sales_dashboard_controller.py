@@ -203,6 +203,11 @@ def save_account_category_sales_to_table(mysql_conn, session_id, zone, data_list
 
 def calculate_account_category_sales_hana(cursor, schema, zone=None):
     from helper.sap_connection import sanitize_and_execute_hana
+    from helper.sap_connection import detect_sales_dates
+    det_year, _, _ = detect_sales_dates(cursor, schema)
+    curr_year = det_year or datetime.now().year
+    start_year_date = f"{curr_year}-01-01"
+
     hana_sql = f"""
     WITH master_cats AS (
         SELECT DISTINCT UPPER(TRIM("CH_TYPE")) AS title
@@ -215,7 +220,23 @@ def calculate_account_category_sales_hana(cursor, schema, zone=None):
         SELECT 
             UPPER(TRIM(cm.CH_TYPE)) AS title,
             COALESCE(cs.NDP_VALUE, 0) AS invoice_value
-        FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR" cs
+        FROM (
+            SELECT "DEALER_CODE", "NDP_VALUE", "PLANT", "INDICATOR_CANCEL", "DISTRIBUTION_CHANNEL", "invoice_date", "invoice_number"
+            FROM "{schema}"."ZPVF_SD_SalesHistory_01_TR"
+            WHERE ("DISTRIBUTION_CHANNEL" = 10 OR "DISTRIBUTION_CHANNEL" = '10')
+              AND ("INDICATOR_CANCEL" IS NULL OR "INDICATOR_CANCEL" NOT IN ('X', 'Y', '1'))
+              AND "invoice_date" >= '{start_year_date}'
+            UNION ALL
+            SELECT cs_raw."DEALER_CODE", cs_raw."NDP_VALUE", cs_raw."PLANT", cs_raw."INDICATOR_CANCEL", cs_raw."DISTRIBUTION_CHANNEL", cs_raw."invoice_date", cs_raw."invoice_number"
+            FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR" cs_raw
+            WHERE (cs_raw."DISTRIBUTION_CHANNEL" = 10 OR cs_raw."DISTRIBUTION_CHANNEL" = '10')
+              AND (cs_raw."INDICATOR_CANCEL" IS NULL OR cs_raw."INDICATOR_CANCEL" NOT IN ('X', 'Y', '1'))
+              AND cs_raw."invoice_date" >= '{start_year_date}'
+              AND NOT EXISTS (
+                  SELECT 1 FROM "{schema}"."ZPVF_SD_SalesHistory_01_TR" sh 
+                  WHERE sh."invoice_number" = cs_raw."invoice_number"
+              )
+        ) cs
         INNER JOIN "{schema}"."ZIVF_CustomerMaster_01_MD" cm ON (
             LPAD(TRIM(TO_VARCHAR(cs.DEALER_CODE)), 10, '0') = LPAD(TRIM(TO_VARCHAR(cm.KUNNR)), 10, '0') 
             OR LTRIM(TO_VARCHAR(cs.DEALER_CODE), '0') = LTRIM(TO_VARCHAR(cm.KUNNR), '0')

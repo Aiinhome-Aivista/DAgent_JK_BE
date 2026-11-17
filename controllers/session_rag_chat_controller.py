@@ -1344,16 +1344,28 @@ Generate clean, highly efficient, and 100% syntactically correct SAP HANA SQL th
 CANONICAL DATA MODEL & RELATIONSHIP GRAPH (OFFICIAL):
 =====================================================
 1. TRANSACTIONAL SALES DATA (FACT VIEWS):
-   - "SAP_S4"."ZPVF_SD_CurrentSales_01_TR": Rolling current active month sales data (FAST, active month only).
-   - "SAP_S4"."ZPVF_SD_SalesHistory_01_TR": Historical sales data for all prior months/years (2020 through prior month).
+   - "SAP_S4"."ZPVF_SD_CurrentSales_01_TR": Rolling current active month(s) sales data (last 30-60 rolling days).
+   - "SAP_S4"."ZPVF_SD_SalesHistory_01_TR": Historical sales data for all prior months/years.
    - "SAP_S4"."ZPVF_SD_CancelledSalesInvoice_01_TR": Cancelled invoices reference view.
    - "SAP_S4"."ZIVF_SD_Sales_Plan_Target_01_TR": Sales Plan & Target View (Target Revenue = PLAN_VALUE, Target Qty = ORG_PLAN).
 
    * Standard Filters on Sales Data:
-     - Default Distribution Channel: fact."distribution_channel" = '10' (Replacement/Domestic channel default, unless OEM=20, STU=30, DEF=40 or all channels specified).
-     - Cancellation Filter: (fact."indicator_cancel" IS NULL OR fact."indicator_cancel" NOT IN ('X', 'Y', '1')).
-     - If the user asks for multi-year trends or historical totals (e.g. "Total Sales Revenue for 2020 to 2026"):
-       Use UNION ALL of both ZPVF_SD_SalesHistory_01_TR and ZPVF_SD_CurrentSales_01_TR with date filters pushed down inside each branch!
+     - Default Distribution Channel: ("distribution_channel" = '10' OR "distribution_channel" = 10) (Replacement/Domestic channel default, unless OEM=20, STU=30, DEF=40 or all channels specified).
+     - Cancellation Filter: ("indicator_cancel" IS NULL OR "indicator_cancel" <> 'X').
+     - Sales Revenue Metric: ALWAYS use COALESCE("ndp_value", 0) AS revenue / sales_value.
+     - UNIFIED SALES FACT RULE (2026 / Rolling / Monthly / MTD):
+       For ANY query for the current year (2026), MTD, or recent/rolling months (e.g. October, November):
+       ALWAYS combine ZPVF_SD_SalesHistory_01_TR and ZPVF_SD_CurrentSales_01_TR with UNION ALL and NOT EXISTS de-duplication:
+       (
+           SELECT "volume", "ndp_value", "invoice_value", "Tyre_Quantity", "dealer_code", "invoice_number", "plant", "FKART", "distribution_channel", "indicator_cancel", "invoice_date", "SKU"
+           FROM "SAP_S4"."ZPVF_SD_SalesHistory_01_TR"
+           WHERE ("distribution_channel" = '10' OR "distribution_channel" = 10) AND ("indicator_cancel" IS NULL OR "indicator_cancel" <> 'X')
+           UNION ALL
+           SELECT "volume", "ndp_value", "invoice_value", "Tyre_Quantity", "dealer_code", "invoice_number", "plant", "FKART", "distribution_channel", "indicator_cancel", "invoice_date", "SKU"
+           FROM "SAP_S4"."ZPVF_SD_CurrentSales_01_TR" cs
+           WHERE (cs."distribution_channel" = '10' OR cs."distribution_channel" = 10) AND (cs."indicator_cancel" IS NULL OR cs."indicator_cancel" <> 'X')
+             AND NOT EXISTS (SELECT 1 FROM "SAP_S4"."ZPVF_SD_SalesHistory_01_TR" sh WHERE sh."invoice_number" = cs."invoice_number")
+       ) fact
 
 2. CANONICAL JOIN PATHS & CONNECTING KEYS (STRICT):
    Sr | From Table (Source)    | To Table (Destination)     | Connecting Keys
@@ -3157,26 +3169,51 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
         sql_user = f"Schemas available:\n{schema_context}\n\nOriginal Question: {question}\n\nCanonical Query (Structured Intent):\n{canonical_query_str}"
         if "SAP_S4" in schema_context or "ZPVF_" in schema_context:
             sql_user += (
-                f"\n\nCRITICAL DYNAMIC TABLE ROUTING MANDATE (Active System Month: {current_month_name} / YMONTH: {current_ymonth}):\n"
-                f"1. \"SAP_S4\".\"ZPVF_SD_CurrentSales_01_TR\": Contains ONLY the CURRENT active rolling month ({current_month_name}) MTD sales transactions.\n"
-                f"2. \"SAP_S4\".\"ZPVF_SD_SalesHistory_01_TR\": Contains ALL HISTORICAL transactions for ALL months and years prior to the current rolling month.\n"
-                f"3. MANDATORY CUSTOMER MASTER FILTER (KLABC <> 'X'):\n"
-                f"   - Official SAP Analytics (Zsales_test) requires excluding scrap/test accounts (KLABC = 'X').\n"
-                f"   - For ALL queries on Sales Data, ALWAYS JOIN \"SAP_S4\".\"ZIVF_CustomerMaster_01_MD\" cm ON TRIM(LEADING '0' FROM cm.\"KUNNR\") = TRIM(LEADING '0' FROM fact.\"dealer_code\")\n"
-                f"   - ALWAYS filter: AND (cm.\"KLABC\" IS NULL OR cm.\"KLABC\" <> 'X')\n"
+                f"\n\nCRITICAL DYNAMIC TABLE ROUTING & MANDATORY DATASPHERE ARCHITECTURE (Active System Month: {current_month_name} / YMONTH: {current_ymonth}):\n"
+                f"1. TRANSACTIONAL SALES FACT ARCHITECTURE (OFFICIAL Zsales_test MODEL):\n"
+                f"   - \"SAP_S4\".\"ZPVF_SD_SalesHistory_01_TR\": Historical sales transactions.\n"
+                f"   - \"SAP_S4\".\"ZPVF_SD_CurrentSales_01_TR\": Rolling active month(s) sales transactions (last 30-60 rolling days).\n"
+                f"   - CRITICAL ROLLING-MONTH SPLIT RULE:\n"
+                f"     Because month-end archiving from CurrentSales to SalesHistory happens asynchronously, ANY query for sales in the current year (2026), current quarter, or recent/rolling months (such as October, November, Q3, MTD, YTD) MUST QUERY BOTH FACT VIEWS using UNION ALL with NOT EXISTS de-duplication!\n"
+                f"     If you query only SalesHistory, you lose half the month (e.g. October); if you query only CurrentSales, you miss archived days.\n"
+                f"     MANDATORY UNIFIED FACT PATTERN:\n"
+                f"     (\n"
+                f"         SELECT \"volume\", \"ndp_value\", \"invoice_value\", \"Tyre_Quantity\", \"dealer_code\", \"invoice_number\", \"plant\", \"FKART\", \"distribution_channel\", \"indicator_cancel\", \"invoice_date\", \"SKU\"\n"
+                f"         FROM \"SAP_S4\".\"ZPVF_SD_SalesHistory_01_TR\"\n"
+                f"         WHERE (\"distribution_channel\" = '10' OR \"distribution_channel\" = 10)\n"
+                f"           AND (\"indicator_cancel\" IS NULL OR \"indicator_cancel\" <> 'X')\n"
+                f"           AND <date_condition>\n"
+                f"         UNION ALL\n"
+                f"         SELECT \"volume\", \"ndp_value\", \"invoice_value\", \"Tyre_Quantity\", \"dealer_code\", \"invoice_number\", \"plant\", \"FKART\", \"distribution_channel\", \"indicator_cancel\", \"invoice_date\", \"SKU\"\n"
+                f"         FROM \"SAP_S4\".\"ZPVF_SD_CurrentSales_01_TR\" cs\n"
+                f"         WHERE (cs.\"distribution_channel\" = '10' OR cs.\"distribution_channel\" = 10)\n"
+                f"           AND (cs.\"indicator_cancel\" IS NULL OR cs.\"indicator_cancel\" <> 'X')\n"
+                f"           AND <date_condition>\n"
+                f"           AND NOT EXISTS (\n"
+                f"               SELECT 1 FROM \"SAP_S4\".\"ZPVF_SD_SalesHistory_01_TR\" sh \n"
+                f"               WHERE sh.\"invoice_number\" = cs.\"invoice_number\"\n"
+                f"           )\n"
+                f"     ) fact\n"
+                f"2. MANDATORY CUSTOMER MASTER FILTER (EXACT DATASPHERE SPECIFICATION):\n"
+                f"   - Official SAP Analytics (Zsales_test) requires excluding scrap/test accounts (KLABC = 'X') and unmapped internal accounts.\n"
+                f"   - When querying total or aggregate sales metrics (volume, NDP value, invoice value, tyre quantity) without customer dimensions in SELECT:\n"
+                f"     ALWAYS filter: AND EXISTS (SELECT 1 FROM \"SAP_S4\".\"ZIVF_CustomerMaster_01_MD\" cm WHERE TRIM(LEADING '0' FROM cm.\"KUNNR\") = TRIM(LEADING '0' FROM fact.\"dealer_code\") AND cm.\"KLABC\" <> 'X')\n"
+                f"   - When customer name or territory/region/zone is requested in SELECT:\n"
+                f"     JOIN \"SAP_S4\".\"ZIVF_CustomerMaster_01_MD\" cm ON TRIM(LEADING '0' FROM cm.\"KUNNR\") = TRIM(LEADING '0' FROM fact.\"dealer_code\")\n"
+                f"     AND filter: AND cm.\"KLABC\" <> 'X'\n"
                 f"   - Official Connecting Keys Hierarchy:\n"
                 f"     1. Sales Data -> SKU Master: TRIM(sk.MATNR) = TRIM(fact.\"SKU\")\n"
                 f"     2. SKU Master -> Category Master: TRIM(cat.CAT_CODE) = TRIM(sk.CAT_CODE)\n"
-                f"     3. Sales Data -> Customer Master: TRIM(LEADING '0' FROM cm.KUNNR) = TRIM(LEADING '0' FROM fact.\"dealer_code\") [Filter: (cm.KLABC IS NULL OR cm.KLABC <> 'X')]\n"
+                f"     3. Sales Data -> Customer Master: TRIM(LEADING '0' FROM cm.KUNNR) = TRIM(LEADING '0' FROM fact.\"dealer_code\") [Filter: cm.KLABC <> 'X']\n"
                 f"     4. Customer Master -> Territory Master: TRIM(tm.BZIRK) = TRIM(cm.BZIRK)\n"
                 f"     5. Territory Master -> Region Master: TRIM(rm.\"region_code\") = TRIM(tm.REGIO)\n"
                 f"     6. Region Master -> Zone Master: TRIM(zm.P_ZONE) = TRIM(rm.\"zone_code\")\n"
                 f"     7. Sales Data -> Day Date: fact.\"invoice_date\" = da.\"Date_\"\n"
-                f"4. DYNAMIC ROUTING RULE:\n"
-                f"   - If the user asks for ANY month, quarter, or year PRIOR to the current rolling month (i.e. any period before {current_month_name}, including past months of this year or previous years), you MUST query \"SAP_S4\".\"ZPVF_SD_SalesHistory_01_TR\"!\n"
-                f"   - NEVER query CurrentSales for past months; CurrentSales only holds the active rolling current month and will return NULL for past dates.\n"
-                f"   - If the user asks for current month, today, MTD, or recent live sales, query \"SAP_S4\".\"ZPVF_SD_CurrentSales_01_TR\".\n"
-                f"   - If the user asks for all-time sales or a period spanning both past and current months, use UNION ALL of both fact views.\n"
+                f"3. MANDATORY SALES VALUE METRIC:\n"
+                f"   - Sales Revenue / Sales Value MUST ALWAYS be calculated as COALESCE(fact.\"ndp_value\", 0) (NDP Value)! NEVER use invoice_value or taxable_value as revenue unless specifically asked.\n"
+                f"4. CANCELLED SALES INVOICE EXCLUSION:\n"
+                f"   - In addition to fact.\"indicator_cancel\" <> 'X', exclude invoices that exist in CancelledSalesInvoice:\n"
+                f"     AND NOT EXISTS (SELECT 1 FROM \"SAP_S4\".\"ZPVF_SD_CancelledSalesInvoice_01_TR\" can WHERE can.\"invoice_number\" = fact.\"invoice_number\" AND can.\"plant\" = fact.\"plant\" AND can.\"FKART\" = fact.\"FKART\")\n"
                 "\n\nCRITICAL MANDATE FOR NAMES & DESCRIPTIONS:\n"
                 "When the question asks for customers, products, categories, territories, regions, or zones, "
                 "you MUST join the corresponding Master table to the point and SELECT the human-readable NAME / DESCRIPTION:\n"

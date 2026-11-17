@@ -191,6 +191,12 @@ def save_sales_revenue_to_table(mysql_conn, session_id, zone, chart_data):
 
 def calculate_sales_revenue_hana(cursor, schema, zone=None):
     from helper.sap_connection import sanitize_and_execute_hana
+    from helper.sap_connection import detect_sales_dates
+    det_year, _, _ = detect_sales_dates(cursor, schema)
+    curr_year = det_year or datetime.now().year
+    start_year_date = f"{curr_year}-01-01"
+    plan_year_like = f"{curr_year}%"
+
     if not zone or str(zone).strip().lower() in ('', 'null', 'all'):
         hana_sql = f"""
         WITH
@@ -214,9 +220,23 @@ def calculate_sales_revenue_hana(cursor, schema, zone=None):
             SELECT
                 LPAD(TRIM(S."dealer_code"), 10, '0') AS CUSTOMER_CODE,
                 COALESCE(S."ndp_value", 0) AS SALES_VALUE
-            FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR" S
-            WHERE S."distribution_channel" = '10'
-              AND IFNULL(S."indicator_cancel", '') NOT IN ('X', 'Y', '1')
+            FROM (
+                SELECT "dealer_code", "ndp_value", "distribution_channel", "indicator_cancel", "invoice_date", "invoice_number"
+                FROM "{schema}"."ZPVF_SD_SalesHistory_01_TR"
+                WHERE "distribution_channel" = '10'
+                  AND IFNULL("indicator_cancel", '') NOT IN ('X', 'Y', '1')
+                  AND "invoice_date" >= '{start_year_date}'
+                UNION ALL
+                SELECT cs."dealer_code", cs."ndp_value", cs."distribution_channel", cs."indicator_cancel", cs."invoice_date", cs."invoice_number"
+                FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR" cs
+                WHERE cs."distribution_channel" = '10'
+                  AND IFNULL(cs."indicator_cancel", '') NOT IN ('X', 'Y', '1')
+                  AND cs."invoice_date" >= '{start_year_date}'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM "{schema}"."ZPVF_SD_SalesHistory_01_TR" sh 
+                      WHERE sh."invoice_number" = cs."invoice_number"
+                  )
+            ) S
         ),
         ACTUAL_BY_ZONE AS
         (
@@ -237,7 +257,7 @@ def calculate_sales_revenue_hana(cursor, schema, zone=None):
                 COUNT(*) AS TARGET_RECORDS
             FROM "{schema}"."ZIVF_SD_Sales_Plan_Target_01_TR" P
             INNER JOIN TERRITORY_MAP T ON TRIM(P."TERR_CODE") = TRIM(T."BZIRK")
-            WHERE P."YMONTH" LIKE '2026%'
+            WHERE P."YMONTH" LIKE '{plan_year_like}'
             GROUP BY T."P_ZONE"
         )
         SELECT
@@ -274,7 +294,23 @@ def calculate_sales_revenue_hana(cursor, schema, zone=None):
             ROUND(SUM(COALESCE(cs.NDP_VALUE, 0)) / 10000000, 2) AS "saleValueCr",
             0 AS "planValueCr",
             0 AS "achievValuePct"
-        FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR" cs
+        FROM (
+            SELECT "DEALER_CODE", "NDP_VALUE", "PLANT", "INDICATOR_CANCEL", "DISTRIBUTION_CHANNEL", "invoice_date", "invoice_number"
+            FROM "{schema}"."ZPVF_SD_SalesHistory_01_TR"
+            WHERE ("DISTRIBUTION_CHANNEL" = 10 OR "DISTRIBUTION_CHANNEL" = '10')
+              AND ("INDICATOR_CANCEL" IS NULL OR "INDICATOR_CANCEL" NOT IN ('X', 'Y', '1'))
+              AND "invoice_date" >= '{start_year_date}'
+            UNION ALL
+            SELECT cs_raw."DEALER_CODE", cs_raw."NDP_VALUE", cs_raw."PLANT", cs_raw."INDICATOR_CANCEL", cs_raw."DISTRIBUTION_CHANNEL", cs_raw."invoice_date", cs_raw."invoice_number"
+            FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR" cs_raw
+            WHERE (cs_raw."DISTRIBUTION_CHANNEL" = 10 OR cs_raw."DISTRIBUTION_CHANNEL" = '10')
+              AND (cs_raw."INDICATOR_CANCEL" IS NULL OR cs_raw."INDICATOR_CANCEL" NOT IN ('X', 'Y', '1'))
+              AND cs_raw."invoice_date" >= '{start_year_date}'
+              AND NOT EXISTS (
+                  SELECT 1 FROM "{schema}"."ZPVF_SD_SalesHistory_01_TR" sh 
+                  WHERE sh."invoice_number" = cs_raw."invoice_number"
+              )
+        ) cs
         LEFT JOIN "{schema}"."ZIVF_CustomerMaster_01_MD" cust 
             ON (LPAD(TRIM(TO_VARCHAR(cs.DEALER_CODE)), 10, '0') = LPAD(TRIM(TO_VARCHAR(cust.KUNNR)), 10, '0') OR LTRIM(TO_VARCHAR(cs.DEALER_CODE), '0') = LTRIM(TO_VARCHAR(cust.KUNNR), '0'))
         LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm_plant ON (cs.PLANT = tm_plant.WERKS)
@@ -286,8 +322,6 @@ def calculate_sales_revenue_hana(cursor, schema, zone=None):
             NULLIF(TRIM(rm.ZONE_CODE), '')
         ))
         WHERE (cust.KLABC IS NULL OR UPPER(TRIM(cust.KLABC)) <> 'X')
-          AND (cs.INDICATOR_CANCEL IS NULL OR cs.INDICATOR_CANCEL NOT IN ('X', 'Y', '1'))
-          AND (cs.DISTRIBUTION_CHANNEL = 10 OR cs.DISTRIBUTION_CHANNEL = '10')
           AND (? IS NULL OR ? = '' OR ? = 'null' OR ? = 'All' 
                OR zm.NAME = ? OR zm.P_ZONE = ?
                OR UPPER(TRIM(zm.NAME)) = UPPER(TRIM(?)) OR UPPER(TRIM(zm.P_ZONE)) = UPPER(TRIM(?)))
