@@ -3887,22 +3887,16 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                                     diff_len = len(sub_fixed) - len(sub_text)
                                                     end_alias_idx += diff_len
 
-                                                    # B. Inject CustomerMaster join
+                                                    # B. Inject CustomerMaster EXISTS filter (NEVER INNER JOIN, to prevent fan-out duplicate rows!)
                                                     if "ZIVF_CustomerMaster_01_MD" not in run_query:
-                                                        cm_join = f'\nINNER JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm ON TRIM(LEADING \'0\' FROM cm."KUNNR") = TRIM(LEADING \'0\' FROM {f_alias}."dealer_code")'
-                                                        run_query = run_query[:end_alias_idx] + cm_join + run_query[end_alias_idx:]
-                                                        end_alias_idx += len(cm_join)
-
-                                                    # C. Inject KLABC filter
-                                                    if "KLABC" not in run_query:
-                                                        k_filter = 'cm."KLABC" <> \'X\''
+                                                        cm_exists = f'\nWHERE EXISTS (SELECT 1 FROM "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm WHERE TRIM(LEADING \'0\' FROM cm."KUNNR") = TRIM(LEADING \'0\' FROM {f_alias}."dealer_code") AND cm."KLABC" <> \'X\')'
                                                         outer_p = run_query[end_alias_idx:]
                                                         if re.search(r'\bWHERE\b', outer_p, re.I):
-                                                            outer_p = re.sub(r'(\bWHERE\s+)', f'\\1{k_filter} AND ', outer_p, count=1, flags=re.I)
+                                                            outer_p = re.sub(r'(\bWHERE\s+)', f'\\1EXISTS (SELECT 1 FROM "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm WHERE TRIM(LEADING \'0\' FROM cm."KUNNR") = TRIM(LEADING \'0\' FROM {f_alias}."dealer_code") AND cm."KLABC" <> \'X\') AND ', outer_p, count=1, flags=re.I)
                                                         elif re.search(r'\b(GROUP\s+BY|ORDER\s+BY|LIMIT)\b', outer_p, re.I):
-                                                            outer_p = re.sub(r'(\b(GROUP\s+BY|ORDER\s+BY|LIMIT)\b)', f'\nWHERE {k_filter}\n\\1', outer_p, count=1, flags=re.I)
+                                                            outer_p = re.sub(r'(\b(GROUP\s+BY|ORDER\s+BY|LIMIT)\b)', f'{cm_exists}\n\\1', outer_p, count=1, flags=re.I)
                                                         else:
-                                                            outer_p += f'\nWHERE {k_filter}'
+                                                            outer_p += cm_exists
                                                         run_query = run_query[:end_alias_idx] + outer_p
                                             except Exception as inj_err:
                                                 print(f"[SQL_INJECT] Subquery UNION injection note: {inj_err}")
@@ -3942,6 +3936,25 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                 # Mandatory fix: If query does not ask about SKU/product, ensure SKU is not projected inside subqueries
                                 if not re.search(r'\b(sku|matnr|material|product|tyre_type|tyre type|brand|category|cat_code)\b', question, re.I):
                                     run_query = re.sub(r'\"?SKU\"?\s*,\s*', '', run_query, flags=re.I)
+
+                                # Mandatory fix: If Customer columns (NAME1, etc.) are NOT in outer SELECT list, convert INNER JOIN CustomerMaster to WHERE EXISTS
+                                # to eliminate row multiplication (fan-out) across duplicate KUNNR sales areas in CustomerMaster
+                                m_sel = re.search(r'\bSELECT\s+(.+?)\bFROM\b', run_query, re.I | re.DOTALL)
+                                sel_str = m_sel.group(1).lower() if m_sel else ""
+                                if "cm." not in sel_str and "customer_name" not in sel_str and not re.search(r'\b(dealer_name|customer)\b', question, re.I):
+                                    if re.search(r'\b(?:INNER\s+)?JOIN\s+"?SAP_S4"?\.?"?ZIVF_CustomerMaster_01_MD"?', run_query, re.I):
+                                        run_query = re.sub(
+                                            r'\b(?:INNER\s+)?JOIN\s+"?SAP_S4"?\.?"?ZIVF_CustomerMaster_01_MD"?\s+cm\s+ON[^\n]+',
+                                            '',
+                                            run_query,
+                                            flags=re.I
+                                        )
+                                        run_query = re.sub(
+                                            r'\bWHERE\s+cm\."?KLABC"?\s*<>\s*\'X\'',
+                                            'WHERE EXISTS (SELECT 1 FROM "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm WHERE TRIM(LEADING \'0\' FROM cm."KUNNR") = TRIM(LEADING \'0\' FROM fact."dealer_code") AND cm."KLABC" <> \'X\')',
+                                            run_query,
+                                            flags=re.I
+                                        )
 
                                 sql_query = run_query
 
