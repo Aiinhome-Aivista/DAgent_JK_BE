@@ -3217,9 +3217,7 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                 f"     7. Sales Data -> Day Date: fact.\"invoice_date\" = da.\"Date_\"\n"
                 f"3. MANDATORY SALES VALUE METRIC:\n"
                 f"   - Sales Revenue / Sales Value MUST ALWAYS be calculated as COALESCE(fact.\"ndp_value\", 0) (NDP Value)! NEVER use invoice_value or taxable_value as revenue unless specifically asked.\n"
-                f"4. CANCELLED SALES INVOICE EXCLUSION:\n"
-                f"   - In addition to fact.\"indicator_cancel\" <> 'X', exclude invoices that exist in CancelledSalesInvoice:\n"
-                f"     AND NOT EXISTS (SELECT 1 FROM \"SAP_S4\".\"ZPVF_SD_CancelledSalesInvoice_01_TR\" can WHERE can.\"invoice_number\" = fact.\"invoice_number\" AND can.\"plant\" = fact.\"plant\" AND can.\"FKART\" = fact.\"FKART\")\n"
+
                 "\n\nCRITICAL MANDATE FOR NAMES & DESCRIPTIONS:\n"
                 "When the question asks for customers, products, categories, territories, regions, or zones, "
                 "you MUST join the corresponding Master table to the point and SELECT the human-readable NAME / DESCRIPTION:\n"
@@ -3940,6 +3938,10 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
 
                                 # Mandatory fix: Standardize indicator_cancel to <> 'X'
                                 run_query = re.sub(r'NOT\s+IN\s*\(\s*\'X\'\s*,\s*\'Y\'\s*,\s*\'1\'\s*\)', "<> 'X'", run_query, flags=re.I)
+
+                                # Mandatory fix: Strip any CancelledSalesInvoice references to match exact verified model
+                                run_query = re.sub(r'\bAND\s+NOT\s+EXISTS\s*\(\s*SELECT\s+.*?\bFROM\s+"?SAP_S4"?\.?"?ZPVF_SD_CancelledSalesInvoice_01_TR"?.*?\)', '', run_query, flags=re.I | re.DOTALL)
+                                run_query = re.sub(r'\bWHERE\s+NOT\s+EXISTS\s*\(\s*SELECT\s+.*?\bFROM\s+"?SAP_S4"?\.?"?ZPVF_SD_CancelledSalesInvoice_01_TR"?.*?\)\s*(?:AND\s+)?', 'WHERE ', run_query, flags=re.I | re.DOTALL)
 
                                 # Mandatory fix: Do NOT project item/document-level columns ("plant", "FKART", "SKU") into fact subqueries
                                 # unless the question explicitly asks for them. Projecting them forces SAP HANA Calculation Views to line-item
