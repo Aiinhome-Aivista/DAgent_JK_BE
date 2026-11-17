@@ -3837,22 +3837,26 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                                                     end_alias_idx = close_idx + 1
                                                                 break
                                                 if close_idx and end_alias_idx:
-                                                    # A. Ensure "dealer_code" in subquery SELECT branches (skip EXISTS/NOT EXISTS subqueries)
+                                                    # A. Ensure "dealer_code" and "invoice_number" ONLY inside subquery SELECT branches (NEVER in outer SELECT)
                                                     sub_text = run_query[open_idx:close_idx]
-                                                    if "dealer_code" not in sub_text.lower():
-                                                        # Split subquery by UNION and only add dealer_code to the FIRST select of each union branch
-                                                        u_branches = re.split(r'(\bUNION\s+(?:ALL\s+)?\b)', sub_text, flags=re.I)
-                                                        fixed_branches = []
-                                                        for ub in u_branches:
-                                                            if re.match(r'^\s*UNION\b', ub, re.I):
-                                                                fixed_branches.append(ub)
-                                                            else:
-                                                                fixed_branches.append(re.sub(r'(\bSELECT\s+(?:\n\s*)?)', r'\1"dealer_code",\n    ', ub, count=1, flags=re.I))
-                                                        sub_fixed = "".join(fixed_branches)
-                                                        run_query = run_query[:open_idx] + sub_fixed + run_query[close_idx:]
-                                                        # recalculate end_alias_idx
-                                                        diff_len = len(sub_fixed) - len(sub_text)
-                                                        end_alias_idx += diff_len
+                                                    u_branches = re.split(r'(\bUNION\s+(?:ALL\s+)?\b)', sub_text, flags=re.I)
+                                                    fixed_branches = []
+                                                    for ub in u_branches:
+                                                        if re.match(r'^\s*UNION\b', ub, re.I):
+                                                            fixed_branches.append(ub)
+                                                        else:
+                                                            m_f = re.search(r'\bFROM\b', ub, re.I)
+                                                            sel_p = ub[:m_f.start()].lower() if m_f else ub.lower()
+                                                            if "dealer_code" not in sel_p:
+                                                                ub = re.sub(r'(\bSELECT\s+(?:\n\s*)?)', r'\1"dealer_code",\n    ', ub, count=1, flags=re.I)
+                                                            if "invoice_number" not in sel_p and "invoice_number" in sub_text.lower():
+                                                                ub = re.sub(r'(\bSELECT\s+(?:\n\s*)?)', r'\1"invoice_number",\n    ', ub, count=1, flags=re.I)
+                                                            fixed_branches.append(ub)
+                                                    sub_fixed = "".join(fixed_branches)
+                                                    run_query = run_query[:open_idx] + sub_fixed + run_query[close_idx:]
+                                                    # recalculate end_alias_idx
+                                                    diff_len = len(sub_fixed) - len(sub_text)
+                                                    end_alias_idx += diff_len
 
                                                     # B. Inject CustomerMaster join
                                                     if "ZIVF_CustomerMaster_01_MD" not in run_query:
@@ -3883,23 +3887,9 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
 
                                 run_query = re.sub(r'\n{3,}', '\n\n', run_query).strip()
 
-                                # Mandatory fix 1: Clean up corrupted subqueries inside EXISTS/NOT EXISTS (e.g. SELECT "dealer_code", 1 -> SELECT 1)
+                                # Mandatory fix: Clean up corrupted subqueries inside EXISTS/NOT EXISTS (e.g. SELECT "dealer_code", 1 -> SELECT 1)
                                 run_query = re.sub(r'(\bNOT\s+EXISTS\s*\(\s*SELECT\s+)[^Ff]+?(\bFROM\b)', r'\1 1 \2', run_query, flags=re.I)
                                 run_query = re.sub(r'(\bEXISTS\s*\(\s*SELECT\s+)[^Ff]+?(\bFROM\b)', r'\1 1 \2', run_query, flags=re.I)
-
-                                # Mandatory fix 2: Ensure "invoice_number" is projected in UNION ALL branches if de-duplication NOT EXISTS is present
-                                if "sh.\"invoice_number\"" in run_query.lower() or "sh.\"invoice_number\" = cs.\"invoice_number\"" in run_query.lower() or "invoice_number" in run_query.lower():
-                                    if "union" in run_query.lower():
-                                        u_parts = re.split(r'(\bUNION\s+(?:ALL\s+)?\b)', run_query, flags=re.I)
-                                        fixed_u_parts = []
-                                        for part in u_parts:
-                                            if not re.match(r'^\s*UNION\b', part, re.I) and re.search(r'\bZPVF_SD_(?:SalesHistory|CurrentSales)_01_TR\b', part, re.I):
-                                                # Check if invoice_number is in the SELECT clause of this branch
-                                                sel_match = re.search(r'\bSELECT\s+(.+?)\bFROM\b', part, re.I | re.S)
-                                                if sel_match and "invoice_number" not in sel_match.group(1).lower():
-                                                    part = re.sub(r'(\bSELECT\s+(?:\n\s*)?)', r'\1"invoice_number",\n    ', part, count=1, flags=re.I)
-                                            fixed_u_parts.append(part)
-                                        run_query = "".join(fixed_u_parts)
 
                                 sql_query = run_query
 
