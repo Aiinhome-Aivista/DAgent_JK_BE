@@ -630,7 +630,7 @@ def _build_sales_filter_query(cursor, is_hana, schema, user_db, zone=None, regio
 
         joins = "\n".join(join_lines)
         where_sql = "WHERE " + " AND ".join(where_clauses)
-        rev_expr = 'COALESCE(s."ndp_value", s."taxable_value", s."invoice_value", 0)'
+        rev_expr = 'COALESCE(s."ndp_value", 0)'
         date_expr = 's."invoice_date"'
 
         return joins, where_sql, params, date_expr, rev_expr
@@ -971,7 +971,7 @@ def bulk_sync_year_wise_sales_comparison(mysql_conn, session_id: str, user_id=No
                     COALESCE(NULLIF(TRIM(cm."CH_TYPE"), ''), 'UNKNOWN') AS CUSTOMER_TYPE,
                     YEAR(s."invoice_date") AS SALES_YEAR,
                     MONTH(s."invoice_date") AS MONTH_NO,
-                    ROUND(SUM(COALESCE(s."ndp_value", s."taxable_value", s."invoice_value", 0)), 2) AS TOTAL_SALES
+                    ROUND(SUM(COALESCE(s."ndp_value", 0)), 2) AS TOTAL_SALES
                 FROM (
                     SELECT "dealer_code", "invoice_date", "ndp_value", "taxable_value", "invoice_value"
                     FROM "{sap_schema}"."ZPVF_SD_SalesHistory_01_TR"

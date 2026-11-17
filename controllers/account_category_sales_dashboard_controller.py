@@ -214,7 +214,7 @@ def calculate_account_category_sales_hana(cursor, schema, zone=None):
     filtered_data AS (
         SELECT 
             UPPER(TRIM(cm.CH_TYPE)) AS title,
-            COALESCE(cs.NDP_VALUE, cs.TAXABLE_VALUE, cs.INVOICE_VALUE, 0) AS invoice_value
+            COALESCE(cs.NDP_VALUE, 0) AS invoice_value
         FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR" cs
         INNER JOIN "{schema}"."ZIVF_CustomerMaster_01_MD" cm ON (
             LPAD(TRIM(TO_VARCHAR(cs.DEALER_CODE)), 10, '0') = LPAD(TRIM(TO_VARCHAR(cm.KUNNR)), 10, '0') 

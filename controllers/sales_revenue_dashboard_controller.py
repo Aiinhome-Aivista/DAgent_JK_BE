@@ -213,7 +213,7 @@ def calculate_sales_revenue_hana(cursor, schema, zone=None):
         (
             SELECT
                 LPAD(TRIM(S."dealer_code"), 10, '0') AS CUSTOMER_CODE,
-                COALESCE(S."ndp_value", S."taxable_value", S."invoice_value", 0) AS SALES_VALUE
+                COALESCE(S."ndp_value", 0) AS SALES_VALUE
             FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR" S
             WHERE S."distribution_channel" = '10'
               AND IFNULL(S."indicator_cancel", '') NOT IN ('X', 'Y', '1')
@@ -271,7 +271,7 @@ def calculate_sales_revenue_hana(cursor, schema, zone=None):
         hana_sql = f"""
         SELECT 
             COALESCE(NULLIF(TRIM(rm.REGION_NAME), ''), NULLIF(TRIM(tm_plant.NAME), ''), NULLIF(TRIM(tm_bzirk.NAME), ''), 'Other Region') AS "region", 
-            ROUND(SUM(COALESCE(cs.NDP_VALUE, cs.TAXABLE_VALUE, cs.INVOICE_VALUE, 0)) / 10000000, 2) AS "saleValueCr",
+            ROUND(SUM(COALESCE(cs.NDP_VALUE, 0)) / 10000000, 2) AS "saleValueCr",
             0 AS "planValueCr",
             0 AS "achievValuePct"
         FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR" cs
@@ -292,7 +292,7 @@ def calculate_sales_revenue_hana(cursor, schema, zone=None):
                OR zm.NAME = ? OR zm.P_ZONE = ?
                OR UPPER(TRIM(zm.NAME)) = UPPER(TRIM(?)) OR UPPER(TRIM(zm.P_ZONE)) = UPPER(TRIM(?)))
         GROUP BY COALESCE(NULLIF(TRIM(rm.REGION_NAME), ''), NULLIF(TRIM(tm_plant.NAME), ''), NULLIF(TRIM(tm_bzirk.NAME), ''), 'Other Region')
-        HAVING SUM(COALESCE(cs.NDP_VALUE, cs.TAXABLE_VALUE, cs.INVOICE_VALUE, 0)) > 0
+        HAVING SUM(COALESCE(cs.NDP_VALUE, 0)) > 0
         ORDER BY "saleValueCr" DESC
         """
         sanitize_and_execute_hana(cursor, schema, hana_sql, (zone, zone, zone, zone, zone, zone, zone, zone))

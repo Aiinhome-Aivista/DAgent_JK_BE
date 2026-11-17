@@ -386,7 +386,7 @@ def bulk_sync_tyre_sales_permutations(mysql_conn, session_id: str, user_id=None)
                     ) AS CONSTRUCTION_TYPE,
                     COALESCE(NULLIF(TRIM(cat."CAT_DESC"), ''), NULLIF(TRIM(sku."TYRE_TYPE"), ''), 'UNKNOWN') AS TYRE_TYPE,
                     YEAR(s."invoice_date") AS SALES_YEAR,
-                    ROUND(SUM(COALESCE(s."invoice_value", s."ndp_value", s."taxable_value", 0)), 2) AS TOTAL_SALES
+                    ROUND(SUM(COALESCE(s."ndp_value", 0)), 2) AS TOTAL_SALES
                 FROM "{schema}"."{table_name}" s
                 INNER JOIN "{schema}"."ZIVF_CustomerMaster_01_MD" cm 
                     ON (s."dealer_code" = cm."KUNNR" OR LPAD(TRIM(s."dealer_code"), 10, '0') = cm."KUNNR" OR LTRIM(s."dealer_code", '0') = LTRIM(cm."KUNNR", '0'))

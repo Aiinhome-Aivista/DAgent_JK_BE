@@ -2607,8 +2607,8 @@ def default_dashboard_metrics_controller(get_db_connection):
             curr_c = table_columns.get(curr_sales_tbl, {})
             hist_c = table_columns.get(hist_sales_tbl, {})
 
-            c_rev = check_col(curr_c, ["invoice_value", "ndp_value", "invoice_value_inr", "taxable_value"]) or "invoice_value"
-            h_rev = check_col(hist_c, ["invoice_value", "ndp_value", "invoice_value_inr", "taxable_value"]) or "invoice_value"
+            c_rev = check_col(curr_c, ["ndp_value", "ndp", "ndp_inr"]) or "NDP_VALUE"
+            h_rev = check_col(hist_c, ["ndp_value", "ndp", "ndp_inr"]) or "NDP_VALUE"
 
             c_date = check_col(curr_c, ["invoice_date", "date", "fkdat"]) or "invoice_date"
             h_date = check_col(hist_c, ["invoice_date", "date", "fkdat"]) or "invoice_date"
@@ -2729,8 +2729,8 @@ def default_dashboard_metrics_controller(get_db_connection):
                     # Resolve exact column names from the view metadata
                     curr_c = table_columns.get(curr_sales_tbl, {})
                     hist_c = table_columns.get(hist_sales_tbl, {})
-                    _c_rev  = check_col(curr_c, ["invoice_value", "ndp_value", "invoice_value_inr", "taxable_value"]) or "invoice_value"
-                    _h_rev  = check_col(hist_c, ["invoice_value", "ndp_value", "invoice_value_inr", "taxable_value"]) or "invoice_value"
+                    _c_rev  = check_col(curr_c, ["ndp_value", "ndp", "ndp_inr"]) or "NDP_VALUE"
+                    _h_rev  = check_col(hist_c, ["ndp_value", "ndp", "ndp_inr"]) or "NDP_VALUE"
                     _c_date = check_col(curr_c, ["invoice_date", "date", "fkdat"]) or "invoice_date"
                     _h_date = check_col(hist_c, ["invoice_date", "date", "fkdat"]) or "invoice_date"
                     _c_cust = check_col(curr_c, ["dealer_code", "dealercode", "customer", "kunnr"]) or "dealer_code"

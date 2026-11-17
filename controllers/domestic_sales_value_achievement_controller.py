@@ -195,7 +195,7 @@ def query_domestic_sales_value_achievement_hana(cursor, schema, year_month: str,
     (
         SELECT
             "invoice_date",
-            "invoice_value",
+            COALESCE("NDP_VALUE", 0) AS "invoice_value",
             "distribution_channel",
             "dealer_code",
             "SKU",
@@ -210,7 +210,7 @@ def query_domestic_sales_value_achievement_hana(cursor, schema, year_month: str,
 
         SELECT
             "invoice_date",
-            "invoice_value",
+            COALESCE("NDP_VALUE", 0) AS "invoice_value",
             "distribution_channel",
             "dealer_code",
             "SKU",
@@ -264,7 +264,7 @@ def query_domestic_sales_value_achievement_hana(cursor, schema, year_month: str,
 
             AND S."invoice_date" < D.CURRENT_MTD_END
 
-            AND S."distribution_channel" IN ('10', '20', '30', '40')
+            AND S."distribution_channel" = '10'
 
             AND COALESCE(S."indicator_cancel", '') <> 'X'
 

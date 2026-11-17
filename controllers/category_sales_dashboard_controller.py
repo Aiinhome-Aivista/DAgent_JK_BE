@@ -198,7 +198,7 @@ def calculate_category_sales_hana(cursor, schema, zone=None, year=None):
     hana_sql = f"""
     SELECT 
         cat."CAT_DESC" AS "category", 
-        ROUND(SUM(COALESCE(cs."NDP_VALUE", cs."TAXABLE_VALUE", cs."INVOICE_VALUE", 0)) / 10000000, 2) AS "total_sales_cr"
+        ROUND(SUM(COALESCE(cs."NDP_VALUE", 0)) / 10000000, 2) AS "total_sales_cr"
     FROM (
         SELECT s."DEALER_CODE", s."PLANT", s."SKU", s."INVOICE_VALUE", s."TAXABLE_VALUE", s."NDP_VALUE", s."INDICATOR_CANCEL", s."DISTRIBUTION_CHANNEL", s."invoice_date"
         FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR" s
@@ -249,7 +249,7 @@ def calculate_category_sales_hana(cursor, schema, zone=None, year=None):
            OR zm."NAME" = ? OR zm."P_ZONE" = ?
            OR UPPER(TRIM(zm."NAME")) = UPPER(TRIM(?)) OR UPPER(TRIM(zm."P_ZONE")) = UPPER(TRIM(?)))
     GROUP BY cat."CAT_DESC"
-    HAVING SUM(COALESCE(cs."NDP_VALUE", cs."TAXABLE_VALUE", cs."INVOICE_VALUE", 0)) > 0
+    HAVING SUM(COALESCE(cs."NDP_VALUE", 0)) > 0
     ORDER BY "total_sales_cr" DESC
     """
     sanitize_and_execute_hana(cursor, schema, hana_sql, (zone, zone, zone, zone, zone, zone, zone, zone))
