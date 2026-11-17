@@ -3860,15 +3860,20 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                                                 m_cs_al = re.search(r'"?ZPVF_SD_CurrentSales_01_TR"?\s+(?:AS\s+)?([a-zA-Z0-9_]+)', ub, re.I)
                                                                 cs_al = m_cs_al.group(1) if m_cs_al and m_cs_al.group(1).lower() not in SQL_RESERVED else "cs"
                                                                 if "not exists" not in ub.lower():
-                                                                    ne_clause = f'\n      AND NOT EXISTS (\n          SELECT 1 FROM "SAP_S4"."ZPVF_SD_SalesHistory_01_TR" sh\n          WHERE sh."invoice_number" = {cs_al}."invoice_number"\n      )'
-                                                                    ub = ub.rstrip() + ne_clause
+                                                                    ne_clause = f' NOT EXISTS (SELECT 1 FROM "SAP_S4"."ZPVF_SD_SalesHistory_01_TR" sh WHERE sh."invoice_number" = {cs_al}."invoice_number") '
+                                                                    if re.search(r'\bWHERE\s+', ub, re.I):
+                                                                        ub = re.sub(r'(\bWHERE\s+)', f'\\1{ne_clause} AND ', ub, count=1, flags=re.I)
+                                                                    elif re.search(r'\b(GROUP\s+BY|ORDER\s+BY|LIMIT)\b', ub, re.I):
+                                                                        ub = re.sub(r'(\b(GROUP\s+BY|ORDER\s+BY|LIMIT)\b)', f'\nWHERE {ne_clause}\n\\1', ub, count=1, flags=re.I)
+                                                                    else:
+                                                                        ub = ub.rstrip() + f'\nWHERE {ne_clause}'
                                                                 else:
-                                                                    # Strip any plant / FKART extra matching that breaks de-duplication
+                                                                    # Strictly enforce that NOT EXISTS matches only on invoice_number alone
                                                                     ub = re.sub(
-                                                                        rf'(\bWHERE\s+sh\."invoice_number"\s*=\s*{cs_al}\."invoice_number")(?:\s+AND\s+sh\."[a-zA-Z0-9_]+"\s*=\s*{cs_al}\."[a-zA-Z0-9_]+)+(\s*\))',
-                                                                        r'\1\2',
+                                                                        r'(\bNOT\s+EXISTS\s*\(\s*SELECT\s+.*?\bFROM\s+"?SAP_S4"?\.?"?ZPVF_SD_SalesHistory_01_TR"?\s+[a-zA-Z0-9_]+\s+WHERE\s+)(?:[^\)]+?)(\s*\))',
+                                                                        rf'\1sh."invoice_number" = {cs_al}."invoice_number"\2',
                                                                         ub,
-                                                                        flags=re.I
+                                                                        flags=re.I | re.DOTALL
                                                                     )
 
                                                             fixed_branches.append(ub)
@@ -3912,12 +3917,11 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                 run_query = re.sub(r'(\bEXISTS\s*\(\s*SELECT\s+)[^Ff]+?(\bFROM\b)', r'\1 1 \2', run_query, flags=re.I)
 
                                 # Mandatory fix: De-duplication between CurrentSales and SalesHistory MUST strictly match on invoice_number alone
-                                # Strip any hallucinated plant/FKART matching that causes de-duplication to fail
                                 run_query = re.sub(
-                                    r'(WHERE\s+sh\."invoice_number"\s*=\s*cs\."invoice_number")(?:\s+AND\s+sh\."[a-zA-Z0-9_]+"\s*=\s*cs\."[a-zA-Z0-9_]+")+(\s*\))',
-                                    r'\1\2',
+                                    r'(\bNOT\s+EXISTS\s*\(\s*SELECT\s+.*?\bFROM\s+"?SAP_S4"?\.?"?ZPVF_SD_SalesHistory_01_TR"?\s+[a-zA-Z0-9_]+\s+WHERE\s+)(?:[^\)]+?)(\s*\))',
+                                    r'\1sh."invoice_number" = cs."invoice_number"\2',
                                     run_query,
-                                    flags=re.I
+                                    flags=re.I | re.DOTALL
                                 )
 
                                 # Mandatory fix: Exclude unmapped/scrap customers (KLABC <> 'X') strictly. Strip any cm.KLABC <> 'X'
