@@ -3854,6 +3854,23 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                                                 ub = re.sub(r'(\bSELECT\s+(?:\n\s*)?)', r'\1"invoice_number",\n    ', ub, count=1, flags=re.I)
                                                             if "sku" not in sel_p:
                                                                 ub = re.sub(r'(\bSELECT\s+(?:\n\s*)?)', r'\1"SKU",\n    ', ub, count=1, flags=re.I)
+
+                                                            # Mandatory: If this branch is CurrentSales, strictly enforce de-duplication against SalesHistory
+                                                            if "currentsales" in ub.lower():
+                                                                m_cs_al = re.search(r'"?ZPVF_SD_CurrentSales_01_TR"?\s+(?:AS\s+)?([a-zA-Z0-9_]+)', ub, re.I)
+                                                                cs_al = m_cs_al.group(1) if m_cs_al and m_cs_al.group(1).lower() not in SQL_RESERVED else "cs"
+                                                                if "not exists" not in ub.lower():
+                                                                    ne_clause = f'\n      AND NOT EXISTS (\n          SELECT 1 FROM "SAP_S4"."ZPVF_SD_SalesHistory_01_TR" sh\n          WHERE sh."invoice_number" = {cs_al}."invoice_number"\n      )'
+                                                                    ub = ub.rstrip() + ne_clause
+                                                                else:
+                                                                    # Strip any plant / FKART extra matching that breaks de-duplication
+                                                                    ub = re.sub(
+                                                                        rf'(\bWHERE\s+sh\."invoice_number"\s*=\s*{cs_al}\."invoice_number")(?:\s+AND\s+sh\."[a-zA-Z0-9_]+"\s*=\s*{cs_al}\."[a-zA-Z0-9_]+)+(\s*\))',
+                                                                        r'\1\2',
+                                                                        ub,
+                                                                        flags=re.I
+                                                                    )
+
                                                             fixed_branches.append(ub)
                                                     sub_fixed = "".join(fixed_branches)
                                                     run_query = run_query[:open_idx] + sub_fixed + run_query[close_idx:]
