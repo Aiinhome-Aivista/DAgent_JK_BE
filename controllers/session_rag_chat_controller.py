@@ -428,8 +428,9 @@ def _load_hana(session_id, get_fn):
         biz_rules = """[SCHEMA] db:SAP_S4 table:BUSINESS_RELATIONSHIPS_AND_RULES
 SAP S/4HANA Sales & Distribution (SD) Architecture and Table Context:
 1. Fact Views:
-   - ZPVF_SD_SalesHistory_01_TR: Historical Invoices Fact view (~30,044,097 rows). Contains ALL historical invoices for ALL months and years prior to the active current rolling month. If the user asks for ANY month, quarter, or year prior to the current month, you MUST query ZPVF_SD_SalesHistory_01_TR!
-   - ZPVF_SD_CurrentSales_01_TR: Current Period MTD Invoices Fact view (~1,000,000 rows). ONLY contains transactions for the active current rolling month. For ANY prior month, DO NOT use CurrentSales; query ZPVF_SD_SalesHistory_01_TR!
+   - ZPVF_SD_SalesHistory_01_TR: Historical Invoices Fact view (~30,044,097 rows). Contains archived invoices. For fully closed prior periods (e.g. earlier closed months), invoices reside completely here.
+   - ZPVF_SD_CurrentSales_01_TR: Current Period MTD Invoices Fact view (~1,000,000 rows). Contains active rolling month transactions.
+   - ROLLING MONTH & CURRENT YEAR UNIFIED RULE: In SAP S/4HANA, month-end consolidation is asynchronous. For the active current year or rolling transition months (such as October, November, MTD), invoices are split across both tables. ALWAYS query BOTH using UNION ALL with NOT EXISTS de-duplication!
    - ZPVF_SD_CancelledSalesInvoice_01_TR: Cancelled Invoices Reference view (~50,000 rows). Contains list of cancelled invoices.
    - ZIVF_SD_Sales_Plan_Target_01_TR: Sales Plan & Target view (~200,000 rows). Target Value is PLAN_VALUE (or REV_PLAN_VAL), Target Qty is ORG_PLAN (or REV_PLAN).
    CRITICAL SAP HANA CASING FOR FACT COLUMNS (MUST USE DOUBLE QUOTES):
@@ -1353,20 +1354,23 @@ CANONICAL DATA MODEL & RELATIONSHIP GRAPH (OFFICIAL):
      - Default Distribution Channel: ("distribution_channel" = '10' OR "distribution_channel" = 10) (Replacement/Domestic channel default, unless OEM=20, STU=30, DEF=40 or all channels specified).
      - Cancellation Filter: ("indicator_cancel" IS NULL OR "indicator_cancel" <> 'X').
      - Sales Revenue Metric: ALWAYS use COALESCE("ndp_value", 0) AS revenue / sales_value.
-     - UNIFIED SALES FACT RULE (2026 / Rolling / Monthly / MTD):
+     - UNIFIED SALES FACT RULE (Current Year / Rolling / Monthly / MTD):
        For ANY query for the current year (2026), MTD, or recent/rolling months (e.g. October, November):
        ALWAYS combine ZPVF_SD_SalesHistory_01_TR and ZPVF_SD_CurrentSales_01_TR with UNION ALL and NOT EXISTS de-duplication:
        (
-           SELECT "volume", "ndp_value", "invoice_value", "Tyre_Quantity", "dealer_code", "invoice_number", "distribution_channel", "indicator_cancel", "invoice_date"
+           SELECT "volume", "ndp_value", "invoice_value", "Tyre_Quantity", "dealer_code", "invoice_number", "plant", "FKART", "distribution_channel", "indicator_cancel", "invoice_date", "SKU"
            FROM "SAP_S4"."ZPVF_SD_SalesHistory_01_TR"
-           WHERE ("distribution_channel" = '10' OR "distribution_channel" = 10) AND ("indicator_cancel" IS NULL OR "indicator_cancel" <> 'X')
+           WHERE ("distribution_channel" = '10' OR "distribution_channel" = 10)
+             AND ("indicator_cancel" IS NULL OR "indicator_cancel" NOT IN ('X', 'Y', '1'))
+             AND "FKART" NOT IN ('ZGOV', 'ZCC', 'ZBHU')
            UNION ALL
-           SELECT "volume", "ndp_value", "invoice_value", "Tyre_Quantity", "dealer_code", "invoice_number", "distribution_channel", "indicator_cancel", "invoice_date"
+           SELECT cs."volume", cs."ndp_value", cs."invoice_value", CASE WHEN cs."FKART" = 'ZROP' THEN 0 ELSE cs."Tyre_Quantity" END AS "Tyre_Quantity", cs."dealer_code", cs."invoice_number", cs."plant", cs."FKART", cs."distribution_channel", cs."indicator_cancel", cs."invoice_date", cs."SKU"
            FROM "SAP_S4"."ZPVF_SD_CurrentSales_01_TR" cs
-           WHERE (cs."distribution_channel" = '10' OR cs."distribution_channel" = 10) AND (cs."indicator_cancel" IS NULL OR cs."indicator_cancel" <> 'X')
+           WHERE (cs."distribution_channel" = '10' OR cs."distribution_channel" = 10)
+             AND (cs."indicator_cancel" IS NULL OR cs."indicator_cancel" NOT IN ('X', 'Y', '1'))
+             AND cs."FKART" NOT IN ('ZBCL', 'ZGOV', 'ZCC', 'ZBHU')
              AND NOT EXISTS (SELECT 1 FROM "SAP_S4"."ZPVF_SD_SalesHistory_01_TR" sh WHERE sh."invoice_number" = cs."invoice_number")
        ) fact
-       (CRITICAL: STRICTLY DO NOT PROJECT "plant", "FKART", OR "SKU" INTO SUBQUERY SELECT UNLESS USER ASKS FOR PLANT, BILLING TYPE, OR PRODUCT/SKU DIMENSIONS! PROJECTING THEM IN THE SUBQUERY FORCES LINE-ITEM GRAIN AND INFLATES NDP BY 17.2 CRORE).
 
 2. CANONICAL JOIN PATHS & CONNECTING KEYS (STRICT):
    Sr | From Table (Source)    | To Table (Destination)     | Connecting Keys
@@ -3179,21 +3183,23 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                 f"   - \"SAP_S4\".\"ZPVF_SD_SalesHistory_01_TR\": Historical sales transactions.\n"
                 f"   - \"SAP_S4\".\"ZPVF_SD_CurrentSales_01_TR\": Rolling active month(s) sales transactions (last 30-60 rolling days).\n"
                 f"   - CRITICAL ROLLING-MONTH SPLIT RULE:\n"
-                f"     Because month-end archiving from CurrentSales to SalesHistory happens asynchronously, ANY query for sales in the current year (2026), current quarter, or recent/rolling months (such as October, November, Q3, MTD, YTD) MUST QUERY BOTH FACT VIEWS using UNION ALL with NOT EXISTS de-duplication!\n"
+                f"     Because month-end archiving from CurrentSales to SalesHistory happens asynchronously, ANY query for sales in the current active year, current quarter, or recent/rolling months (such as October, November, Q3, MTD, YTD) MUST QUERY BOTH FACT VIEWS using UNION ALL with NOT EXISTS de-duplication!\n"
                 f"     If you query only SalesHistory, you lose half the month (e.g. October); if you query only CurrentSales, you miss archived days.\n"
-                f"     MANDATORY UNIFIED FACT PATTERN (STRICTLY DO NOT PROJECT plant, FKART, OR SKU UNLESS SPECIFICALLY ASKED):\n"
-                f"     In SAP HANA Calculation Views, projecting item-level columns (plant, FKART, SKU) forces line-item aggregation which multiplies header values and inflates NDP totals.\n"
+                f"     For fully closed prior periods with no rolling data, querying SalesHistory alone is sufficient, but using the unified pattern is always safe.\n"
+                f"     MANDATORY UNIFIED FACT PATTERN WITH OFFICIAL DATASPHERE FILTERS:\n"
                 f"     (\n"
-                f"         SELECT \"volume\", \"ndp_value\", \"invoice_value\", \"Tyre_Quantity\", \"dealer_code\", \"invoice_number\", \"distribution_channel\", \"indicator_cancel\", \"invoice_date\"\n"
+                f"         SELECT \"volume\", \"ndp_value\", \"invoice_value\", \"Tyre_Quantity\", \"dealer_code\", \"invoice_number\", \"plant\", \"FKART\", \"distribution_channel\", \"indicator_cancel\", \"invoice_date\", \"SKU\"\n"
                 f"         FROM \"SAP_S4\".\"ZPVF_SD_SalesHistory_01_TR\"\n"
                 f"         WHERE (\"distribution_channel\" = '10' OR \"distribution_channel\" = 10)\n"
-                f"           AND (\"indicator_cancel\" IS NULL OR \"indicator_cancel\" <> 'X')\n"
+                f"           AND (\"indicator_cancel\" IS NULL OR \"indicator_cancel\" NOT IN ('X', 'Y', '1'))\n"
+                f"           AND \"FKART\" NOT IN ('ZGOV', 'ZCC', 'ZBHU')\n"
                 f"           AND <date_condition>\n"
                 f"         UNION ALL\n"
-                f"         SELECT \"volume\", \"ndp_value\", \"invoice_value\", \"Tyre_Quantity\", \"dealer_code\", \"invoice_number\", \"distribution_channel\", \"indicator_cancel\", \"invoice_date\"\n"
+                f"         SELECT cs.\"volume\", cs.\"ndp_value\", cs.\"invoice_value\", CASE WHEN cs.\"FKART\" = 'ZROP' THEN 0 ELSE cs.\"Tyre_Quantity\" END AS \"Tyre_Quantity\", cs.\"dealer_code\", cs.\"invoice_number\", cs.\"plant\", cs.\"FKART\", cs.\"distribution_channel\", cs.\"indicator_cancel\", cs.\"invoice_date\", cs.\"SKU\"\n"
                 f"         FROM \"SAP_S4\".\"ZPVF_SD_CurrentSales_01_TR\" cs\n"
                 f"         WHERE (cs.\"distribution_channel\" = '10' OR cs.\"distribution_channel\" = 10)\n"
-                f"           AND (cs.\"indicator_cancel\" IS NULL OR cs.\"indicator_cancel\" <> 'X')\n"
+                f"           AND (cs.\"indicator_cancel\" IS NULL OR cs.\"indicator_cancel\" NOT IN ('X', 'Y', '1'))\n"
+                f"           AND cs.\"FKART\" NOT IN ('ZBCL', 'ZGOV', 'ZCC', 'ZBHU')\n"
                 f"           AND <date_condition>\n"
                 f"           AND NOT EXISTS (\n"
                 f"               SELECT 1 FROM \"SAP_S4\".\"ZPVF_SD_SalesHistory_01_TR\" sh \n"
@@ -3855,10 +3861,26 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                                             ub = re.sub(r'([a-zA-Z0-9_."]*indicator_cancel"?\s*<>\s*\'X\')', r'(\1 AND \g<1> NOT IN (\'X\', \'Y\', \'1\'))', ub, flags=re.I)
                                                             ub = re.sub(r'([a-zA-Z0-9_."]*indicator_cancel"?\s+IS\s+NULL\s+OR\s+[a-zA-Z0-9_."]*indicator_cancel"?)\s*<>\s*\'X\'', r'\1 NOT IN (\'X\', \'Y\', \'1\')', ub, flags=re.I)
 
-                                                            # Mandatory: If this branch is CurrentSales, strictly enforce de-duplication against SalesHistory
+                                                            # Mandatory: Filter non-replacement & cancellation billing types to match official Datasphere Zsales_test model
                                                             if "currentsales" in ub.lower():
                                                                 m_cs_al = re.search(r'"?ZPVF_SD_CurrentSales_01_TR"?\s+(?:AS\s+)?([a-zA-Z0-9_]+)', ub, re.I)
                                                                 cs_al = m_cs_al.group(1) if m_cs_al and m_cs_al.group(1).lower() not in SQL_RESERVED else "cs"
+                                                                
+                                                                # Align Tyre_Quantity: ZROP in CurrentSales is a price credit memo without physical tyre movement
+                                                                ub = re.sub(
+                                                                    rf'(?<!CASE\sWHEN\s)(?:{cs_al}\.)?"?Tyre_Quantity"?(\s*(?:AS\s+"?Tyre_Quantity"?)?)',
+                                                                    rf'CASE WHEN {cs_al}."FKART" = \'ZROP\' THEN 0 ELSE {cs_al}."Tyre_Quantity" END AS "Tyre_Quantity"',
+                                                                    ub,
+                                                                    count=1,
+                                                                    flags=re.I
+                                                                )
+                                                                
+                                                                if "zbcl" not in ub.lower():
+                                                                    fk_filter = f"{cs_al}.\"FKART\" NOT IN ('ZBCL', 'ZGOV', 'ZCC', 'ZBHU')"
+                                                                    if re.search(r'\bWHERE\s+', ub, re.I):
+                                                                        ub = re.sub(r'(\bWHERE\s+)', f'\\1{fk_filter} AND ', ub, count=1, flags=re.I)
+                                                                    else:
+                                                                        ub += f' WHERE {fk_filter}'
                                                                 if "not exists" not in ub.lower():
                                                                     ne_clause = f' NOT EXISTS (SELECT 1 FROM "SAP_S4"."ZPVF_SD_SalesHistory_01_TR" sh WHERE sh."invoice_number" = {cs_al}."invoice_number") '
                                                                     if re.search(r'\bWHERE\s+', ub, re.I):
@@ -3875,6 +3897,15 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                                                         ub,
                                                                         flags=re.I | re.DOTALL
                                                                     )
+                                                            elif "saleshistory" in ub.lower():
+                                                                m_sh_al = re.search(r'"?ZPVF_SD_SalesHistory_01_TR"?\s+(?:AS\s+)?([a-zA-Z0-9_]+)', ub, re.I)
+                                                                sh_al = m_sh_al.group(1) if m_sh_al and m_sh_al.group(1).lower() not in SQL_RESERVED else "fact"
+                                                                if "zgov" not in ub.lower():
+                                                                    fk_filter_sh = f"{sh_al}.\"FKART\" NOT IN ('ZGOV', 'ZCC', 'ZBHU')"
+                                                                    if re.search(r'\bWHERE\s+', ub, re.I):
+                                                                        ub = re.sub(r'(\bWHERE\s+)', f'\\1{fk_filter_sh} AND ', ub, count=1, flags=re.I)
+                                                                    else:
+                                                                        ub += f' WHERE {fk_filter_sh}'
 
                                                             fixed_branches.append(ub)
                                                     sub_fixed = "".join(fixed_branches)
