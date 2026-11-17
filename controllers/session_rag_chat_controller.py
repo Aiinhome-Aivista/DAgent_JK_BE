@@ -3847,22 +3847,13 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                                         else:
                                                             m_f = re.search(r'\bFROM\b', ub, re.I)
                                                             sel_p = ub[:m_f.start()].lower() if m_f else ub.lower()
-                                                            for col_req in ["volume", "ndp_value", "invoice_value", "Tyre_Quantity", "dealer_code", "invoice_number", "distribution_channel", "indicator_cancel", "invoice_date"]:
+                                                            for col_req in ["volume", "ndp_value", "invoice_value", "Tyre_Quantity", "dealer_code", "invoice_number", "plant", "FKART", "distribution_channel", "indicator_cancel", "invoice_date", "SKU"]:
                                                                 if col_req.lower() not in sel_p:
                                                                     ub = re.sub(r'(\bSELECT\s+(?:\n\s*)?)', rf'\1"{col_req}",\n    ', ub, count=1, flags=re.I)
-                                                            if not re.search(r'\b(plant|werks)\b', question, re.I):
-                                                                ub = re.sub(r'\"?plant\"?\s*,\s*', '', ub, flags=re.I)
-                                                                ub = re.sub(r',\s*\"?plant\"?', '', ub, flags=re.I)
-                                                            if not re.search(r'\b(fkart|bill_type|billing_type)\b', question, re.I):
-                                                                ub = re.sub(r'\"?FKART\"?\s*,\s*', '', ub, flags=re.I)
-                                                                ub = re.sub(r',\s*\"?FKART\"?', '', ub, flags=re.I)
-                                                            if re.search(r'\b(sku|matnr|material|product|tyre_type|tyre type|brand|category|cat_code)\b', question, re.I):
-                                                                if "sku" not in sel_p:
-                                                                    ub = re.sub(r'(\bSELECT\s+(?:\n\s*)?)', r'\1"SKU",\n    ', ub, count=1, flags=re.I)
-                                                            else:
-                                                                # Strip SKU if not requested to prevent Calculation View header condition duplication
-                                                                ub = re.sub(r'\"?SKU\"?\s*,\s*', '', ub, flags=re.I)
-                                                                ub = re.sub(r',\s*\"?SKU\"?', '', ub, flags=re.I)
+
+                                                            # Mandatory: Standardize indicator_cancel to exclude cancellations ('X', 'Y', '1')
+                                                            ub = re.sub(r'([a-zA-Z0-9_."]*indicator_cancel"?\s*<>\s*\'X\')', r'(\1 AND \g<1> NOT IN (\'X\', \'Y\', \'1\'))', ub, flags=re.I)
+                                                            ub = re.sub(r'([a-zA-Z0-9_."]*indicator_cancel"?\s+IS\s+NULL\s+OR\s+[a-zA-Z0-9_."]*indicator_cancel"?)\s*<>\s*\'X\'', r'\1 NOT IN (\'X\', \'Y\', \'1\')', ub, flags=re.I)
 
                                                             # Mandatory: If this branch is CurrentSales, strictly enforce de-duplication against SalesHistory
                                                             if "currentsales" in ub.lower():
@@ -3935,25 +3926,13 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                 run_query = re.sub(r'\([a-zA-Z0-9_."]*KLABC"?\s+IS\s+NULL\s+OR\s+([a-zA-Z0-9_."]*KLABC"?\s*<>\s*\'X\')\)', r'\1', run_query, flags=re.I)
                                 run_query = re.sub(r'[a-zA-Z0-9_."]*KLABC"?\s+IS\s+NULL\s+OR\s+', '', run_query, flags=re.I)
 
-                                # Mandatory fix: Standardize indicator_cancel to <> 'X'
-                                run_query = re.sub(r'NOT\s+IN\s*\(\s*\'X\'\s*,\s*\'Y\'\s*,\s*\'1\'\s*\)', "<> 'X'", run_query, flags=re.I)
+                                # Mandatory fix: Standardize indicator_cancel to strictly exclude cancellations ('X', 'Y', '1')
+                                run_query = re.sub(r'([a-zA-Z0-9_."]*indicator_cancel"?\s*<>\s*\'X\')', r'(\1 AND \g<1> NOT IN (\'X\', \'Y\', \'1\'))', run_query, flags=re.I)
+                                run_query = re.sub(r'([a-zA-Z0-9_."]*indicator_cancel"?\s+IS\s+NULL\s+OR\s+[a-zA-Z0-9_."]*indicator_cancel"?)\s*<>\s*\'X\'', r'\1 NOT IN (\'X\', \'Y\', \'1\')', run_query, flags=re.I)
 
                                 # Mandatory fix: Strip any CancelledSalesInvoice references to match exact verified model
                                 run_query = re.sub(r'\bAND\s+NOT\s+EXISTS\s*\(\s*SELECT\s+.*?\bFROM\s+"?SAP_S4"?\.?"?ZPVF_SD_CancelledSalesInvoice_01_TR"?.*?\)', '', run_query, flags=re.I | re.DOTALL)
                                 run_query = re.sub(r'\bWHERE\s+NOT\s+EXISTS\s*\(\s*SELECT\s+.*?\bFROM\s+"?SAP_S4"?\.?"?ZPVF_SD_CancelledSalesInvoice_01_TR"?.*?\)\s*(?:AND\s+)?', 'WHERE ', run_query, flags=re.I | re.DOTALL)
-
-                                # Mandatory fix: Do NOT project item/document-level columns ("plant", "FKART", "SKU") into fact subqueries
-                                # unless the question explicitly asks for them. Projecting them forces SAP HANA Calculation Views to line-item
-                                # grain which multiplies invoice-level header values and inflates NDP totals!
-                                if not re.search(r'\b(plant|werks)\b', question, re.I):
-                                    run_query = re.sub(r'\"?plant\"?\s*,\s*', '', run_query, flags=re.I)
-                                    run_query = re.sub(r',\s*\"?plant\"?', '', run_query, flags=re.I)
-                                if not re.search(r'\b(fkart|bill_type|billing_type)\b', question, re.I):
-                                    run_query = re.sub(r'\"?FKART\"?\s*,\s*', '', run_query, flags=re.I)
-                                    run_query = re.sub(r',\s*\"?FKART\"?', '', run_query, flags=re.I)
-                                if not re.search(r'\b(sku|matnr|material|product|tyre_type|tyre type|brand|category|cat_code)\b', question, re.I):
-                                    run_query = re.sub(r'\"?SKU\"?\s*,\s*', '', run_query, flags=re.I)
-                                    run_query = re.sub(r',\s*\"?SKU\"?', '', run_query, flags=re.I)
 
                                 # Mandatory fix: If Customer columns (NAME1, etc.) are NOT in outer SELECT list, convert INNER/LEFT JOIN CustomerMaster to WHERE EXISTS
                                 # to eliminate row multiplication (fan-out) across duplicate KUNNR sales areas in CustomerMaster
