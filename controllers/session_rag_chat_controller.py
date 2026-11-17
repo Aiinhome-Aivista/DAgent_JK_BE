@@ -3879,13 +3879,14 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                                                 cs_al = m_cs_al.group(1) if m_cs_al and m_cs_al.group(1).lower() not in SQL_RESERVED else "cs"
                                                                 
                                                                 # Align Tyre_Quantity: ZROP in CurrentSales is a price credit memo without physical tyre movement
-                                                                ub = re.sub(
-                                                                    rf'(?<!CASE\sWHEN\s)(?:{cs_al}\.)?"?Tyre_Quantity"?(\s*(?:AS\s+"?Tyre_Quantity"?)?)',
-                                                                    lambda m: f'CASE WHEN {cs_al}."FKART" = \'ZROP\' THEN 0 ELSE {cs_al}."Tyre_Quantity" END AS "Tyre_Quantity"',
-                                                                    ub,
-                                                                    count=1,
-                                                                    flags=re.I
-                                                                )
+                                                                if "zrop" not in ub.lower():
+                                                                    ub = re.sub(
+                                                                        rf'(?:{cs_al}\.)?"?Tyre_Quantity"?(\s*(?:AS\s+"?Tyre_Quantity"?)?)',
+                                                                        lambda m: f'CASE WHEN {cs_al}."FKART" = \'ZROP\' THEN 0 ELSE {cs_al}."Tyre_Quantity" END AS "Tyre_Quantity"',
+                                                                        ub,
+                                                                        count=1,
+                                                                        flags=re.I
+                                                                    )
                                                                 
                                                                 if "zbcl" not in ub.lower():
                                                                     fk_filter = f"{cs_al}.\"FKART\" NOT IN ('ZBCL', 'ZGOV', 'ZCC', 'ZBHU')"
