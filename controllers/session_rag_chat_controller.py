@@ -3858,8 +3858,18 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                                                     ub = re.sub(r'(\bSELECT\s+(?:\n\s*)?)', rf'\1"{col_req}",\n    ', ub, count=1, flags=re.I)
 
                                                             # Mandatory: Standardize indicator_cancel to exclude cancellations ('X', 'Y', '1')
-                                                            ub = re.sub(r'([a-zA-Z0-9_."]*indicator_cancel"?\s*<>\s*\'X\')', r'(\1 AND \g<1> NOT IN (\'X\', \'Y\', \'1\'))', ub, flags=re.I)
-                                                            ub = re.sub(r'([a-zA-Z0-9_."]*indicator_cancel"?\s+IS\s+NULL\s+OR\s+[a-zA-Z0-9_."]*indicator_cancel"?)\s*<>\s*\'X\'', r'\1 NOT IN (\'X\', \'Y\', \'1\')', ub, flags=re.I)
+                                                            ub = re.sub(
+                                                                r'([a-zA-Z0-9_."]*indicator_cancel"?\s+IS\s+NULL\s+OR\s+[a-zA-Z0-9_."]*indicator_cancel"?)\s*<>\s*\'X\'',
+                                                                lambda m: f"{m.group(1)} NOT IN ('X', 'Y', '1')",
+                                                                ub,
+                                                                flags=re.I
+                                                            )
+                                                            ub = re.sub(
+                                                                r'([a-zA-Z0-9_."]*indicator_cancel"?)\s*<>\s*\'X\'',
+                                                                lambda m: f"{m.group(1)} NOT IN ('X', 'Y', '1')",
+                                                                ub,
+                                                                flags=re.I
+                                                            )
 
                                                             # Mandatory: Filter non-replacement & cancellation billing types to match official Datasphere Zsales_test model
                                                             if "currentsales" in ub.lower():
@@ -3869,7 +3879,7 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                                                 # Align Tyre_Quantity: ZROP in CurrentSales is a price credit memo without physical tyre movement
                                                                 ub = re.sub(
                                                                     rf'(?<!CASE\sWHEN\s)(?:{cs_al}\.)?"?Tyre_Quantity"?(\s*(?:AS\s+"?Tyre_Quantity"?)?)',
-                                                                    rf'CASE WHEN {cs_al}."FKART" = \'ZROP\' THEN 0 ELSE {cs_al}."Tyre_Quantity" END AS "Tyre_Quantity"',
+                                                                    lambda m: f'CASE WHEN {cs_al}."FKART" = \'ZROP\' THEN 0 ELSE {cs_al}."Tyre_Quantity" END AS "Tyre_Quantity"',
                                                                     ub,
                                                                     count=1,
                                                                     flags=re.I
@@ -3878,22 +3888,22 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                                                 if "zbcl" not in ub.lower():
                                                                     fk_filter = f"{cs_al}.\"FKART\" NOT IN ('ZBCL', 'ZGOV', 'ZCC', 'ZBHU')"
                                                                     if re.search(r'\bWHERE\s+', ub, re.I):
-                                                                        ub = re.sub(r'(\bWHERE\s+)', f'\\1{fk_filter} AND ', ub, count=1, flags=re.I)
+                                                                        ub = re.sub(r'(\bWHERE\s+)', lambda m: f"{m.group(1)}{fk_filter} AND ", ub, count=1, flags=re.I)
                                                                     else:
                                                                         ub += f' WHERE {fk_filter}'
                                                                 if "not exists" not in ub.lower():
                                                                     ne_clause = f' NOT EXISTS (SELECT 1 FROM "SAP_S4"."ZPVF_SD_SalesHistory_01_TR" sh WHERE sh."invoice_number" = {cs_al}."invoice_number") '
                                                                     if re.search(r'\bWHERE\s+', ub, re.I):
-                                                                        ub = re.sub(r'(\bWHERE\s+)', f'\\1{ne_clause} AND ', ub, count=1, flags=re.I)
+                                                                        ub = re.sub(r'(\bWHERE\s+)', lambda m: f"{m.group(1)}{ne_clause} AND ", ub, count=1, flags=re.I)
                                                                     elif re.search(r'\b(GROUP\s+BY|ORDER\s+BY|LIMIT)\b', ub, re.I):
-                                                                        ub = re.sub(r'(\b(GROUP\s+BY|ORDER\s+BY|LIMIT)\b)', f'\nWHERE {ne_clause}\n\\1', ub, count=1, flags=re.I)
+                                                                        ub = re.sub(r'(\b(GROUP\s+BY|ORDER\s+BY|LIMIT)\b)', lambda m: f"\nWHERE {ne_clause}\n{m.group(1)}", ub, count=1, flags=re.I)
                                                                     else:
                                                                         ub = ub.rstrip() + f'\nWHERE {ne_clause}'
                                                                 else:
                                                                     # Strictly enforce that NOT EXISTS matches only on invoice_number alone
                                                                     ub = re.sub(
                                                                         r'(\bNOT\s+EXISTS\s*\(\s*SELECT\s+.*?\bFROM\s+"?SAP_S4"?\.?"?ZPVF_SD_SalesHistory_01_TR"?\s+[a-zA-Z0-9_]+\s+WHERE\s+)(?:[^\)]+?)(\s*\))',
-                                                                        rf'\1sh."invoice_number" = {cs_al}."invoice_number"\2',
+                                                                        lambda m: f'{m.group(1)}sh."invoice_number" = {cs_al}."invoice_number"{m.group(2)}',
                                                                         ub,
                                                                         flags=re.I | re.DOTALL
                                                                     )
@@ -3903,7 +3913,7 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                                                 if "zgov" not in ub.lower():
                                                                     fk_filter_sh = f"{sh_al}.\"FKART\" NOT IN ('ZGOV', 'ZCC', 'ZBHU')"
                                                                     if re.search(r'\bWHERE\s+', ub, re.I):
-                                                                        ub = re.sub(r'(\bWHERE\s+)', f'\\1{fk_filter_sh} AND ', ub, count=1, flags=re.I)
+                                                                        ub = re.sub(r'(\bWHERE\s+)', lambda m: f"{m.group(1)}{fk_filter_sh} AND ", ub, count=1, flags=re.I)
                                                                     else:
                                                                         ub += f' WHERE {fk_filter_sh}'
 
