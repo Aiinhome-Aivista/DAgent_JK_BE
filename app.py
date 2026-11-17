@@ -2351,6 +2351,17 @@ try:
 except Exception as _sched_err:
     print(f"[App] Scheduler init note: {_sched_err}", flush=True)
 
+# --- User Authorization: Bulk Excel Import & Template Download Routes ---
+from controllers.user_import_controller import import_users_excel, download_user_template
+
+@app.route("/api/admin/import-users-excel", methods=["POST"])
+def admin_import_users_excel_route():
+    return import_users_excel(get_db_connection)
+
+@app.route("/api/admin/download-user-template", methods=["GET"])
+def admin_download_user_template_route():
+    return download_user_template()
+
 
 
 
