@@ -1411,9 +1411,13 @@ CANONICAL DATA MODEL & RELATIONSHIP GRAPH (OFFICIAL):
 
 3. MANDATORY FILTERS & JOIN RULES (OFFICIAL DATASPHERE SPECIFICATION):
    - Customer Master Filter (ZIVF_CustomerMaster_01_MD):
-     ALWAYS JOIN: LEFT JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm ON TRIM(LEADING '0' FROM cm."KUNNR") = TRIM(LEADING '0' FROM fact."dealer_code")
-     MANDATORY FILTER: (cm."KLABC" IS NULL OR cm."KLABC" <> 'X')
-     CRITICAL: Official SAP Analytics (Zsales_test) requires excluding scrap/test accounts (KLABC = 'X') from all sales metrics (NDP value, volume, quantity, invoice value).
+     MANDATORY FILTER:
+     For aggregate/total sales queries without customer dimensions:
+       ALWAYS USE: AND EXISTS (SELECT 1 FROM "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm WHERE TRIM(LEADING '0' FROM cm."KUNNR") = TRIM(LEADING '0' FROM fact."dealer_code") AND cm."KLABC" <> 'X')
+     For queries with customer details in SELECT:
+       JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm ON TRIM(LEADING '0' FROM cm."KUNNR") = TRIM(LEADING '0' FROM fact."dealer_code")
+       AND FILTER: AND cm."KLABC" <> 'X'
+     CRITICAL: Official SAP Analytics (Zsales_test) requires strictly excluding scrap/test/unmapped accounts. NEVER USE (cm."KLABC" IS NULL)! Invoices without a valid CustomerMaster record must be excluded.
    - Sales Data Filters:
      * Distribution Channel: fact."distribution_channel" = '10' (Default replacement/domestic sales, unless OEM/20, STU/30, DEF/40 or other channels requested).
      * Cancellation Filter: (fact."indicator_cancel" IS NULL OR fact."indicator_cancel" NOT IN ('X', 'Y', '1')).
@@ -3769,7 +3773,7 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                             branch_sql += f'{cm_join}'
 
                                         if "KLABC" not in branch_sql:
-                                            k_filter = "(cm.\"KLABC\" IS NULL OR cm.\"KLABC\" <> 'X')"
+                                            k_filter = "cm.\"KLABC\" <> 'X'"
                                             if re.search(r'\bWHERE\s+', branch_sql, re.I):
                                                 branch_sql = re.sub(r'(\bWHERE\s+)', f'\\1{k_filter} AND ', branch_sql, count=1, flags=re.I)
                                             else:
@@ -3777,7 +3781,7 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                     elif "KLABC" not in branch_sql:
                                         cm_m = re.search(r'"?ZIVF_CustomerMaster_01_MD"?\s+(?:AS\s+)?([a-zA-Z0-9_]+)', branch_sql, re.I)
                                         cm_alias = cm_m.group(1) if cm_m and cm_m.group(1).lower() not in SQL_RESERVED else "cm"
-                                        k_filter = f'({cm_alias}."KLABC" IS NULL OR {cm_alias}."KLABC" <> \'X\')'
+                                        k_filter = f'{cm_alias}."KLABC" <> \'X\''
                                         if re.search(r'\bWHERE\s+', branch_sql, re.I):
                                             branch_sql = re.sub(r'(\bWHERE\s+)', f'\\1{k_filter} AND ', branch_sql, count=1, flags=re.I)
                                         else:
@@ -3846,13 +3850,13 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
 
                                                     # B. Inject CustomerMaster join
                                                     if "ZIVF_CustomerMaster_01_MD" not in run_query:
-                                                        cm_join = f'\nLEFT JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm ON TRIM(LEADING \'0\' FROM cm."KUNNR") = TRIM(LEADING \'0\' FROM {f_alias}."dealer_code")'
+                                                        cm_join = f'\nINNER JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm ON TRIM(LEADING \'0\' FROM cm."KUNNR") = TRIM(LEADING \'0\' FROM {f_alias}."dealer_code")'
                                                         run_query = run_query[:end_alias_idx] + cm_join + run_query[end_alias_idx:]
                                                         end_alias_idx += len(cm_join)
 
                                                     # C. Inject KLABC filter
                                                     if "KLABC" not in run_query:
-                                                        k_filter = '(cm."KLABC" IS NULL OR cm."KLABC" <> \'X\')'
+                                                        k_filter = 'cm."KLABC" <> \'X\''
                                                         outer_p = run_query[end_alias_idx:]
                                                         if re.search(r'\bWHERE\b', outer_p, re.I):
                                                             outer_p = re.sub(r'(\bWHERE\s+)', f'\\1{k_filter} AND ', outer_p, count=1, flags=re.I)
