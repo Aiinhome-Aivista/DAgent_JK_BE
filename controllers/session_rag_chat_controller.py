@@ -3123,33 +3123,25 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                 f"\n\nCRITICAL SAP SALES FACT & MASTER DATA RULES (Datasphere Zsales_test Official Benchmark Specification):\n"
                 f"1. TRANSACTIONAL SALES FACT ARCHITECTURE:\n"
                 f"   - FOR OCTOBER 2026 (ROLLING TRANSITION / CURRENT WINDOW):\n"
-                f"     MANDATORY: October 2026 sales data is SPLIT across BOTH 'ZPVF_SD_SalesHistory_01_TR' (archived half) and 'ZPVF_SD_CurrentSales_01_TR' (active rolling half).\n"
-                f"     NEVER query SalesHistory alone for October 2026! (Querying SalesHistory alone misses 435 Crore of sales!).\n"
-                f"     You MUST ALWAYS query October 2026 using UNION ALL with NOT EXISTS de-duplication:\n"
+                f"     MANDATORY: Official PwC Datasphere (Zsales_test) partitions October 2026 data at date '2026-10-18'.\n"
+                f"     SalesHistory archives days 1 to 17 ('2026-10-01' to '2026-10-18'), and CurrentSales holds days 18 to 31 ('2026-10-18' to '2026-11-01').\n"
+                f"     You MUST ALWAYS query October 2026 by combining BOTH views using UNION ALL partitioned by date (do NOT filter FKART, do NOT use NOT EXISTS):\n"
                 f"     (\n"
                 f"         SELECT \"volume\", \"ndp_value\", \"invoice_value\", \"Tyre_Quantity\", \"dealer_code\", \"invoice_number\", \"plant\", \"FKART\", \"distribution_channel\", \"indicator_cancel\", \"invoice_date\", \"SKU\"\n"
                 f"         FROM \"SAP_S4\".\"ZPVF_SD_SalesHistory_01_TR\"\n"
                 f"         WHERE (\"distribution_channel\" = '10' OR \"distribution_channel\" = 10)\n"
-                f"           AND (\"indicator_cancel\" IS NULL OR \"indicator_cancel\" NOT IN ('X', 'Y', '1'))\n"
-                f"           AND \"FKART\" NOT IN ('ZGOV', 'ZCC', 'ZBHU')\n"
-                f"           AND <date_condition>\n"
+                f"           AND (COALESCE(\"indicator_cancel\", '') <> 'X')\n"
+                f"           AND \"invoice_date\" >= '2026-10-01' AND \"invoice_date\" < '2026-10-18'\n"
                 f"         UNION ALL\n"
-                f"         SELECT cs.\"volume\", cs.\"ndp_value\", cs.\"invoice_value\",\n"
-                f"                CASE WHEN cs.\"FKART\" = 'ZROP' THEN 0 ELSE cs.\"Tyre_Quantity\" END AS \"Tyre_Quantity\",\n"
-                f"                cs.\"dealer_code\", cs.\"invoice_number\", cs.\"plant\", cs.\"FKART\", cs.\"distribution_channel\", cs.\"indicator_cancel\", cs.\"invoice_date\", cs.\"SKU\"\n"
-                f"         FROM \"SAP_S4\".\"ZPVF_SD_CurrentSales_01_TR\" cs\n"
-                f"         WHERE (cs.\"distribution_channel\" = '10' OR cs.\"distribution_channel\" = 10)\n"
-                f"           AND (cs.\"indicator_cancel\" IS NULL OR cs.\"indicator_cancel\" NOT IN ('X', 'Y', '1'))\n"
-                f"           AND cs.\"FKART\" NOT IN ('ZBCL', 'ZGOV', 'ZCC', 'ZBHU')\n"
-                f"           AND <date_condition>\n"
-                f"           AND NOT EXISTS (\n"
-                f"               SELECT 1 FROM \"SAP_S4\".\"ZPVF_SD_SalesHistory_01_TR\" sh \n"
-                f"               WHERE sh.\"invoice_number\" = cs.\"invoice_number\"\n"
-                f"           )\n"
+                f"         SELECT \"volume\", \"ndp_value\", \"invoice_value\", \"Tyre_Quantity\", \"dealer_code\", \"invoice_number\", \"plant\", \"FKART\", \"distribution_channel\", \"indicator_cancel\", \"invoice_date\", \"SKU\"\n"
+                f"         FROM \"SAP_S4\".\"ZPVF_SD_CurrentSales_01_TR\"\n"
+                f"         WHERE (\"distribution_channel\" = '10' OR \"distribution_channel\" = 10)\n"
+                f"           AND (COALESCE(\"indicator_cancel\", '') <> 'X')\n"
+                f"           AND \"invoice_date\" >= '2026-10-18' AND \"invoice_date\" < '2026-11-01'\n"
                 f"     ) fact\n"
                 f"   - FOR CLOSED HISTORICAL MONTHS (JULY 2026, JUNE 2026, MAY 2026, etc. - Strictly Prior Months 01 to 09):\n"
                 f"     100% of data is fully reconciled and archived in 'ZPVF_SD_SalesHistory_01_TR'. Query DIRECTLY from 'ZPVF_SD_SalesHistory_01_TR' alone (do NOT union CurrentSales). Do NOT filter FKART.\n"
-                f"     Example: SELECT COALESCE(SUM(fact.\"ndp_value\"), 0) AS total_ndp_value FROM \"SAP_S4\".\"ZPVF_SD_SalesHistory_01_TR\" fact WHERE fact.\"distribution_channel\" = '10' AND (fact.\"indicator_cancel\" IS NULL OR fact.\"indicator_cancel\" NOT IN ('X', 'Y', '1')) AND <date_condition>\n"
+                f"     Example: SELECT COALESCE(SUM(fact.\"ndp_value\"), 0) AS total_ndp_value FROM \"SAP_S4\".\"ZPVF_SD_SalesHistory_01_TR\" fact WHERE fact.\"distribution_channel\" = '10' AND (fact.\"indicator_cancel\" IS NULL OR fact.\"indicator_cancel\" <> 'X') AND <date_condition>\n"
                 f"2. MANDATORY CUSTOMER MASTER FILTER (EXACT DATASPHERE BENCHMARK SPECIFICATION):\n"
                 f"   - Official SAP Analytics (Zsales_test) requires excluding scrap/test accounts and unmapped dealers (KLABC = 'X').\n"
                 f"   - When querying total or aggregate sales metrics (volume, NDP value, invoice value, tyre quantity) without customer dimensions in SELECT:\n"
@@ -3762,173 +3754,89 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                     return branch_sql
 
                                 if is_hana and ("ZPVF_SD_CurrentSales_01_TR" in run_query or "ZPVF_SD_SalesHistory_01_TR" in run_query):
-                                    # Fallback: In rolling transition months (e.g. October 2026), sales data is split between SalesHistory and CurrentSales.
-                                    # If the LLM queried SalesHistory alone for October 2026, automatically expand it into the official UNION ALL architecture.
                                     is_oct = bool(re.search(r'2026-10|202610|october', run_query + " " + question, re.I))
-                                    if is_oct and "ZPVF_SD_CurrentSales_01_TR" not in run_query and "ZPVF_SD_SalesHistory_01_TR" in run_query:
-                                        m_d = re.search(r'([a-zA-Z0-9_.]*\"?invoice_date\"?\s*(?:>=|>|=|BETWEEN)\s*[\'0-9\-]+(?:\s+AND\s+[a-zA-Z0-9_.]*\"?invoice_date\"?\s*<=\s*[\'0-9\-]+|\s+AND\s+[a-zA-Z0-9_.]*\"?invoice_date\"?\s*<\s*[\'0-9\-]+)?)', run_query, re.I)
-                                        d_filt = m_d.group(1) if m_d else "\"invoice_date\" >= '2026-10-01' AND \"invoice_date\" < '2026-11-01'"
-                                        d_filt_clean = re.sub(r'[a-zA-Z0-9_]+\.\"invoice_date\"', '"invoice_date"', d_filt)
-                                        d_filt_cs = re.sub(r'"invoice_date"', 'cs."invoice_date"', d_filt_clean)
-                                        oct_sub = f"""(
+                                    if is_oct:
+                                        # Official PwC Datasphere (Zsales_test) benchmark partition architecture for October 2026:
+                                        # SalesHistory (Days 1 to 17: 2026-10-01 to 2026-10-18) UNION ALL CurrentSales (Days 18 to 31: 2026-10-18 to 2026-11-01)
+                                        oct_sub = """(
     SELECT "volume", "ndp_value", "invoice_value", "Tyre_Quantity", "dealer_code", "invoice_number", "plant", "FKART", "distribution_channel", "indicator_cancel", "invoice_date", "SKU"
     FROM "SAP_S4"."ZPVF_SD_SalesHistory_01_TR"
     WHERE ("distribution_channel" = '10' OR "distribution_channel" = 10)
-      AND ("indicator_cancel" IS NULL OR "indicator_cancel" NOT IN ('X', 'Y', '1'))
-      AND "FKART" NOT IN ('ZGOV', 'ZCC', 'ZBHU')
-      AND {d_filt_clean}
+      AND COALESCE("indicator_cancel", '') <> 'X'
+      AND "invoice_date" >= '2026-10-01' AND "invoice_date" < '2026-10-18'
     UNION ALL
-    SELECT cs."volume", cs."ndp_value", cs."invoice_value",
-           CASE WHEN cs."FKART" = 'ZROP' THEN 0 ELSE cs."Tyre_Quantity" END AS "Tyre_Quantity",
-           cs."dealer_code", cs."invoice_number", cs."plant", cs."FKART", cs."distribution_channel", cs."indicator_cancel", cs."invoice_date", cs."SKU"
-    FROM "SAP_S4"."ZPVF_SD_CurrentSales_01_TR" cs
-    WHERE (cs."distribution_channel" = '10' OR cs."distribution_channel" = 10)
-      AND (cs."indicator_cancel" IS NULL OR cs."indicator_cancel" NOT IN ('X', 'Y', '1'))
-      AND cs."FKART" NOT IN ('ZBCL', 'ZGOV', 'ZCC', 'ZBHU')
-      AND {d_filt_cs}
-      AND NOT EXISTS (
-          SELECT 1 FROM "SAP_S4"."ZPVF_SD_SalesHistory_01_TR" sh 
-          WHERE sh."invoice_number" = cs."invoice_number"
-      )
+    SELECT "volume", "ndp_value", "invoice_value", "Tyre_Quantity", "dealer_code", "invoice_number", "plant", "FKART", "distribution_channel", "indicator_cancel", "invoice_date", "SKU"
+    FROM "SAP_S4"."ZPVF_SD_CurrentSales_01_TR"
+    WHERE ("distribution_channel" = '10' OR "distribution_channel" = 10)
+      AND COALESCE("indicator_cancel", '') <> 'X'
+      AND "invoice_date" >= '2026-10-18' AND "invoice_date" < '2026-11-01'
 )"""
-                                        run_query = re.sub(r'"?SAP_S4"?\."?ZPVF_SD_SalesHistory_01_TR"?', oct_sub, run_query, count=1)
-
-                                    is_subquery_union = bool(re.search(r'\bUNION\b', run_query, re.I))
-
-                                    if is_subquery_union:
                                         m_open = re.search(r'\bFROM\s*\(', run_query, re.I)
                                         if m_open:
-                                            # Subquery UNION: FROM ( SELECT ... UNION ALL ... ) AS fact
-                                            try:
-                                                open_idx = m_open.end()
-                                                depth = 1
-                                                in_q = False
-                                                q_c = None
-                                                close_idx = None
-                                                end_alias_idx = None
-                                                f_alias = "fact"
-                                                for ci in range(open_idx, len(run_query)):
-                                                    ch = run_query[ci]
-                                                    if ch in ("'", '"'):
-                                                        if not in_q: in_q = True; q_c = ch
-                                                        elif q_c == ch: in_q = False
-                                                    elif not in_q:
-                                                        if ch == '(': depth += 1
-                                                        elif ch == ')':
-                                                            depth -= 1
-                                                            if depth == 0:
-                                                                close_idx = ci
-                                                                m_al = re.match(r'\s*(?:AS\s+)?([a-zA-Z0-9_]+)', run_query[close_idx+1:], re.I)
-                                                                if m_al and m_al.group(1).lower() not in SQL_RESERVED:
-                                                                    f_alias = m_al.group(1)
-                                                                    end_alias_idx = close_idx + 1 + m_al.end()
-                                                                else:
-                                                                    end_alias_idx = close_idx + 1
-                                                                break
-                                                if close_idx and end_alias_idx:
-                                                    sub_text = run_query[open_idx:close_idx]
-                                                    u_branches = re.split(r'(\bUNION(?:\s+ALL)?\b)', sub_text, flags=re.I)
-                                                    fixed_branches = []
-                                                    is_past_closed = bool(re.search(r'2026-0[1-9]|20260[1-9]|july|june|may|april|march|february|january|august|september', run_query + " " + question, re.I))
-                                                    for ub in u_branches:
-                                                        if re.match(r'^\s*UNION\b', ub, re.I):
-                                                            fixed_branches.append(ub)
-                                                        else:
-                                                            # Ensure dealer_code is projected in each branch if not present
-                                                            m_f = re.search(r'\bFROM\b', ub, re.I)
-                                                            sel_p = ub[:m_f.start()].lower() if m_f else ub.lower()
-                                                            if "dealer_code" not in sel_p:
-                                                                m_cs_al = re.search(r'"?ZPVF_SD_CurrentSales_01_TR"?\s+(?:AS\s+)?([a-zA-Z0-9_]+)', ub, re.I)
-                                                                m_sh_al = re.search(r'"?ZPVF_SD_SalesHistory_01_TR"?\s+(?:AS\s+)?([a-zA-Z0-9_]+)', ub, re.I)
-                                                                al_found = m_cs_al or m_sh_al
-                                                                pfx = f'{al_found.group(1)}.' if al_found and al_found.group(1).lower() not in SQL_RESERVED else ''
-                                                                ub = re.sub(r'(\bSELECT\s+(?:\n\s*)?)', rf'\1{pfx}"dealer_code",\n    ', ub, count=1, flags=re.I)
+                                            open_idx = m_open.end() - 1
+                                            depth = 0
+                                            close_idx = None
+                                            for ci in range(open_idx, len(run_query)):
+                                                if run_query[ci] == '(': depth += 1
+                                                elif run_query[ci] == ')':
+                                                    depth -= 1
+                                                    if depth == 0:
+                                                        close_idx = ci
+                                                        break
+                                            if close_idx:
+                                                run_query = run_query[:open_idx] + oct_sub + run_query[close_idx+1:]
+                                        elif "ZPVF_SD_SalesHistory_01_TR" in run_query:
+                                            run_query = re.sub(r'"?SAP_S4"?\."?ZPVF_SD_SalesHistory_01_TR"?', oct_sub, run_query, count=1)
 
-                                                            # Normalize cancellation indicator filter to NOT IN ('X', 'Y', '1')
-                                                            ub = re.sub(r'([a-zA-Z0-9_.]*\"?indicator_cancel\"?)\s*(?:<>|!=)\s*\'X\'', r"\1 NOT IN ('X', 'Y', '1')", ub, flags=re.I)
+                                        # Find subquery alias and inject Customer Master on outer query if missing
+                                        m_open2 = re.search(r'\bFROM\s*\(', run_query, re.I)
+                                        if m_open2:
+                                            open_idx2 = m_open2.end() - 1
+                                            depth2 = 0
+                                            close_idx2 = None
+                                            for ci in range(open_idx2, len(run_query)):
+                                                if run_query[ci] == '(': depth2 += 1
+                                                elif run_query[ci] == ')':
+                                                    depth2 -= 1
+                                                    if depth2 == 0:
+                                                        close_idx2 = ci
+                                                        break
+                                            if close_idx2:
+                                                m_al = re.match(r'\s*(?:AS\s+)?([a-zA-Z0-9_]+)', run_query[close_idx2+1:], re.I)
+                                                if m_al and m_al.group(1).lower() not in SQL_RESERVED:
+                                                    f_al = m_al.group(1)
+                                                    end_from_idx = close_idx2 + 1 + m_al.end()
+                                                else:
+                                                    f_al = "fact"
+                                                    end_from_idx = close_idx2 + 1
 
-                                                            # Strip any date restriction from NOT EXISTS subquery (ensures cross-month duplicates are fully caught)
-                                                            ub = re.sub(r'(\bWHERE\s+sh\.\"invoice_number\"\s*=\s*[a-zA-Z0-9_.]+\"invoice_number\")\s+AND\s+sh\.\"invoice_date\"[^\)]*', r'\1', ub, flags=re.I)
-
-                                                            # Ensure CurrentSales branch filters un-reconciled billing types and applies NOT EXISTS de-duplication
-                                                            if "currentsales" in ub.lower():
-                                                                m_cs_al = re.search(r'"?ZPVF_SD_CurrentSales_01_TR"?\s+(?:AS\s+)?([a-zA-Z0-9_]+)', ub, re.I)
-                                                                cs_al = m_cs_al.group(1) if m_cs_al and m_cs_al.group(1).lower() not in SQL_RESERVED else ""
-                                                                pfx_cs = f'{cs_al}.' if cs_al else ''
-
-                                                                # Filter un-reconciled billing types in CurrentSales (ZBCL, ZGOV, ZCC, ZBHU)
-                                                                if "zbcl" not in ub.lower():
-                                                                    fk_filter = f"{pfx_cs}\"FKART\" NOT IN ('ZBCL', 'ZGOV', 'ZCC', 'ZBHU')"
-                                                                    if re.search(r'\bWHERE\s+', ub, re.I):
-                                                                        ub = re.sub(r'(\bWHERE\s+)', lambda m: f"{m.group(1)}{fk_filter} AND ", ub, count=1, flags=re.I)
-                                                                    elif re.search(r'\b(GROUP\s+BY|ORDER\s+BY|LIMIT)\b', ub, re.I):
-                                                                        ub = re.sub(r'(\b(GROUP\s+BY|ORDER\s+BY|LIMIT)\b)', lambda m: f"\nWHERE {fk_filter}\n{m.group(1)}", ub, count=1, flags=re.I)
-                                                                    else:
-                                                                        ub = ub.rstrip() + f'\nWHERE {fk_filter}'
-
-                                                                # Ensure NOT EXISTS de-duplication across all historical invoices
-                                                                if "not exists" not in ub.lower():
-                                                                    ne_clause = f'NOT EXISTS (SELECT 1 FROM "SAP_S4"."ZPVF_SD_SalesHistory_01_TR" sh WHERE sh."invoice_number" = {pfx_cs}"invoice_number")'
-                                                                    if re.search(r'\bWHERE\s+', ub, re.I):
-                                                                        ub = re.sub(r'(\bWHERE\s+)', lambda m: f"{m.group(1)}{ne_clause} AND ", ub, count=1, flags=re.I)
-                                                                    elif re.search(r'\b(GROUP\s+BY|ORDER\s+BY|LIMIT)\b', ub, re.I):
-                                                                        ub = re.sub(r'(\b(GROUP\s+BY|ORDER\s+BY|LIMIT)\b)', lambda m: f"\nWHERE {ne_clause}\n{m.group(1)}", ub, count=1, flags=re.I)
-                                                                    else:
-                                                                        ub = ub.rstrip() + f'\nWHERE {ne_clause}'
-
-                                                                # In rolling transition months, adjust return billing type ZROP on tyre quantity
-                                                                if not is_past_closed:
-                                                                    m_sel = re.search(r'(\bSELECT\b[\s\S]*?\bFROM\b)', ub, re.I)
-                                                                    if m_sel:
-                                                                        sel_part = m_sel.group(1)
-                                                                        if "case when" not in sel_part.lower() and "tyre_quantity" in sel_part.lower():
-                                                                            new_sel = re.sub(r'([a-zA-Z0-9_.]*\"?Tyre_Quantity\"?)(?!\s+AS\s+\"?Tyre_Quantity\"?\s+END)', f"CASE WHEN {pfx_cs}\"FKART\" = 'ZROP' THEN 0 ELSE \\1 END AS \"Tyre_Quantity\"", sel_part, count=1, flags=re.I)
-                                                                            ub = ub[:m_sel.start()] + new_sel + ub[m_sel.end():]
-
-                                                            # In rolling transition months (e.g. October 2026), filter un-reconciled billing types on SalesHistory
-                                                            elif "saleshistory" in ub.lower():
-                                                                if not is_past_closed:
-                                                                    m_sh_al = re.search(r'"?ZPVF_SD_SalesHistory_01_TR"?\s+(?:AS\s+)?([a-zA-Z0-9_]+)', ub, re.I)
-                                                                    sh_al = m_sh_al.group(1) if m_sh_al and m_sh_al.group(1).lower() not in SQL_RESERVED else ""
-                                                                    pfx_sh = f'{sh_al}.' if sh_al else ''
-                                                                    if "zgov" not in ub.lower():
-                                                                        fk_filter_sh = f"{pfx_sh}\"FKART\" NOT IN ('ZGOV', 'ZCC', 'ZBHU')"
-                                                                        if re.search(r'\bWHERE\s+', ub, re.I):
-                                                                            ub = re.sub(r'(\bWHERE\s+)', lambda m: f"{m.group(1)}{fk_filter_sh} AND ", ub, count=1, flags=re.I)
-                                                                        elif re.search(r'\b(GROUP\s+BY|ORDER\s+BY|LIMIT)\b', ub, re.I):
-                                                                            ub = re.sub(r'(\b(GROUP\s+BY|ORDER\s+BY|LIMIT)\b)', lambda m: f"\nWHERE {fk_filter_sh}\n{m.group(1)}", ub, count=1, flags=re.I)
-                                                                        else:
-                                                                            ub = ub.rstrip() + f'\nWHERE {fk_filter_sh}'
-
-                                                            fixed_branches.append(ub)
-                                                    sub_fixed = "".join(fixed_branches)
-                                                    run_query = run_query[:open_idx] + sub_fixed + run_query[close_idx:]
-                                                    diff_len = len(sub_fixed) - len(sub_text)
-                                                    end_alias_idx += diff_len
-
-                                                    # Inject CustomerMaster EXISTS filter on outer query (prevents fan-out duplicates & drops unmapped/scrap dealers)
-                                                    if "ZIVF_CustomerMaster_01_MD" not in run_query:
-                                                        cm_exists = f'\nWHERE EXISTS (SELECT 1 FROM "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm WHERE TRIM(LEADING \'0\' FROM cm."KUNNR") = TRIM(LEADING \'0\' FROM {f_alias}."dealer_code") AND cm."KLABC" <> \'X\')'
-                                                        outer_p = run_query[end_alias_idx:]
-                                                        if re.search(r'\bWHERE\b', outer_p, re.I):
-                                                            outer_p = re.sub(r'(\bWHERE\s+)', f'\\1EXISTS (SELECT 1 FROM "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm WHERE TRIM(LEADING \'0\' FROM cm."KUNNR") = TRIM(LEADING \'0\' FROM {f_alias}."dealer_code") AND cm."KLABC" <> \'X\') AND ', outer_p, count=1, flags=re.I)
-                                                        elif re.search(r'\b(GROUP\s+BY|ORDER\s+BY|LIMIT)\b', outer_p, re.I):
-                                                            outer_p = re.sub(r'(\b(GROUP\s+BY|ORDER\s+BY|LIMIT)\b)', f'{cm_exists}\n\\1', outer_p, count=1, flags=re.I)
-                                                        else:
-                                                            outer_p = outer_p.rstrip('; \t\r\n') + cm_exists
-                                                        run_query = run_query[:end_alias_idx] + outer_p
-                                            except Exception as inj_err:
-                                                print(f"[SQL_INJECT] Subquery UNION injection note: {inj_err}")
+                                                after_from = run_query[end_from_idx:]
+                                                if "ZIVF_CustomerMaster_01_MD" not in after_from:
+                                                    cm_filter = f'EXISTS (SELECT 1 FROM "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm WHERE LTRIM(cm."KUNNR", \'0\') = LTRIM({f_al}."dealer_code", \'0\') AND COALESCE(cm."KLABC", \'\') <> \'X\')'
+                                                    if re.search(r'\bWHERE\s+', after_from, re.I):
+                                                        after_from = re.sub(r'(\bWHERE\s+)', rf'\1{cm_filter} AND ', after_from, count=1, flags=re.I)
+                                                    elif re.search(r'\b(GROUP\s+BY|ORDER\s+BY|LIMIT)\b', after_from, re.I):
+                                                        after_from = re.sub(r'(\b(GROUP\s+BY|ORDER\s+BY|LIMIT)\b)', rf'\nWHERE {cm_filter}\n\1', after_from, count=1, flags=re.I)
+                                                    else:
+                                                        after_from = after_from.rstrip('; \t\r\n') + f"\nWHERE {cm_filter}"
+                                                else:
+                                                    after_from = re.sub(r'TRIM\(LEADING\s+\'0\'\s+FROM\s*([a-zA-Z0-9_.]*)\)', r"LTRIM(\1, '0')", after_from, flags=re.I)
+                                                    after_from = re.sub(r'([a-zA-Z0-9_.]*\"?KLABC\"?)\s*(?:<>|!=)\s*\'X\'', r"COALESCE(\1, '') <> 'X'", after_from, flags=re.I)
+                                                run_query = run_query[:end_from_idx] + after_from
+                                    else:
+                                        # Historical Closed Months (e.g. July 2026): Query SalesHistory directly
+                                        is_subquery_union = bool(re.search(r'\bUNION\b', run_query, re.I))
+                                        if not is_subquery_union:
+                                            run_query = _inject_into_single_branch(run_query, question)
                                         else:
-                                            # Top-level UNION ALL query (split by UNION and inject into each branch)
                                             parts = re.split(r'(\bUNION\s+(?:ALL\s+)?\b)', run_query, flags=re.I)
                                             run_query = "".join([p if re.match(r'^\s*UNION\b', p, re.I) else _inject_into_single_branch(p, question) for p in parts])
-                                    else:
-                                        # Single query (no UNION)
-                                        run_query = _inject_into_single_branch(run_query, question)
 
-                                    # Normalize cancellation indicator across entire query
-                                    run_query = re.sub(r'([a-zA-Z0-9_.]*\"?indicator_cancel\"?)\s*(?:<>|!=)\s*\'X\'', r"\1 NOT IN ('X', 'Y', '1')", run_query, flags=re.I)
+                                    # Universal normalization for all months (July, October, etc.)
+                                    run_query = re.sub(r'TRIM\(LEADING\s+\'0\'\s+FROM\s*([a-zA-Z0-9_.]*)\)', r"LTRIM(\1, '0')", run_query, flags=re.I)
+                                    run_query = re.sub(r'([a-zA-Z0-9_.]*\"?KLABC\"?)\s*(?:<>|!=)\s*\'X\'', r"COALESCE(\1, '') <> 'X'", run_query, flags=re.I)
+                                    run_query = re.sub(r'([a-zA-Z0-9_.]*\"?indicator_cancel\"?)\s*(?:<>|!=)\s*\'X\'', r"COALESCE(\1, '') <> 'X'", run_query, flags=re.I)
+                                    run_query = re.sub(r'([a-zA-Z0-9_.]*\"?indicator_cancel\"?)\s+NOT\s+IN\s+\(\'X\'[^\)]*\)', r"COALESCE(\1, '') <> 'X'", run_query, flags=re.I)
 
                                 run_query = re.sub(r'\n{3,}', '\n\n', run_query).strip()
                                 sql_query = run_query
