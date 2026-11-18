@@ -3129,19 +3129,23 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                 f"         SELECT \"volume\", \"ndp_value\", \"invoice_value\", \"Tyre_Quantity\", \"dealer_code\", \"invoice_number\", \"plant\", \"FKART\", \"distribution_channel\", \"indicator_cancel\", \"invoice_date\", \"SKU\"\n"
                 f"         FROM \"SAP_S4\".\"ZPVF_SD_SalesHistory_01_TR\"\n"
                 f"         WHERE (\"distribution_channel\" = '10' OR \"distribution_channel\" = 10)\n"
-                f"           AND (\"indicator_cancel\" IS NULL OR \"indicator_cancel\" <> 'X')\n"
+                f"           AND (\"indicator_cancel\" IS NULL OR \"indicator_cancel\" NOT IN ('X', 'Y', '1'))\n"
+                f"           AND \"FKART\" NOT IN ('ZGOV', 'ZCC', 'ZBHU')\n"
                 f"           AND <date_condition>\n"
                 f"         UNION ALL\n"
                 f"         SELECT cs.\"volume\", cs.\"ndp_value\", cs.\"invoice_value\", cs.\"Tyre_Quantity\", cs.\"dealer_code\", cs.\"invoice_number\", cs.\"plant\", cs.\"FKART\", cs.\"distribution_channel\", cs.\"indicator_cancel\", cs.\"invoice_date\", cs.\"SKU\"\n"
                 f"         FROM \"SAP_S4\".\"ZPVF_SD_CurrentSales_01_TR\" cs\n"
                 f"         WHERE (cs.\"distribution_channel\" = '10' OR cs.\"distribution_channel\" = 10)\n"
-                f"           AND (cs.\"indicator_cancel\" IS NULL OR cs.\"indicator_cancel\" <> 'X')\n"
+                f"           AND (cs.\"indicator_cancel\" IS NULL OR cs.\"indicator_cancel\" NOT IN ('X', 'Y', '1'))\n"
+                f"           AND cs.\"FKART\" NOT IN ('ZBCL', 'ZGOV', 'ZCC', 'ZBHU')\n"
                 f"           AND <date_condition>\n"
                 f"           AND NOT EXISTS (\n"
                 f"               SELECT 1 FROM \"SAP_S4\".\"ZPVF_SD_SalesHistory_01_TR\" sh \n"
                 f"               WHERE sh.\"invoice_number\" = cs.\"invoice_number\"\n"
+                f"                 AND <sh_date_condition>\n"
                 f"           )\n"
                 f"     ) fact\n"
+                f"   - CRITICAL: Both branches of UNION ALL MUST project the exact same set of columns in the same order.\n"
                 f"2. MANDATORY CUSTOMER MASTER FILTER (EXACT DATASPHERE BENCHMARK SPECIFICATION):\n"
                 f"   - Official SAP Analytics (Zsales_test) requires excluding scrap/test accounts and unmapped dealers (KLABC = 'X').\n"
                 f"   - When querying total or aggregate sales metrics (volume, NDP value, invoice value, tyre quantity) without customer dimensions in SELECT:\n"
@@ -3799,10 +3803,15 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                                             sel_p = ub[:m_f.start()].lower() if m_f else ub.lower()
                                                             if "dealer_code" not in sel_p:
                                                                 m_cs_al = re.search(r'"?ZPVF_SD_CurrentSales_01_TR"?\s+(?:AS\s+)?([a-zA-Z0-9_]+)', ub, re.I)
-                                                                pfx = f'{m_cs_al.group(1)}.' if m_cs_al and m_cs_al.group(1).lower() not in SQL_RESERVED else ''
+                                                                m_sh_al = re.search(r'"?ZPVF_SD_SalesHistory_01_TR"?\s+(?:AS\s+)?([a-zA-Z0-9_]+)', ub, re.I)
+                                                                al_found = m_cs_al or m_sh_al
+                                                                pfx = f'{al_found.group(1)}.' if al_found and al_found.group(1).lower() not in SQL_RESERVED else ''
                                                                 ub = re.sub(r'(\bSELECT\s+(?:\n\s*)?)', rf'\1{pfx}"dealer_code",\n    ', ub, count=1, flags=re.I)
 
-                                                            # Ensure CurrentSales branch filters un-reconciled billing types and applies NOT EXISTS de-duplication
+                                                            # Normalize cancellation indicator filter to NOT IN ('X', 'Y', '1')
+                                                            ub = re.sub(r'([a-zA-Z0-9_.]*\"?indicator_cancel\"?)\s*(?:<>|!=)\s*\'X\'', r"\1 NOT IN ('X', 'Y', '1')", ub, flags=re.I)
+
+                                                            # Ensure CurrentSales branch filters un-reconciled billing types and applies NOT EXISTS de-duplication with date pushdown
                                                             if "currentsales" in ub.lower():
                                                                 m_cs_al = re.search(r'"?ZPVF_SD_CurrentSales_01_TR"?\s+(?:AS\s+)?([a-zA-Z0-9_]+)', ub, re.I)
                                                                 cs_al = m_cs_al.group(1) if m_cs_al and m_cs_al.group(1).lower() not in SQL_RESERVED else "cs"
@@ -3817,15 +3826,36 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                                                     else:
                                                                         ub = ub.rstrip() + f'\nWHERE {fk_filter}'
 
-                                                                # Ensure NOT EXISTS de-duplication
+                                                                # Extract date filters to push down into NOT EXISTS subquery (reduces scan from 5M rows to target month)
+                                                                m_dates = re.findall(r'([a-zA-Z0-9_.]*\"?invoice_date\"?\s*(?:>=|<=|>|<|=)\s*\'[^\']+\')', ub, re.I)
+                                                                sh_dates = [re.sub(r'^[a-zA-Z0-9_.]*\"?invoice_date\"?', 'sh."invoice_date"', d, flags=re.I) for d in m_dates]
+                                                                sh_date_clause = " AND ".join(sh_dates)
+
+                                                                # Ensure NOT EXISTS de-duplication with date pushdown
                                                                 if "not exists" not in ub.lower():
-                                                                    ne_clause = f' NOT EXISTS (SELECT 1 FROM "SAP_S4"."ZPVF_SD_SalesHistory_01_TR" sh WHERE sh."invoice_number" = {cs_al}."invoice_number") '
+                                                                    ne_clause = f' NOT EXISTS (SELECT 1 FROM "SAP_S4"."ZPVF_SD_SalesHistory_01_TR" sh WHERE sh."invoice_number" = {cs_al}."invoice_number"{f" AND {sh_date_clause}" if sh_date_clause else ""}) '
                                                                     if re.search(r'\bWHERE\s+', ub, re.I):
                                                                         ub = re.sub(r'(\bWHERE\s+)', lambda m: f"{m.group(1)}{ne_clause} AND ", ub, count=1, flags=re.I)
                                                                     elif re.search(r'\b(GROUP\s+BY|ORDER\s+BY|LIMIT)\b', ub, re.I):
                                                                         ub = re.sub(r'(\b(GROUP\s+BY|ORDER\s+BY|LIMIT)\b)', lambda m: f"\nWHERE {ne_clause}\n{m.group(1)}", ub, count=1, flags=re.I)
                                                                     else:
                                                                         ub = ub.rstrip() + f'\nWHERE {ne_clause}'
+                                                                elif sh_date_clause and 'sh."invoice_date"' not in ub.lower():
+                                                                    ub = re.sub(r'(WHERE\s+sh\.\"invoice_number\"\s*=\s*[a-zA-Z0-9_.]+\"invoice_number\")', lambda m: f"{m.group(1)} AND {sh_date_clause}", ub, flags=re.I)
+
+                                                            # Ensure SalesHistory branch filters institutional/non-replacement billing types
+                                                            elif "saleshistory" in ub.lower():
+                                                                m_sh_al = re.search(r'"?ZPVF_SD_SalesHistory_01_TR"?\s+(?:AS\s+)?([a-zA-Z0-9_]+)', ub, re.I)
+                                                                sh_al = m_sh_al.group(1) if m_sh_al and m_sh_al.group(1).lower() not in SQL_RESERVED else ""
+                                                                pfx_sh = f'{sh_al}.' if sh_al else ''
+                                                                if "zgov" not in ub.lower():
+                                                                    fk_filter_sh = f"{pfx_sh}\"FKART\" NOT IN ('ZGOV', 'ZCC', 'ZBHU')"
+                                                                    if re.search(r'\bWHERE\s+', ub, re.I):
+                                                                        ub = re.sub(r'(\bWHERE\s+)', lambda m: f"{m.group(1)}{fk_filter_sh} AND ", ub, count=1, flags=re.I)
+                                                                    elif re.search(r'\b(GROUP\s+BY|ORDER\s+BY|LIMIT)\b', ub, re.I):
+                                                                        ub = re.sub(r'(\b(GROUP\s+BY|ORDER\s+BY|LIMIT)\b)', lambda m: f"\nWHERE {fk_filter_sh}\n{m.group(1)}", ub, count=1, flags=re.I)
+                                                                    else:
+                                                                        ub = ub.rstrip() + f'\nWHERE {fk_filter_sh}'
 
                                                             fixed_branches.append(ub)
                                                     sub_fixed = "".join(fixed_branches)
@@ -3892,8 +3922,8 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                 if sql_results:
                                     sql_results = []
                                 
-                                # Fallback 1: If CurrentSales view returned 0 rows or all-NULL, try SalesHistory view
-                                if "ZPVF_SD_CurrentSales_01_TR" in run_query:
+                                # Fallback 1: If CurrentSales view returned 0 rows or all-NULL, try SalesHistory view (non-UNION queries only)
+                                if "UNION" not in run_query.upper() and "ZPVF_SD_CurrentSales_01_TR" in run_query:
                                     print("[SQL_EXEC] Fallback 1: Retrying on SalesHistory view instead of CurrentSales...")
                                     alt_query = run_query.replace("ZPVF_SD_CurrentSales_01_TR", "ZPVF_SD_SalesHistory_01_TR")
                                     try:
@@ -3910,8 +3940,8 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                     except Exception as h_ex:
                                         print(f"[SQL_EXEC] SalesHistory fallback error: {h_ex}")
 
-                                # Fallback 1b: If SalesHistory view returned 0 rows or all-NULL, try CurrentSales view
-                                if not sql_results and "ZPVF_SD_SalesHistory_01_TR" in run_query:
+                                # Fallback 1b: If SalesHistory view returned 0 rows or all-NULL, try CurrentSales view (non-UNION queries only)
+                                if "UNION" not in run_query.upper() and not sql_results and "ZPVF_SD_SalesHistory_01_TR" in run_query:
                                     print("[SQL_EXEC] Fallback 1b: Retrying on CurrentSales view instead of SalesHistory...")
                                     alt_query = run_query.replace("ZPVF_SD_SalesHistory_01_TR", "ZPVF_SD_CurrentSales_01_TR")
                                     try:
