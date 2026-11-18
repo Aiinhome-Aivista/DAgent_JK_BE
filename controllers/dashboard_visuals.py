@@ -782,6 +782,26 @@ def tyre_sales_data_controller(get_db_connection):
         if not conn:
             return jsonify({"error": "Failed to connect to database."}), 500
 
+        # Enforce user hierarchy access control
+        if user_id and conn:
+            try:
+                cur_uha = conn.cursor(dictionary=True) if hasattr(conn, "cursor") else conn.cursor()
+                cur_uha.execute("SELECT rank_id, zone_code, region_code FROM user_hierarchy_access WHERE user_id = %s LIMIT 1", (user_id,))
+                uha_row = cur_uha.fetchone()
+                cur_uha.close()
+                if uha_row:
+                    rank_id = uha_row.get("rank_id")
+                    u_zc = uha_row.get("zone_code")
+                    u_rc = uha_row.get("region_code")
+                    is_nat = (rank_id == 1) or not u_zc or str(u_zc).strip().upper() == "ALL"
+                    if not is_nat and u_zc:
+                        selected_zones = [str(u_zc).strip()]
+                        if u_rc and str(u_rc).strip().upper() != "ALL":
+                            selected_regions = [str(u_rc).strip()]
+                        is_default_filter = False
+            except Exception as e:
+                print(f"[Tyre Sales] User hierarchy enforcement error: {e}", flush=True)
+
         from helper.dashboard_cache_service import (
             get_cached_component_data,
             set_cached_component_data,
@@ -803,7 +823,7 @@ def tyre_sales_data_controller(get_db_connection):
                 pass
 
         from helper.dashboard_cache_service import get_tyre_sales_table_data, save_tyre_sales_table_data
-        if not force_refresh:
+        if not force_refresh and is_default_filter:
             tbl_tyre = get_tyre_sales_table_data(conn, session_id)
             if tbl_tyre and tbl_tyre.get("data"):
                 return jsonify({
@@ -924,7 +944,26 @@ def tyre_sales_data_controller(get_db_connection):
 
         # Zone Filter
         if actual_zone and selected_zones:
-            valid_zones = [str(z).strip() for z in selected_zones if z and str(z).strip().lower() != "all"]
+            valid_zones = []
+            for z in selected_zones:
+                if not z or str(z).strip().lower() == "all": continue
+                sz = str(z).strip()
+                valid_zones.append(sz)
+                sz_u = sz.upper()
+                name_to_code = {
+                    "CENTRAL ZONE": "CZ", "EAST": "EZ", "NEPAL": "NP",
+                    "NORTH": "NZ", "SOUTH": "SZ", "SOUTH ZONE - II": "TZ",
+                    "SOUTH ZONE-II": "TZ", "SOUTH ZONE II": "TZ", "WEST": "WZ"
+                }
+                code_to_name = {
+                    "CZ": "Central Zone", "EZ": "EAST", "NP": "Nepal",
+                    "NZ": "NORTH", "SZ": "SOUTH", "TZ": "South Zone - II", "WZ": "WEST"
+                }
+                if sz_u in name_to_code:
+                    valid_zones.append(name_to_code[sz_u])
+                if sz_u in code_to_name:
+                    valid_zones.append(code_to_name[sz_u])
+            valid_zones = list(dict.fromkeys(valid_zones))
             if valid_zones:
                 placeholders = ",".join(["%s"] * len(valid_zones))
                 where_clauses.append(f"{actual_zone} IN ({placeholders})")
@@ -1716,7 +1755,26 @@ def year_wise_sales_comparison_controller(get_db_connection):
 
         # Zone Filter
         if actual_zone and selected_zones:
-            valid_zones = [str(z).strip() for z in selected_zones if z and str(z).strip().lower() != "all"]
+            valid_zones = []
+            for z in selected_zones:
+                if not z or str(z).strip().lower() == "all": continue
+                sz = str(z).strip()
+                valid_zones.append(sz)
+                sz_u = sz.upper()
+                name_to_code = {
+                    "CENTRAL ZONE": "CZ", "EAST": "EZ", "NEPAL": "NP",
+                    "NORTH": "NZ", "SOUTH": "SZ", "SOUTH ZONE - II": "TZ",
+                    "SOUTH ZONE-II": "TZ", "SOUTH ZONE II": "TZ", "WEST": "WZ"
+                }
+                code_to_name = {
+                    "CZ": "Central Zone", "EZ": "EAST", "NP": "Nepal",
+                    "NZ": "NORTH", "SZ": "SOUTH", "TZ": "South Zone - II", "WZ": "WEST"
+                }
+                if sz_u in name_to_code:
+                    valid_zones.append(name_to_code[sz_u])
+                if sz_u in code_to_name:
+                    valid_zones.append(code_to_name[sz_u])
+            valid_zones = list(dict.fromkeys(valid_zones))
             if valid_zones:
                 placeholders = ",".join(["%s"] * len(valid_zones))
                 where_clauses.append(f"{actual_zone} IN ({placeholders})")

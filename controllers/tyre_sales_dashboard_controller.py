@@ -672,6 +672,30 @@ def get_tyre_sales_data_controller(get_db_connection):
     if not conn:
         return jsonify({"error": "Failed to connect to database."}), 500
 
+    # User hierarchy access check
+    if user_id:
+        try:
+            m_cur = conn.cursor(dictionary=True) if hasattr(conn, "cursor") else conn.cursor()
+            m_cur.execute("""
+                SELECT rank_id, zone_code, region_code, territory_code
+                FROM user_hierarchy_access
+                WHERE user_id = %s
+                LIMIT 1
+            """, (user_id,))
+            h_row = m_cur.fetchone()
+            m_cur.close()
+            if h_row:
+                rank_id = h_row.get("rank_id")
+                h_zone = h_row.get("zone_code")
+                h_reg = h_row.get("region_code")
+                is_national = (rank_id == 1) or not h_zone or str(h_zone).strip().upper() == "ALL"
+                if not is_national and h_zone:
+                    selected_zone = str(h_zone).strip().upper()
+                    if h_reg and str(h_reg).strip().upper() != "ALL":
+                        selected_region = str(h_reg).strip().upper()
+        except Exception as e:
+            print(f"[Tyre Sales] User hierarchy enforcement error: {e}", flush=True)
+
     effective_session = _resolve_session(conn, session_id)
     ensure_tyre_sales_table(conn)
 
