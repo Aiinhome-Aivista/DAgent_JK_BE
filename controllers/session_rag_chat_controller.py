@@ -3802,17 +3802,30 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                                                 pfx = f'{m_cs_al.group(1)}.' if m_cs_al and m_cs_al.group(1).lower() not in SQL_RESERVED else ''
                                                                 ub = re.sub(r'(\bSELECT\s+(?:\n\s*)?)', rf'\1{pfx}"dealer_code",\n    ', ub, count=1, flags=re.I)
 
-                                                            # Ensure NOT EXISTS de-duplication in CurrentSales branch
-                                                            if "currentsales" in ub.lower() and "not exists" not in ub.lower():
+                                                            # Ensure CurrentSales branch filters un-reconciled billing types and applies NOT EXISTS de-duplication
+                                                            if "currentsales" in ub.lower():
                                                                 m_cs_al = re.search(r'"?ZPVF_SD_CurrentSales_01_TR"?\s+(?:AS\s+)?([a-zA-Z0-9_]+)', ub, re.I)
                                                                 cs_al = m_cs_al.group(1) if m_cs_al and m_cs_al.group(1).lower() not in SQL_RESERVED else "cs"
-                                                                ne_clause = f' NOT EXISTS (SELECT 1 FROM "SAP_S4"."ZPVF_SD_SalesHistory_01_TR" sh WHERE sh."invoice_number" = {cs_al}."invoice_number") '
-                                                                if re.search(r'\bWHERE\s+', ub, re.I):
-                                                                    ub = re.sub(r'(\bWHERE\s+)', lambda m: f"{m.group(1)}{ne_clause} AND ", ub, count=1, flags=re.I)
-                                                                elif re.search(r'\b(GROUP\s+BY|ORDER\s+BY|LIMIT)\b', ub, re.I):
-                                                                    ub = re.sub(r'(\b(GROUP\s+BY|ORDER\s+BY|LIMIT)\b)', lambda m: f"\nWHERE {ne_clause}\n{m.group(1)}", ub, count=1, flags=re.I)
-                                                                else:
-                                                                    ub = ub.rstrip() + f'\nWHERE {ne_clause}'
+
+                                                                # Filter un-reconciled billing types in CurrentSales (ZBCL, ZGOV, ZCC, ZBHU)
+                                                                if "zbcl" not in ub.lower():
+                                                                    fk_filter = f"{cs_al}.\"FKART\" NOT IN ('ZBCL', 'ZGOV', 'ZCC', 'ZBHU')"
+                                                                    if re.search(r'\bWHERE\s+', ub, re.I):
+                                                                        ub = re.sub(r'(\bWHERE\s+)', lambda m: f"{m.group(1)}{fk_filter} AND ", ub, count=1, flags=re.I)
+                                                                    elif re.search(r'\b(GROUP\s+BY|ORDER\s+BY|LIMIT)\b', ub, re.I):
+                                                                        ub = re.sub(r'(\b(GROUP\s+BY|ORDER\s+BY|LIMIT)\b)', lambda m: f"\nWHERE {fk_filter}\n{m.group(1)}", ub, count=1, flags=re.I)
+                                                                    else:
+                                                                        ub = ub.rstrip() + f'\nWHERE {fk_filter}'
+
+                                                                # Ensure NOT EXISTS de-duplication
+                                                                if "not exists" not in ub.lower():
+                                                                    ne_clause = f' NOT EXISTS (SELECT 1 FROM "SAP_S4"."ZPVF_SD_SalesHistory_01_TR" sh WHERE sh."invoice_number" = {cs_al}."invoice_number") '
+                                                                    if re.search(r'\bWHERE\s+', ub, re.I):
+                                                                        ub = re.sub(r'(\bWHERE\s+)', lambda m: f"{m.group(1)}{ne_clause} AND ", ub, count=1, flags=re.I)
+                                                                    elif re.search(r'\b(GROUP\s+BY|ORDER\s+BY|LIMIT)\b', ub, re.I):
+                                                                        ub = re.sub(r'(\b(GROUP\s+BY|ORDER\s+BY|LIMIT)\b)', lambda m: f"\nWHERE {ne_clause}\n{m.group(1)}", ub, count=1, flags=re.I)
+                                                                    else:
+                                                                        ub = ub.rstrip() + f'\nWHERE {ne_clause}'
 
                                                             fixed_branches.append(ub)
                                                     sub_fixed = "".join(fixed_branches)
