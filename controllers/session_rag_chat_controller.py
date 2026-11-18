@@ -3768,8 +3768,8 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                         if m_open:
                                             # Subquery UNION: FROM ( SELECT ... UNION ALL ... ) AS fact
                                             try:
-                                                open_idx = m_open.end() - 1
-                                                depth = 0
+                                                open_idx = m_open.end()
+                                                depth = 1
                                                 in_q = False
                                                 q_c = None
                                                 close_idx = None
@@ -3795,7 +3795,7 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                                                 break
                                                 if close_idx and end_alias_idx:
                                                     sub_text = run_query[open_idx:close_idx]
-                                                    u_branches = re.split(r'(\bUNION\s+(?:ALL\s+)?\b)', sub_text, flags=re.I)
+                                                    u_branches = re.split(r'(\bUNION(?:\s+ALL)?\b)', sub_text, flags=re.I)
                                                     fixed_branches = []
                                                     is_past_closed = bool(re.search(r'2026-0[1-9]|20260[1-9]|july|june|may|april|march|february|january|august|september', run_query + " " + question, re.I))
                                                     for ub in u_branches:
@@ -3821,11 +3821,12 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                                             # Ensure CurrentSales branch filters un-reconciled billing types and applies NOT EXISTS de-duplication
                                                             if "currentsales" in ub.lower():
                                                                 m_cs_al = re.search(r'"?ZPVF_SD_CurrentSales_01_TR"?\s+(?:AS\s+)?([a-zA-Z0-9_]+)', ub, re.I)
-                                                                cs_al = m_cs_al.group(1) if m_cs_al and m_cs_al.group(1).lower() not in SQL_RESERVED else "cs"
+                                                                cs_al = m_cs_al.group(1) if m_cs_al and m_cs_al.group(1).lower() not in SQL_RESERVED else ""
+                                                                pfx_cs = f'{cs_al}.' if cs_al else ''
 
                                                                 # Filter un-reconciled billing types in CurrentSales (ZBCL, ZGOV, ZCC, ZBHU)
                                                                 if "zbcl" not in ub.lower():
-                                                                    fk_filter = f"{cs_al}.\"FKART\" NOT IN ('ZBCL', 'ZGOV', 'ZCC', 'ZBHU')"
+                                                                    fk_filter = f"{pfx_cs}\"FKART\" NOT IN ('ZBCL', 'ZGOV', 'ZCC', 'ZBHU')"
                                                                     if re.search(r'\bWHERE\s+', ub, re.I):
                                                                         ub = re.sub(r'(\bWHERE\s+)', lambda m: f"{m.group(1)}{fk_filter} AND ", ub, count=1, flags=re.I)
                                                                     elif re.search(r'\b(GROUP\s+BY|ORDER\s+BY|LIMIT)\b', ub, re.I):
@@ -3835,7 +3836,7 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
 
                                                                 # Ensure NOT EXISTS de-duplication across all historical invoices
                                                                 if "not exists" not in ub.lower():
-                                                                    ne_clause = f' NOT EXISTS (SELECT 1 FROM "SAP_S4"."ZPVF_SD_SalesHistory_01_TR" sh WHERE sh."invoice_number" = {cs_al}."invoice_number") '
+                                                                    ne_clause = f'NOT EXISTS (SELECT 1 FROM "SAP_S4"."ZPVF_SD_SalesHistory_01_TR" sh WHERE sh."invoice_number" = {pfx_cs}"invoice_number")'
                                                                     if re.search(r'\bWHERE\s+', ub, re.I):
                                                                         ub = re.sub(r'(\bWHERE\s+)', lambda m: f"{m.group(1)}{ne_clause} AND ", ub, count=1, flags=re.I)
                                                                     elif re.search(r'\b(GROUP\s+BY|ORDER\s+BY|LIMIT)\b', ub, re.I):
@@ -3844,8 +3845,13 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                                                         ub = ub.rstrip() + f'\nWHERE {ne_clause}'
 
                                                                 # In rolling transition months, adjust return billing type ZROP on tyre quantity
-                                                                if not is_past_closed and "tyre_quantity" in ub.lower() and "case when" not in ub.lower():
-                                                                    ub = re.sub(r'([a-zA-Z0-9_.]*\"?Tyre_Quantity\"?)(?!\s+AS\s+\"?Tyre_Quantity\"?\s+END)', r'CASE WHEN cs."FKART" = \'ZROP\' THEN 0 ELSE \1 END AS "Tyre_Quantity"', ub, count=1, flags=re.I)
+                                                                if not is_past_closed:
+                                                                    m_sel = re.search(r'(\bSELECT\b[\s\S]*?\bFROM\b)', ub, re.I)
+                                                                    if m_sel:
+                                                                        sel_part = m_sel.group(1)
+                                                                        if "case when" not in sel_part.lower() and "tyre_quantity" in sel_part.lower():
+                                                                            new_sel = re.sub(r'([a-zA-Z0-9_.]*\"?Tyre_Quantity\"?)(?!\s+AS\s+\"?Tyre_Quantity\"?\s+END)', rf'CASE WHEN {pfx_cs}"FKART" = \'ZROP\' THEN 0 ELSE \1 END AS "Tyre_Quantity"', sel_part, count=1, flags=re.I)
+                                                                            ub = ub[:m_sel.start()] + new_sel + ub[m_sel.end():]
 
                                                             # In rolling transition months (e.g. October 2026), filter un-reconciled billing types on SalesHistory
                                                             elif "saleshistory" in ub.lower():
@@ -3863,8 +3869,6 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                                                             ub = ub.rstrip() + f'\nWHERE {fk_filter_sh}'
 
                                                             fixed_branches.append(ub)
-
-                                                            fixed_branches.append(ub)
                                                     sub_fixed = "".join(fixed_branches)
                                                     run_query = run_query[:open_idx] + sub_fixed + run_query[close_idx:]
                                                     diff_len = len(sub_fixed) - len(sub_text)
@@ -3879,7 +3883,7 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                                         elif re.search(r'\b(GROUP\s+BY|ORDER\s+BY|LIMIT)\b', outer_p, re.I):
                                                             outer_p = re.sub(r'(\b(GROUP\s+BY|ORDER\s+BY|LIMIT)\b)', f'{cm_exists}\n\\1', outer_p, count=1, flags=re.I)
                                                         else:
-                                                            outer_p += cm_exists
+                                                            outer_p = outer_p.rstrip('; \t\r\n') + cm_exists
                                                         run_query = run_query[:end_alias_idx] + outer_p
                                             except Exception as inj_err:
                                                 print(f"[SQL_INJECT] Subquery UNION injection note: {inj_err}")
