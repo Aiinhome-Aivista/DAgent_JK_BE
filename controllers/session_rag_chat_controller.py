@@ -3130,7 +3130,7 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                 f"         SELECT \"volume\", \"ndp_value\", \"invoice_value\", \"Tyre_Quantity\", \"dealer_code\", \"invoice_number\", \"plant\", \"FKART\", \"distribution_channel\", \"indicator_cancel\", \"invoice_date\", \"SKU\"\n"
                 f"         FROM \"SAP_S4\".\"ZPVF_SD_SalesHistory_01_TR\"\n"
                 f"         WHERE (\"distribution_channel\" = '10' OR \"distribution_channel\" = 10)\n"
-                f"           AND (\"indicator_cancel\" IS NULL OR \"indicator_cancel\" <> 'X')\n"
+                f"           AND (\"indicator_cancel\" IS NULL OR \"indicator_cancel\" NOT IN ('X', 'Y', '1'))\n"
                 f"           AND \"FKART\" NOT IN ('ZGOV', 'ZCC', 'ZBHU')\n"
                 f"           AND <date_condition>\n"
                 f"         UNION ALL\n"
@@ -3139,7 +3139,7 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                 f"                cs.\"dealer_code\", cs.\"invoice_number\", cs.\"plant\", cs.\"FKART\", cs.\"distribution_channel\", cs.\"indicator_cancel\", cs.\"invoice_date\", cs.\"SKU\"\n"
                 f"         FROM \"SAP_S4\".\"ZPVF_SD_CurrentSales_01_TR\" cs\n"
                 f"         WHERE (cs.\"distribution_channel\" = '10' OR cs.\"distribution_channel\" = 10)\n"
-                f"           AND (cs.\"indicator_cancel\" IS NULL OR cs.\"indicator_cancel\" <> 'X')\n"
+                f"           AND (cs.\"indicator_cancel\" IS NULL OR cs.\"indicator_cancel\" NOT IN ('X', 'Y', '1'))\n"
                 f"           AND cs.\"FKART\" NOT IN ('ZBCL', 'ZGOV', 'ZCC', 'ZBHU')\n"
                 f"           AND <date_condition>\n"
                 f"           AND NOT EXISTS (\n"
@@ -3149,7 +3149,7 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                 f"     ) fact\n"
                 f"   - FOR CLOSED HISTORICAL MONTHS (JULY 2026, JUNE 2026, MAY 2026, etc. - Strictly Prior Months 01 to 09):\n"
                 f"     100% of data is fully reconciled and archived in 'ZPVF_SD_SalesHistory_01_TR'. Query DIRECTLY from 'ZPVF_SD_SalesHistory_01_TR' alone (do NOT union CurrentSales). Do NOT filter FKART.\n"
-                f"     Example: SELECT COALESCE(SUM(fact.\"ndp_value\"), 0) AS total_ndp_value FROM \"SAP_S4\".\"ZPVF_SD_SalesHistory_01_TR\" fact WHERE fact.\"distribution_channel\" = '10' AND (fact.\"indicator_cancel\" IS NULL OR fact.\"indicator_cancel\" <> 'X') AND <date_condition>\n"
+                f"     Example: SELECT COALESCE(SUM(fact.\"ndp_value\"), 0) AS total_ndp_value FROM \"SAP_S4\".\"ZPVF_SD_SalesHistory_01_TR\" fact WHERE fact.\"distribution_channel\" = '10' AND (fact.\"indicator_cancel\" IS NULL OR fact.\"indicator_cancel\" NOT IN ('X', 'Y', '1')) AND <date_condition>\n"
                 f"2. MANDATORY CUSTOMER MASTER FILTER (EXACT DATASPHERE BENCHMARK SPECIFICATION):\n"
                 f"   - Official SAP Analytics (Zsales_test) requires excluding scrap/test accounts and unmapped dealers (KLABC = 'X').\n"
                 f"   - When querying total or aggregate sales metrics (volume, NDP value, invoice value, tyre quantity) without customer dimensions in SELECT:\n"
@@ -3774,7 +3774,7 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
     SELECT "volume", "ndp_value", "invoice_value", "Tyre_Quantity", "dealer_code", "invoice_number", "plant", "FKART", "distribution_channel", "indicator_cancel", "invoice_date", "SKU"
     FROM "SAP_S4"."ZPVF_SD_SalesHistory_01_TR"
     WHERE ("distribution_channel" = '10' OR "distribution_channel" = 10)
-      AND ("indicator_cancel" IS NULL OR "indicator_cancel" <> 'X')
+      AND ("indicator_cancel" IS NULL OR "indicator_cancel" NOT IN ('X', 'Y', '1'))
       AND "FKART" NOT IN ('ZGOV', 'ZCC', 'ZBHU')
       AND {d_filt_clean}
     UNION ALL
@@ -3783,7 +3783,7 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
            cs."dealer_code", cs."invoice_number", cs."plant", cs."FKART", cs."distribution_channel", cs."indicator_cancel", cs."invoice_date", cs."SKU"
     FROM "SAP_S4"."ZPVF_SD_CurrentSales_01_TR" cs
     WHERE (cs."distribution_channel" = '10' OR cs."distribution_channel" = 10)
-      AND (cs."indicator_cancel" IS NULL OR cs."indicator_cancel" <> 'X')
+      AND (cs."indicator_cancel" IS NULL OR cs."indicator_cancel" NOT IN ('X', 'Y', '1'))
       AND cs."FKART" NOT IN ('ZBCL', 'ZGOV', 'ZCC', 'ZBHU')
       AND {d_filt_cs}
       AND NOT EXISTS (
@@ -3844,8 +3844,8 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                                                 pfx = f'{al_found.group(1)}.' if al_found and al_found.group(1).lower() not in SQL_RESERVED else ''
                                                                 ub = re.sub(r'(\bSELECT\s+(?:\n\s*)?)', rf'\1{pfx}"dealer_code",\n    ', ub, count=1, flags=re.I)
 
-                                                            # Normalize cancellation indicator filter to <> 'X'
-                                                            ub = re.sub(r'([a-zA-Z0-9_.]*\"?indicator_cancel\"?)\s+NOT\s+IN\s+\(\'X\',\s*\'Y\',\s*\'1\'\)', r"\1 <> 'X'", ub, flags=re.I)
+                                                            # Normalize cancellation indicator filter to NOT IN ('X', 'Y', '1')
+                                                            ub = re.sub(r'([a-zA-Z0-9_.]*\"?indicator_cancel\"?)\s*(?:<>|!=)\s*\'X\'', r"\1 NOT IN ('X', 'Y', '1')", ub, flags=re.I)
 
                                                             # Strip any date restriction from NOT EXISTS subquery (ensures cross-month duplicates are fully caught)
                                                             ub = re.sub(r'(\bWHERE\s+sh\.\"invoice_number\"\s*=\s*[a-zA-Z0-9_.]+\"invoice_number\")\s+AND\s+sh\.\"invoice_date\"[^\)]*', r'\1', ub, flags=re.I)
@@ -3882,7 +3882,7 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                                                     if m_sel:
                                                                         sel_part = m_sel.group(1)
                                                                         if "case when" not in sel_part.lower() and "tyre_quantity" in sel_part.lower():
-                                                                            new_sel = re.sub(r'([a-zA-Z0-9_.]*\"?Tyre_Quantity\"?)(?!\s+AS\s+\"?Tyre_Quantity\"?\s+END)', rf'CASE WHEN {pfx_cs}"FKART" = \'ZROP\' THEN 0 ELSE \1 END AS "Tyre_Quantity"', sel_part, count=1, flags=re.I)
+                                                                            new_sel = re.sub(r'([a-zA-Z0-9_.]*\"?Tyre_Quantity\"?)(?!\s+AS\s+\"?Tyre_Quantity\"?\s+END)', f"CASE WHEN {pfx_cs}\"FKART\" = 'ZROP' THEN 0 ELSE \\1 END AS \"Tyre_Quantity\"", sel_part, count=1, flags=re.I)
                                                                             ub = ub[:m_sel.start()] + new_sel + ub[m_sel.end():]
 
                                                             # In rolling transition months (e.g. October 2026), filter un-reconciled billing types on SalesHistory
@@ -3928,7 +3928,7 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                         run_query = _inject_into_single_branch(run_query, question)
 
                                     # Normalize cancellation indicator across entire query
-                                    run_query = re.sub(r'([a-zA-Z0-9_.]*\"?indicator_cancel\"?)\s+NOT\s+IN\s+\(\'X\',\s*\'Y\',\s*\'1\'\)', r"\1 <> 'X'", run_query, flags=re.I)
+                                    run_query = re.sub(r'([a-zA-Z0-9_.]*\"?indicator_cancel\"?)\s*(?:<>|!=)\s*\'X\'', r"\1 NOT IN ('X', 'Y', '1')", run_query, flags=re.I)
 
                                 run_query = re.sub(r'\n{3,}', '\n\n', run_query).strip()
                                 sql_query = run_query
