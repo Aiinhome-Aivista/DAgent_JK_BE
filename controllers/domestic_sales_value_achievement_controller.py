@@ -205,7 +205,8 @@ def query_domestic_sales_value_achievement_hana(cursor, schema, year_month: str,
             "indicator_cancel"
         FROM "{schema}"."ZPVF_SD_SalesHistory_01_TR"
         WHERE "distribution_channel" = '10'
-          AND ("indicator_cancel" IS NULL OR "indicator_cancel" <> 'X')
+          AND COALESCE("indicator_cancel", '') <> 'X'
+          AND "invoice_date" < '2026-10-18'
 
         UNION ALL
 
@@ -221,12 +222,8 @@ def query_domestic_sales_value_achievement_hana(cursor, schema, year_month: str,
             cs."indicator_cancel"
         FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR" cs
         WHERE cs."distribution_channel" = '10'
-          AND (cs."indicator_cancel" IS NULL OR cs."indicator_cancel" <> 'X')
-          AND NOT EXISTS (
-              SELECT 1 
-              FROM "{schema}"."ZPVF_SD_SalesHistory_01_TR" sh 
-              WHERE sh."invoice_number" = cs."invoice_number"
-          )
+          AND COALESCE(cs."indicator_cancel", '') <> 'X'
+          AND cs."invoice_date" >= '2026-10-18'
     ),
 
     VALID_SALES AS
@@ -242,15 +239,12 @@ def query_domestic_sales_value_achievement_hana(cursor, schema, year_month: str,
             S."FKART"
         FROM SALES_DATA S
         CROSS JOIN DATE_PARAMS D
+        INNER JOIN "{schema}"."ZIVF_CustomerMaster_01_MD" cm
+            ON LTRIM(S."dealer_code", '0') = LTRIM(cm."KUNNR", '0')
         WHERE
             S."invoice_date" >= D.PREVIOUS_MONTH_START
             AND S."invoice_date" < D.CURRENT_MTD_END
-            AND EXISTS (
-                SELECT 1
-                FROM "{schema}"."ZIVF_CustomerMaster_01_MD" cm
-                WHERE TRIM(LEADING '0' FROM cm."KUNNR") = TRIM(LEADING '0' FROM S."dealer_code")
-                  AND cm."KLABC" <> 'X'
-            )
+            AND COALESCE(cm."KLABC", '') <> 'X'
     ),
 
     CLASSIFIED_SALES AS
@@ -274,8 +268,11 @@ def query_domestic_sales_value_achievement_hana(cursor, schema, year_month: str,
 
         FROM VALID_SALES S
 
-        LEFT JOIN "{schema}"."ZIVR_SKUMaster_01_TR" M
-            ON TRIM(S."SKU") = TRIM(M."MATNR")
+        LEFT JOIN (
+            SELECT "MATNR", MAX("CAT_CODE") AS "CAT_CODE"
+            FROM "{schema}"."ZIVR_SKUMaster_01_TR"
+            GROUP BY "MATNR"
+        ) M ON S."SKU" = M."MATNR"
 
         LEFT JOIN "{schema}"."ZIVF_CategoryMaster_01_TR" C
             ON M."CAT_CODE" = C."CAT_CODE"
@@ -348,7 +345,7 @@ def query_domestic_sales_value_achievement_hana(cursor, schema, year_month: str,
                 ELSE '4 Wheelers'
             END AS MARKET_SEGMENT,
 
-            SUM(COALESCE(NULLIF(T."PLAN_VALUE", 0), NULLIF(T."REV_PLAN_VAL", 0), 0)) AS TARGET
+            SUM(COALESCE(NULLIF(T."REV_PLAN_VAL", 0), T."PLAN_VALUE", 0)) AS TARGET
 
         FROM "{schema}"."ZIVF_SD_Sales_Plan_Target_01_TR" T
 
