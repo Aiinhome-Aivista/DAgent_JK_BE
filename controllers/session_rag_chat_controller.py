@@ -3121,18 +3121,23 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
         if "SAP_S4" in schema_context or "ZPVF_" in schema_context:
             sql_user += (
                 f"\n\nCRITICAL SAP SALES FACT & MASTER DATA RULES (Datasphere Zsales_test Official Benchmark Specification):\n"
-                f"1. TRANSACTIONAL SALES FACT ARCHITECTURE (DYNAMIC ROLLING COMBINATION):\n"
-                f"   - SAP distributes sales transactions across two views: 'ZPVF_SD_SalesHistory_01_TR' (archived history) and 'ZPVF_SD_CurrentSales_01_TR' (active rolling window).\n"
-                f"   - In transition months (like October 2026), sales are split across BOTH views. In closed past months (like July 2026), SalesHistory has all rows while CurrentSales has 0 rows.\n"
-                f"   - Therefore, for ANY actual sales metrics (volume, NDP value, invoice value, tyre quantity) for any month, quarter, or year, ALWAYS COMBINE BOTH VIEWS using UNION ALL with NOT EXISTS de-duplication:\n"
+                f"1. TRANSACTIONAL SALES FACT ARCHITECTURE (CLOSED HISTORICAL vs ROLLING TRANSITION):\n"
+                f"   - For CLOSED HISTORICAL MONTHS (months prior to October 2026, such as July 2026, June 2026, etc.):\n"
+                f"     100% of data is fully reconciled and archived in 'ZPVF_SD_SalesHistory_01_TR'. Query DIRECTLY from 'ZPVF_SD_SalesHistory_01_TR' alone (do NOT union CurrentSales). Do NOT filter FKART.\n"
+                f"     Example: SELECT COALESCE(SUM(fact.\"ndp_value\"), 0) AS total_ndp_value FROM \"SAP_S4\".\"ZPVF_SD_SalesHistory_01_TR\" fact WHERE fact.\"distribution_channel\" = '10' AND (fact.\"indicator_cancel\" IS NULL OR fact.\"indicator_cancel\" <> 'X') AND <date_condition>\n"
+                f"   - For ROLLING TRANSITION MONTHS (October 2026, November 2026, or active rolling window):\n"
+                f"     Sales are split across BOTH views. You MUST combine BOTH views using UNION ALL with NOT EXISTS de-duplication:\n"
                 f"     (\n"
                 f"         SELECT \"volume\", \"ndp_value\", \"invoice_value\", \"Tyre_Quantity\", \"dealer_code\", \"invoice_number\", \"plant\", \"FKART\", \"distribution_channel\", \"indicator_cancel\", \"invoice_date\", \"SKU\"\n"
                 f"         FROM \"SAP_S4\".\"ZPVF_SD_SalesHistory_01_TR\"\n"
                 f"         WHERE (\"distribution_channel\" = '10' OR \"distribution_channel\" = 10)\n"
                 f"           AND (\"indicator_cancel\" IS NULL OR \"indicator_cancel\" <> 'X')\n"
+                f"           AND \"FKART\" NOT IN ('ZGOV', 'ZCC', 'ZBHU')\n"
                 f"           AND <date_condition>\n"
                 f"         UNION ALL\n"
-                f"         SELECT cs.\"volume\", cs.\"ndp_value\", cs.\"invoice_value\", cs.\"Tyre_Quantity\", cs.\"dealer_code\", cs.\"invoice_number\", cs.\"plant\", cs.\"FKART\", cs.\"distribution_channel\", cs.\"indicator_cancel\", cs.\"invoice_date\", cs.\"SKU\"\n"
+                f"         SELECT cs.\"volume\", cs.\"ndp_value\", cs.\"invoice_value\",\n"
+                f"                CASE WHEN cs.\"FKART\" = 'ZROP' THEN 0 ELSE cs.\"Tyre_Quantity\" END AS \"Tyre_Quantity\",\n"
+                f"                cs.\"dealer_code\", cs.\"invoice_number\", cs.\"plant\", cs.\"FKART\", cs.\"distribution_channel\", cs.\"indicator_cancel\", cs.\"invoice_date\", cs.\"SKU\"\n"
                 f"         FROM \"SAP_S4\".\"ZPVF_SD_CurrentSales_01_TR\" cs\n"
                 f"         WHERE (cs.\"distribution_channel\" = '10' OR cs.\"distribution_channel\" = 10)\n"
                 f"           AND (cs.\"indicator_cancel\" IS NULL OR cs.\"indicator_cancel\" <> 'X')\n"
@@ -3792,6 +3797,7 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                                     sub_text = run_query[open_idx:close_idx]
                                                     u_branches = re.split(r'(\bUNION\s+(?:ALL\s+)?\b)', sub_text, flags=re.I)
                                                     fixed_branches = []
+                                                    is_past_closed = bool(re.search(r'2026-0[1-9]|20260[1-9]|july|june|may|april|march|february|january|august|september', run_query + " " + question, re.I))
                                                     for ub in u_branches:
                                                         if re.match(r'^\s*UNION\b', ub, re.I):
                                                             fixed_branches.append(ub)
@@ -3837,8 +3843,26 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                                                     else:
                                                                         ub = ub.rstrip() + f'\nWHERE {ne_clause}'
 
+                                                                # In rolling transition months, adjust return billing type ZROP on tyre quantity
+                                                                if not is_past_closed and "tyre_quantity" in ub.lower() and "case when" not in ub.lower():
+                                                                    ub = re.sub(r'([a-zA-Z0-9_.]*\"?Tyre_Quantity\"?)(?!\s+AS\s+\"?Tyre_Quantity\"?\s+END)', r'CASE WHEN cs."FKART" = \'ZROP\' THEN 0 ELSE \1 END AS "Tyre_Quantity"', ub, count=1, flags=re.I)
+
+                                                            # In rolling transition months (e.g. October 2026), filter un-reconciled billing types on SalesHistory
                                                             elif "saleshistory" in ub.lower():
-                                                                pass
+                                                                if not is_past_closed:
+                                                                    m_sh_al = re.search(r'"?ZPVF_SD_SalesHistory_01_TR"?\s+(?:AS\s+)?([a-zA-Z0-9_]+)', ub, re.I)
+                                                                    sh_al = m_sh_al.group(1) if m_sh_al and m_sh_al.group(1).lower() not in SQL_RESERVED else ""
+                                                                    pfx_sh = f'{sh_al}.' if sh_al else ''
+                                                                    if "zgov" not in ub.lower():
+                                                                        fk_filter_sh = f"{pfx_sh}\"FKART\" NOT IN ('ZGOV', 'ZCC', 'ZBHU')"
+                                                                        if re.search(r'\bWHERE\s+', ub, re.I):
+                                                                            ub = re.sub(r'(\bWHERE\s+)', lambda m: f"{m.group(1)}{fk_filter_sh} AND ", ub, count=1, flags=re.I)
+                                                                        elif re.search(r'\b(GROUP\s+BY|ORDER\s+BY|LIMIT)\b', ub, re.I):
+                                                                            ub = re.sub(r'(\b(GROUP\s+BY|ORDER\s+BY|LIMIT)\b)', lambda m: f"\nWHERE {fk_filter_sh}\n{m.group(1)}", ub, count=1, flags=re.I)
+                                                                        else:
+                                                                            ub = ub.rstrip() + f'\nWHERE {fk_filter_sh}'
+
+                                                            fixed_branches.append(ub)
 
                                                             fixed_branches.append(ub)
                                                     sub_fixed = "".join(fixed_branches)
