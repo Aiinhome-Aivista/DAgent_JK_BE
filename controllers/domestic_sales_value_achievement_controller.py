@@ -450,7 +450,8 @@ def query_domestic_sales_value_achievement_hana(cursor, schema, year_month: str,
     # 5. STU (Distribution Channel 30)
     # 6. OEM + STU + DEF - Subtotal (Row 4 + Row 5)
     # 7. Domestic - Grand Total (Row 3 + Row 6)
-    scale = 100000.0
+    # Scale to ₹ in Crores (1 Cr = 10,000,000) matching executive / client management reports
+    scale = 10000000.0
     four_w = next((r for r in raw_rows if r.get("MARKET_SEGMENT") == "4 Wheelers"), {})
     two_three_w = next((r for r in raw_rows if r.get("MARKET_SEGMENT") == "2/3 Wheelers"), {})
     oem_def = next((r for r in raw_rows if r.get("MARKET_SEGMENT") == "OEM + DEF"), {})
@@ -458,7 +459,7 @@ def query_domestic_sales_value_achievement_hana(cursor, schema, year_month: str,
 
     def _val(row, k):
         v = float(row.get(k) or 0)
-        return round(v / scale, 2) if v > 100000 else round(v, 2)
+        return round(v / scale, 2) if v > 10000 else round(v, 2)
 
     def _calc_row(name, row_dict, is_tot=False):
         m = _val(row_dict, "PREVIOUS_YEAR_ACTUAL_MONTH")
@@ -706,6 +707,7 @@ def get_domestic_sales_value_achievement_controller(get_db_connection):
 
         meta_info = {
             "month_abbr": mo_name,
+            "unit": "₹ in Cr",
             "prev_year_label": f"{mo_name}-{prev_yr_short} Actual",
             "curr_year_label": f"Actual Sale for {mo_name}-{curr_yr_short}",
             "day_label": f"Sale for day {s_day}"

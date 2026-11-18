@@ -218,6 +218,7 @@ def query_sales_summary_no_values_hana(cursor, schema, year_month: str, selected
         WHERE ("distribution_channel" = '10' OR "distribution_channel" = 10)
           AND "invoice_date" >= TO_DATE('{curr_from}', 'YYYY-MM-DD')
           AND "invoice_date" <= TO_DATE('{curr_to}', 'YYYY-MM-DD')
+          AND "invoice_date" < TO_DATE('2026-10-18', 'YYYY-MM-DD')
           AND ("indicator_cancel" IS NULL OR "indicator_cancel" NOT IN ('X', 'Y', '1'))
         UNION ALL
         SELECT
@@ -235,6 +236,7 @@ def query_sales_summary_no_values_hana(cursor, schema, year_month: str, selected
         WHERE ("distribution_channel" = '10' OR "distribution_channel" = 10)
           AND "invoice_date" >= TO_DATE('{curr_from}', 'YYYY-MM-DD')
           AND "invoice_date" <= TO_DATE('{curr_to}', 'YYYY-MM-DD')
+          AND "invoice_date" >= TO_DATE('2026-10-18', 'YYYY-MM-DD')
           AND ("indicator_cancel" IS NULL OR "indicator_cancel" NOT IN ('X', 'Y', '1'))
     ),
 
@@ -259,8 +261,16 @@ def query_sales_summary_no_values_hana(cursor, schema, year_month: str, selected
             UPPER(TRIM(COALESCE(sk."TYRE_TYPE", ''))) AS tyre_type,
             UPPER(TRIM(COALESCE(sk."CONSTUCTION", ''))) AS constr
         FROM SALES_FILTERED s
-        LEFT JOIN "{schema}"."ZIVR_SKUMaster_01_TR" sk 
-            ON TRIM(s."SKU") = TRIM(sk."MATNR")
+        LEFT JOIN (
+            SELECT 
+                LTRIM(TRIM("MATNR"), '0') AS "MATNR",
+                MAX("CAT_CODE") AS "CAT_CODE",
+                MAX("TYRE_TYPE") AS "TYRE_TYPE",
+                MAX("CONSTUCTION") AS "CONSTUCTION"
+            FROM "{schema}"."ZIVR_SKUMaster_01_TR"
+            GROUP BY LTRIM(TRIM("MATNR"), '0')
+        ) sk 
+            ON LTRIM(TRIM(s."SKU"), '0') = sk."MATNR"
         LEFT JOIN "{schema}"."ZIVF_CategoryMaster_01_TR" cat 
             ON TRIM(sk."CAT_CODE") = TRIM(cat."CAT_CODE")
         LEFT JOIN "{schema}"."ZIVF_CustomerMaster_01_MD" cm 

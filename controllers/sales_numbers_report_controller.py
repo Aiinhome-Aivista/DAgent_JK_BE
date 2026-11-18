@@ -252,6 +252,7 @@ def query_sales_numbers_hana(cursor, schema, year_month: str, selected_date: str
               OR
               ("invoice_date" >= TO_DATE('{curr_from}', 'YYYY-MM-DD') AND "invoice_date" <= TO_DATE('{curr_month_end}', 'YYYY-MM-DD'))
           )
+          AND "invoice_date" < TO_DATE('2026-10-18', 'YYYY-MM-DD')
           AND ("indicator_cancel" IS NULL OR "indicator_cancel" NOT IN ('X', 'Y', '1'))
         UNION ALL
         SELECT
@@ -271,6 +272,7 @@ def query_sales_numbers_hana(cursor, schema, year_month: str, selected_date: str
               OR
               ("invoice_date" >= TO_DATE('{curr_from}', 'YYYY-MM-DD') AND "invoice_date" <= TO_DATE('{curr_month_end}', 'YYYY-MM-DD'))
           )
+          AND "invoice_date" >= TO_DATE('2026-10-18', 'YYYY-MM-DD')
           AND ("indicator_cancel" IS NULL OR "indicator_cancel" NOT IN ('X', 'Y', '1'))
     ),
 
@@ -334,8 +336,17 @@ def query_sales_numbers_hana(cursor, schema, year_month: str, selected_date: str
             COALESCE(cm."KTOKD", '') AS ktokd,
             COALESCE(cm."KLABC", '') AS klabc
         FROM SALES_FILTERED s
-        LEFT JOIN "{schema}"."ZIVR_SKUMaster_01_TR" sk
-            ON LTRIM(TRIM(s."SKU"), '0') = LTRIM(TRIM(sk."MATNR"), '0')
+        LEFT JOIN (
+            SELECT 
+                LTRIM(TRIM("MATNR"), '0') AS "MATNR",
+                MAX("CAT_CODE") AS "CAT_CODE",
+                MAX("CONSTUCTION") AS "CONSTUCTION",
+                MAX("TYRE_TYPE") AS "TYRE_TYPE",
+                MAX("TYRE_TP") AS "TYRE_TP"
+            FROM "{schema}"."ZIVR_SKUMaster_01_TR"
+            GROUP BY LTRIM(TRIM("MATNR"), '0')
+        ) sk
+            ON LTRIM(TRIM(s."SKU"), '0') = sk."MATNR"
         LEFT JOIN "{schema}"."ZIVF_CategoryMaster_01_TR" cat
             ON TRIM(sk."CAT_CODE") = TRIM(cat."CAT_CODE")
         LEFT JOIN "{schema}"."ZIVF_CustomerMaster_01_MD" cm
@@ -415,10 +426,19 @@ def query_sales_numbers_hana(cursor, schema, year_month: str, selected_date: str
                     ELSE 'BIAS'
                 END
             ) AS Category,
-            COALESCE(NULLIF(tgt."ORG_PLAN", 0), NULLIF(tgt."REV_PLAN", 0), NULLIF(tgt."HO_PLAN", 0), NULLIF(tgt."REG_PLAN", 0), NULLIF(tgt."AREA_PLAN", 0), 0) AS Target_Plan
+            COALESCE(NULLIF(tgt."REV_PLAN", 0), tgt."ORG_PLAN", tgt."PLAN_QTY", 0) AS Target_Plan
         FROM "{schema}"."ZIVF_SD_Sales_Plan_Target_01_TR" tgt
-        LEFT JOIN "{schema}"."ZIVR_SKUMaster_01_TR" sk
-            ON LTRIM(TRIM(tgt."MATNR"), '0') = LTRIM(TRIM(sk."MATNR"), '0')
+        LEFT JOIN (
+            SELECT 
+                LTRIM(TRIM("MATNR"), '0') AS "MATNR",
+                MAX("CAT_CODE") AS "CAT_CODE",
+                MAX("CONSTUCTION") AS "CONSTUCTION",
+                MAX("TYRE_TYPE") AS "TYRE_TYPE",
+                MAX("TYRE_TP") AS "TYRE_TP"
+            FROM "{schema}"."ZIVR_SKUMaster_01_TR"
+            GROUP BY LTRIM(TRIM("MATNR"), '0')
+        ) sk
+            ON LTRIM(TRIM(tgt."MATNR"), '0') = sk."MATNR"
         LEFT JOIN "{schema}"."ZIVF_CategoryMaster_01_TR" cat
             ON (COALESCE(NULLIF(TRIM(tgt."CAT_CODE"), ''), NULLIF(TRIM(sk."CAT_CODE"), '')) = TRIM(cat."CAT_CODE"))
         WHERE (CAST(tgt."YMONTH" AS VARCHAR) = '{year_month}' OR tgt."YMONTH" = '{year_month}')

@@ -186,7 +186,7 @@ def query_sales_report_by_values_hana(cursor, schema, year_month: str, selected_
     SALES_BASE AS (
         SELECT
             "invoice_date",
-            COALESCE("NDP_VALUE", 0) AS "invoice_value",
+            COALESCE("ndp_value", 0) AS "invoice_value",
             "distribution_channel",
             "dealer_code",
             "SKU",
@@ -201,11 +201,12 @@ def query_sales_report_by_values_hana(cursor, schema, year_month: str, selected_
               OR
               ("invoice_date" >= TO_DATE('{curr_from}', 'YYYY-MM-DD') AND "invoice_date" <= TO_DATE('{curr_month_end}', 'YYYY-MM-DD'))
           )
-          AND ("indicator_cancel" IS NULL OR "indicator_cancel" NOT IN ('X', 'Y', '1'))
+          AND "invoice_date" < '2026-10-18'
+          AND COALESCE("indicator_cancel", '') <> 'X'
         UNION ALL
         SELECT
             "invoice_date",
-            COALESCE("NDP_VALUE", 0) AS "invoice_value",
+            COALESCE("ndp_value", 0) AS "invoice_value",
             "distribution_channel",
             "dealer_code",
             "SKU",
@@ -220,7 +221,8 @@ def query_sales_report_by_values_hana(cursor, schema, year_month: str, selected_
               OR
               ("invoice_date" >= TO_DATE('{curr_from}', 'YYYY-MM-DD') AND "invoice_date" <= TO_DATE('{curr_month_end}', 'YYYY-MM-DD'))
           )
-          AND ("indicator_cancel" IS NULL OR "indicator_cancel" NOT IN ('X', 'Y', '1'))
+          AND "invoice_date" >= '2026-10-18'
+          AND COALESCE("indicator_cancel", '') <> 'X'
     ),
 
     SALES_FILTERED AS (
@@ -243,21 +245,22 @@ def query_sales_report_by_values_hana(cursor, schema, year_month: str, selected_
                     TRIM(COALESCE(cat."CAT_CODE", sk."CAT_CODE", '')) IN ('B1', 'H1', 'S1')
                     OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) IN ('SCOOTER', 'MOTOR CYCLE', 'MOTORCYCLE', '3W', '3 WHEELER', '3WH', 'MOTOR')
                     OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%SCOOTER%'
-                    OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%MOTOR CYCLE%'
-                    OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%MOTORCYCLE%'
+                    OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%MOTOR%'
                     OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%3%WH%'
                     OR UPPER(TRIM(COALESCE(cat."CAT_DESC", ''))) LIKE '%3%WHEEL%'
-                    OR UPPER(TRIM(COALESCE(sk."TYRE_TYPE", ''))) IN ('SCOOTER', 'MOTOR CYCLE', 'MOTORCYCLE', '3W', '3 WHEELER', '3WH')
                 )
                 THEN '2_3_Whlrs'
                 ELSE '4_Whlrs'
             END AS Segment
         FROM SALES_FILTERED s
-        LEFT JOIN "{schema}"."ZIVR_SKUMaster_01_TR" sk 
-            ON TRIM(s."SKU") = TRIM(sk."MATNR")
+        LEFT JOIN (
+            SELECT "MATNR", MAX("CAT_CODE") AS "CAT_CODE"
+            FROM "{schema}"."ZIVR_SKUMaster_01_TR"
+            GROUP BY "MATNR"
+        ) sk ON TRIM(s."SKU") = TRIM(sk."MATNR")
         LEFT JOIN "{schema}"."ZIVF_CategoryMaster_01_TR" cat 
             ON TRIM(sk."CAT_CODE") = TRIM(cat."CAT_CODE")
-        LEFT JOIN "{schema}"."ZIVF_CustomerMaster_01_MD" cm 
+        INNER JOIN "{schema}"."ZIVF_CustomerMaster_01_MD" cm 
             ON LTRIM(TRIM(s."dealer_code"), '0') = LTRIM(TRIM(cm."KUNNR"), '0')
         LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm 
             ON TRIM(cm."BZIRK") = TRIM(tm."BZIRK")
@@ -265,7 +268,7 @@ def query_sales_report_by_values_hana(cursor, schema, year_month: str, selected_
             ON TRIM(tm."REGIO") = TRIM(rm."region_code")
         LEFT JOIN "{schema}"."ZIVF_ZoneMaster_01_TR" zm 
             ON zm."P_ZONE" = COALESCE(NULLIF(TRIM(rm."zone_code"), ''), NULLIF(TRIM(tm."P_ZONE"), ''))
-        WHERE (cm."KLABC" IS NULL OR UPPER(TRIM(cm."KLABC")) <> 'X')
+        WHERE COALESCE(cm."KLABC", '') <> 'X'
           AND zm."NAME" IS NOT NULL AND TRIM(zm."NAME") != '' AND UPPER(TRIM(zm."NAME")) NOT LIKE '%UNKNOWN%'
     ),
 
