@@ -3702,28 +3702,40 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                 def _inject_into_single_branch(branch_sql, question_str):
                                     if not ("ZPVF_SD_CurrentSales_01_TR" in branch_sql or "ZPVF_SD_SalesHistory_01_TR" in branch_sql):
                                         return branch_sql
-                                    m_f = re.search(r'("?ZPVF_SD_(?:CurrentSales|SalesHistory)_01_TR"?)\s+(?:AS\s+)?([a-zA-Z0-9_]+)', branch_sql, re.I)
+
+                                    # Fix any malformed table alias inside quotes first
+                                    branch_sql = re.sub(r'\"SAP_S4\"\.\"([a-zA-Z0-9_]+)\s+(?:AS\s+)?([a-zA-Z0-9_]+)\"', r'"SAP_S4"."\1" \2', branch_sql, flags=re.IGNORECASE)
+                                    branch_sql = re.sub(r'\"([a-zA-Z0-9_]+)\s+(?:AS\s+)?([a-zA-Z0-9_]+)\"', r'"\1" \2', branch_sql, flags=re.IGNORECASE)
+
+                                    m_f = re.search(r'(?:\"SAP_S4\"\.)?\"?(ZPVF_SD_(?:CurrentSales|SalesHistory)_01_TR)\"?\s+(?:AS\s+)?([a-zA-Z0-9_]+)', branch_sql, re.I)
                                     if m_f and m_f.group(2).lower() not in SQL_RESERVED:
                                         f_alias = m_f.group(2)
                                     else:
-                                        branch_sql = re.sub(r'("?ZPVF_SD_(?:CurrentSales|SalesHistory)_01_TR"?)(?!\s+AS |\s+[a-zA-Z0-9_]+)', r'\1 AS fact', branch_sql, count=1, flags=re.I)
+                                        # Safely append alias outside the table quotes
+                                        branch_sql = re.sub(
+                                            r'((?:\"SAP_S4\"\.)?\"?ZPVF_SD_(?:CurrentSales|SalesHistory)_01_TR\"?)',
+                                            r'\1 fact',
+                                            branch_sql,
+                                            count=1,
+                                            flags=re.I
+                                        )
                                         f_alias = "fact"
 
                                     if "ZIVF_CustomerMaster_01_MD" not in branch_sql:
                                         if not re.search(r'\b(customer|dealer|client|account)\b', question_str, re.I):
-                                            cm_filter = f'EXISTS (SELECT 1 FROM "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm WHERE TRIM(LEADING \'0\' FROM cm."KUNNR") = TRIM(LEADING \'0\' FROM {f_alias}."dealer_code") AND cm."KLABC" <> \'X\')'
+                                            cm_filter = f'EXISTS (SELECT 1 FROM "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm WHERE LTRIM(cm."KUNNR", \'0\') = LTRIM({f_alias}."dealer_code", \'0\') AND COALESCE(cm."KLABC", \'\') <> \'X\')'
                                             if re.search(r'\bWHERE\s+', branch_sql, re.I):
                                                 branch_sql = re.sub(r'(\bWHERE\s+)', f'\\1{cm_filter} AND ', branch_sql, count=1, flags=re.I)
                                             else:
                                                 branch_sql += f' WHERE {cm_filter}'
                                         else:
-                                            cm_join = f' LEFT JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm ON TRIM(LEADING \'0\' FROM cm."KUNNR") = TRIM(LEADING \'0\' FROM {f_alias}."dealer_code") '
+                                            cm_join = f' LEFT JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm ON LTRIM(cm."KUNNR", \'0\') = LTRIM({f_alias}."dealer_code", \'0\') '
                                             if re.search(r'\bWHERE\b', branch_sql, re.I):
                                                 branch_sql = re.sub(r'(\bWHERE\b)', f'{cm_join}WHERE', branch_sql, count=1, flags=re.I)
                                             else:
                                                 branch_sql += f'{cm_join}'
                                             if "KLABC" not in branch_sql:
-                                                k_filter = 'cm."KLABC" <> \'X\''
+                                                k_filter = 'COALESCE(cm."KLABC", \'\') <> \'X\''
                                                 if re.search(r'\bWHERE\s+', branch_sql, re.I):
                                                     branch_sql = re.sub(r'(\bWHERE\s+)', f'\\1{k_filter} AND ', branch_sql, count=1, flags=re.I)
                                                 else:
@@ -3731,14 +3743,14 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                     elif "KLABC" not in branch_sql:
                                         cm_m = re.search(r'"?ZIVF_CustomerMaster_01_MD"?\s+(?:AS\s+)?([a-zA-Z0-9_]+)', branch_sql, re.I)
                                         cm_alias = cm_m.group(1) if cm_m and cm_m.group(1).lower() not in SQL_RESERVED else "cm"
-                                        k_filter = f'{cm_alias}."KLABC" <> \'X\''
+                                        k_filter = f'COALESCE({cm_alias}."KLABC", \'\') <> \'X\''
                                         if re.search(r'\bWHERE\s+', branch_sql, re.I):
                                             branch_sql = re.sub(r'(\bWHERE\s+)', f'\\1{k_filter} AND ', branch_sql, count=1, flags=re.I)
                                         else:
                                             branch_sql += f' WHERE {k_filter}'
 
                                     if "indicator_cancel" not in branch_sql.lower():
-                                        canc_filter = f'({f_alias}."indicator_cancel" IS NULL OR {f_alias}."indicator_cancel" NOT IN (\'X\', \'Y\', \'1\'))'
+                                        canc_filter = f'COALESCE({f_alias}."indicator_cancel", \'\') <> \'X\''
                                         if re.search(r'\bWHERE\s+', branch_sql, re.I):
                                             branch_sql = re.sub(r'(\bWHERE\s+)', f'\\1{canc_filter} AND ', branch_sql, count=1, flags=re.I)
                                         else:
@@ -3785,8 +3797,8 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                                         break
                                             if close_idx:
                                                 run_query = run_query[:open_idx] + oct_sub + run_query[close_idx+1:]
-                                        elif "ZPVF_SD_SalesHistory_01_TR" in run_query:
-                                            run_query = re.sub(r'"?SAP_S4"?\."?ZPVF_SD_SalesHistory_01_TR"?', oct_sub, run_query, count=1)
+                                        elif re.search(r'"?SAP_S4"?\."?ZPVF_SD_(?:SalesHistory|CurrentSales)_01_TR"?', run_query):
+                                            run_query = re.sub(r'"?SAP_S4"?\."?ZPVF_SD_(?:SalesHistory|CurrentSales)_01_TR"?', oct_sub, run_query, count=1)
 
                                         # Find subquery alias and inject Customer Master on outer query if missing
                                         m_open2 = re.search(r'\bFROM\s*\(', run_query, re.I)
@@ -3837,6 +3849,11 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                     run_query = re.sub(r'([a-zA-Z0-9_.]*\"?KLABC\"?)\s*(?:<>|!=)\s*\'X\'', r"COALESCE(\1, '') <> 'X'", run_query, flags=re.I)
                                     run_query = re.sub(r'([a-zA-Z0-9_.]*\"?indicator_cancel\"?)\s*(?:<>|!=)\s*\'X\'', r"COALESCE(\1, '') <> 'X'", run_query, flags=re.I)
                                     run_query = re.sub(r'([a-zA-Z0-9_.]*\"?indicator_cancel\"?)\s+NOT\s+IN\s+\(\'X\'[^\)]*\)', r"COALESCE(\1, '') <> 'X'", run_query, flags=re.I)
+
+                                    # Cleanup malformed table alias trapped inside double quotes
+                                    run_query = re.sub(r'\"SAP_S4\"\.\"([a-zA-Z0-9_]+)\s+(?:AS\s+)?([a-zA-Z0-9_]+)\"', r'"SAP_S4"."\1" \2', run_query, flags=re.IGNORECASE)
+                                    run_query = re.sub(r'\"([a-zA-Z0-9_]+)\s+(?:AS\s+)?([a-zA-Z0-9_]+)\"', r'"\1" \2', run_query, flags=re.IGNORECASE)
+                                    run_query = re.sub(r'\)\s+(fact|sub|cs|sh|t)\b', r') AS \1', run_query, flags=re.IGNORECASE)
 
                                 run_query = re.sub(r'\n{3,}', '\n\n', run_query).strip()
                                 sql_query = run_query
