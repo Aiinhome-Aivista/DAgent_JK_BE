@@ -2055,17 +2055,17 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
 
     # Common projected sales columns across CurrentSales and SalesHistory
     sales_cols = '''s."distribution_channel", s."plant", s."invoice_number", s."invoice_date", 
-                    s."indicator_cancel", s."dealer_code", s."SKU", s."FKART", s."invoice_value", s."Tyre_Quantity"'''
+                    s."indicator_cancel", s."dealer_code", s."SKU", s."FKART", COALESCE(s."ndp_value", s."invoice_value") AS "invoice_value", s."Tyre_Quantity"'''
 
     if curr_view and hist_view:
         sales_source = f'''(
             SELECT {sales_cols}
             FROM "{schema}"."{curr_view}" s
-            WHERE s."invoice_date" >= '{year_start}'
+            WHERE s."invoice_date" >= '{year_start}' AND s."invoice_date" >= '2026-10-18'
             UNION ALL
             SELECT {sales_cols}
             FROM "{schema}"."{hist_view}" s
-            WHERE s."invoice_date" >= '{year_start}'
+            WHERE s."invoice_date" >= '{year_start}' AND s."invoice_date" < '2026-10-18'
         )'''
     elif curr_view:
         sales_source = f'''(
@@ -2118,20 +2118,20 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
         sales_source_30d = f'''(
             SELECT {sales_cols}
             FROM "{schema}"."{curr_view}" s
-            WHERE s."invoice_date" >= '{dt_30d_str}' AND s."invoice_date" <= '{max_dt_str}'
+            WHERE s."invoice_date" >= '{dt_30d_str}' AND s."invoice_date" <= '{max_dt_str}' AND s."invoice_date" >= '2026-10-18'
             UNION ALL
             SELECT {sales_cols}
             FROM "{schema}"."{hist_view}" s
-            WHERE s."invoice_date" >= '{dt_30d_str}' AND s."invoice_date" <= '{max_dt_str}'
+            WHERE s."invoice_date" >= '{dt_30d_str}' AND s."invoice_date" <= '{max_dt_str}' AND s."invoice_date" < '2026-10-18'
         )'''
         sales_source_60d = f'''(
             SELECT {sales_cols}
             FROM "{schema}"."{curr_view}" s
-            WHERE s."invoice_date" >= '{dt_60d_str}' AND s."invoice_date" <= '{max_dt_str}'
+            WHERE s."invoice_date" >= '{dt_60d_str}' AND s."invoice_date" <= '{max_dt_str}' AND s."invoice_date" >= '2026-10-18'
             UNION ALL
             SELECT {sales_cols}
             FROM "{schema}"."{hist_view}" s
-            WHERE s."invoice_date" >= '{dt_60d_str}' AND s."invoice_date" <= '{max_dt_str}'
+            WHERE s."invoice_date" >= '{dt_60d_str}' AND s."invoice_date" <= '{max_dt_str}' AND s."invoice_date" < '2026-10-18'
         )'''
     elif curr_view:
         sales_source_30d = f'''(

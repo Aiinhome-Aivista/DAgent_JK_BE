@@ -426,7 +426,7 @@ def query_sales_numbers_hana(cursor, schema, year_month: str, selected_date: str
                     ELSE 'BIAS'
                 END
             ) AS Category,
-            COALESCE(NULLIF(tgt."REV_PLAN", 0), tgt."ORG_PLAN", tgt."PLAN_QTY", 0) AS Target_Plan
+            COALESCE(NULLIF(tgt."REV_PLAN", 0), tgt."ORG_PLAN", 0) AS Target_Plan
         FROM "{schema}"."ZIVF_SD_Sales_Plan_Target_01_TR" tgt
         LEFT JOIN (
             SELECT 
