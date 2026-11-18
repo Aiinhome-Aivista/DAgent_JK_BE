@@ -180,7 +180,7 @@ def _compute_top_bottom_slice_hana(cursor, schema, dimension: str, days: int):
     sql = f"""
         SELECT 
             {select_expr},
-            ROUND(SUM(COALESCE(s."NDP_VALUE", 0)), 2) AS sales_value
+            ROUND(SUM(COALESCE(s."ndp_value", 0)), 2) AS sales_value
         FROM "{schema}"."{sales_view}" s
         {joins}
         CROSS JOIN (
@@ -195,11 +195,12 @@ def _compute_top_bottom_slice_hana(cursor, schema, dimension: str, days: int):
           AND (s."indicator_cancel" IS NULL OR s."indicator_cancel" NOT IN ('X', 'Y', '1'))
           {extra_filter}
         GROUP BY {group_by}
-        HAVING SUM(COALESCE(s."NDP_VALUE", 0)) > 0
+        HAVING SUM(COALESCE(s."ndp_value", 0)) > 0
         ORDER BY 2 DESC
     """
 
-    cursor.execute(sql)
+    from helper.sap_connection import sanitize_and_execute_hana
+    sanitize_and_execute_hana(cursor, schema, sql)
     rows = _fetchall_dict(cursor)
     if not rows:
         return [], []
