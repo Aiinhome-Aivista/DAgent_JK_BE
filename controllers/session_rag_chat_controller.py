@@ -428,14 +428,13 @@ def _load_hana(session_id, get_fn):
         biz_rules = """[SCHEMA] db:SAP_S4 table:BUSINESS_RELATIONSHIPS_AND_RULES
 SAP S/4HANA Sales & Distribution (SD) Architecture and Table Context:
 1. Fact Views:
-   - ZPVF_SD_SalesHistory_01_TR: Historical Invoices Fact view (~30,044,097 rows). Contains archived invoices. For fully closed prior periods (e.g. earlier closed months), invoices reside completely here.
-   - ZPVF_SD_CurrentSales_01_TR: Current Period MTD Invoices Fact view (~1,000,000 rows). Contains active rolling month transactions.
-   - ROLLING MONTH & CURRENT YEAR UNIFIED RULE: In SAP S/4HANA, month-end consolidation is asynchronous. For the active current year or rolling transition months (such as October, November, MTD), invoices are split across both tables. ALWAYS query BOTH using UNION ALL with NOT EXISTS de-duplication!
+   - ZPVF_SD_SalesHistory_01_TR: Historical Invoices Fact view (~30,044,097 rows). Contains ALL historical invoices for ALL months and years prior to the active current rolling month. If the user asks for ANY month, quarter, or year prior to the current month, you MUST query ZPVF_SD_SalesHistory_01_TR!
+   - ZPVF_SD_CurrentSales_01_TR: Current Period MTD Invoices Fact view (~1,000,000 rows). ONLY contains transactions for the active current rolling month. For ANY prior month, DO NOT use CurrentSales; query ZPVF_SD_SalesHistory_01_TR!
    - ZPVF_SD_CancelledSalesInvoice_01_TR: Cancelled Invoices Reference view (~50,000 rows). Contains list of cancelled invoices.
    - ZIVF_SD_Sales_Plan_Target_01_TR: Sales Plan & Target view (~200,000 rows). Target Value is PLAN_VALUE (or REV_PLAN_VAL), Target Qty is ORG_PLAN (or REV_PLAN).
    CRITICAL SAP HANA CASING FOR FACT COLUMNS (MUST USE DOUBLE QUOTES):
    "invoice_number", "invoice_date", "plant", "dealer_code", "ship_to_party", "SKU", "batch", "volume", "Tyre_Quantity", "ndp_value", "old_code", "invoice_value", "total_discount", "gst", "taxable_value", "FKART", "BILL_TYPE", "distribution_channel", "indicator_cancel".
-   - Customer Master: ZIVF_CustomerMaster_01_MD (~69,104 rows, columns UPPERCASE). When ranking or listing customers/dealers (Top N, Worst N, Dealers), ALWAYS use JOIN (INNER JOIN) on (fact."dealer_code" = cm.KUNNR OR LTRIM(fact."dealer_code", '0') = LTRIM(cm.KUNNR, '0')) to guarantee valid registered customer names. Customer Name is COALESCE(NULLIF(TRIM(cm.NAME1), ''), NULLIF(TRIM(cm.BNAME), ''), fact."dealer_code"). Filter: cm.KLABC <> 'X' (strictly exclude scrap/test accounts, NEVER allow KLABC IS NULL). Do NOT use cm.KUNNR IS NULL in ranking queries. (NOTE: SAP KUNNR often has 10-digit leading zeros '0001234567' while fact."dealer_code" is '1234567'. LTRIM matches them perfectly).
+   - Customer Master: ZIVF_CustomerMaster_01_MD (~69,104 rows, columns UPPERCASE). When ranking or listing customers/dealers (Top N, Worst N, Dealers), ALWAYS use JOIN (INNER JOIN) on (fact."dealer_code" = cm.KUNNR OR LTRIM(fact."dealer_code", '0') = LTRIM(cm.KUNNR, '0')) to guarantee valid registered customer names. Customer Name is COALESCE(NULLIF(TRIM(cm.NAME1), ''), NULLIF(TRIM(cm.BNAME), ''), fact."dealer_code"). Filter: (cm.KLABC IS NULL OR cm.KLABC <> 'X'). Do NOT use cm.KUNNR IS NULL in ranking queries. (NOTE: SAP KUNNR often has 10-digit leading zeros '0001234567' while fact."dealer_code" is '1234567'. LTRIM matches them perfectly).
    - SKU / Material Master: ZIVR_SKUMaster_01_TR (~30,000 rows, columns UPPERCASE). Join on fact."SKU" = sk.MATNR. Description is sk.MAKTX or sk.PROD_TITLE, Brand is sk.BRAND, Sub Brand is sk.SUB_BRAND, Category Code is sk.CAT_CODE, Construction is sk.CONSTUCTION, Tyre Type is sk.TYRE_TYPE (or sk.TYRE_TP: TRUCK, LCV, CAR, etc.).
    - Category Master: ZIVF_CategoryMaster_01_TR (columns UPPERCASE). Join on sk.CAT_CODE = cat.CAT_CODE. Category Description is cat.CAT_DESC (Tyre, Tube, Flap).
    - Territory Master: ZIVF_TerritoryMaster_01_TR (columns UPPERCASE). Join on cm.BZIRK = tm.BZIRK. Territory Name is tm.NAME, Region code is tm.REGIO, Zone code is tm.P_ZONE.
@@ -460,7 +459,7 @@ SAP S/4HANA Sales & Distribution (SD) Architecture and Table Context:
      AND (fact."indicator_cancel" IS NULL OR fact."indicator_cancel" NOT IN ('X', 'Y', '1'))
      NOTE: Both CurrentSales and SalesHistory fact views contain the indicator_cancel column ('X' indicates cancelled).
      DO NOT join ZPVF_SD_CancelledSalesInvoice_01_TR across 30M rows, as multi-column string join on 30M rows exhausts HANA memory (GLOBAL_ALLOCATION_LIMIT).
-   - Customer Status: ALWAYS filter cm.KLABC <> 'X' on ZIVF_CustomerMaster_01_MD (strictly exclude scrap/test customers, NEVER allow KLABC IS NULL) (exclude deleted/test/scrap customers).
+   - Customer Status: ALWAYS filter (cm.KLABC IS NULL OR cm.KLABC <> 'X') on ZIVF_CustomerMaster_01_MD (exclude deleted/test/scrap customers).
 4. Business Metrics:
    - Sales / Revenue = SUM(fact."invoice_value")
    - Volume = SUM(fact."volume")
@@ -1345,35 +1344,16 @@ Generate clean, highly efficient, and 100% syntactically correct SAP HANA SQL th
 CANONICAL DATA MODEL & RELATIONSHIP GRAPH (OFFICIAL):
 =====================================================
 1. TRANSACTIONAL SALES DATA (FACT VIEWS):
-   - "SAP_S4"."ZPVF_SD_CurrentSales_01_TR": Rolling current active month(s) sales data (last 30-60 rolling days).
-   - "SAP_S4"."ZPVF_SD_SalesHistory_01_TR": Historical sales data for all prior months/years.
+   - "SAP_S4"."ZPVF_SD_CurrentSales_01_TR": Rolling current active month sales data (FAST, active month only).
+   - "SAP_S4"."ZPVF_SD_SalesHistory_01_TR": Historical sales data for all prior months/years (2020 through prior month).
    - "SAP_S4"."ZPVF_SD_CancelledSalesInvoice_01_TR": Cancelled invoices reference view.
    - "SAP_S4"."ZIVF_SD_Sales_Plan_Target_01_TR": Sales Plan & Target View (Target Revenue = PLAN_VALUE, Target Qty = ORG_PLAN).
 
    * Standard Filters on Sales Data:
-     - Default Distribution Channel: ("distribution_channel" = '10' OR "distribution_channel" = 10) (Replacement/Domestic channel default, unless OEM=20, STU=30, DEF=40 or all channels specified).
-     - Cancellation Filter: ("indicator_cancel" IS NULL OR "indicator_cancel" <> 'X').
-     - Sales Revenue Metric: ALWAYS use COALESCE("ndp_value", 0) AS revenue / sales_value.
-     - UNIFIED SALES FACT RULE (Rolling vs Closed Historical Periods):
-       * For CLOSED HISTORICAL MONTHS (months prior to active rolling window, e.g. July 2026, April 2026, 2025):
-         Query ONLY "SAP_S4"."ZPVF_SD_SalesHistory_01_TR"! DO NOT query CurrentSales!
-         DO NOT apply any FKART exclusions on SalesHistory (all invoices in SalesHistory are already reconciled).
-         Filters: fact."distribution_channel" = '10' AND (fact."indicator_cancel" IS NULL OR fact."indicator_cancel" <> 'X').
-       * For ACTIVE ROLLING TRANSITION MONTHS (October 2026, November 2026, MTD, last 30-60 rolling days):
-         Invoices are split across both tables due to asynchronous archiving. Combine them using UNION ALL with NOT EXISTS:
-         (
-             SELECT "volume", "ndp_value", "invoice_value", "Tyre_Quantity", "dealer_code", "invoice_number", "plant", "FKART", "distribution_channel", "indicator_cancel", "invoice_date", "SKU"
-             FROM "SAP_S4"."ZPVF_SD_SalesHistory_01_TR"
-             WHERE ("distribution_channel" = '10' OR "distribution_channel" = 10)
-               AND ("indicator_cancel" IS NULL OR "indicator_cancel" NOT IN ('X', 'Y', '1'))
-             UNION ALL
-             SELECT cs."volume", cs."ndp_value", cs."invoice_value", CASE WHEN cs."FKART" = 'ZROP' THEN 0 ELSE cs."Tyre_Quantity" END AS "Tyre_Quantity", cs."dealer_code", cs."invoice_number", cs."plant", cs."FKART", cs."distribution_channel", cs."indicator_cancel", cs."invoice_date", cs."SKU"
-             FROM "SAP_S4"."ZPVF_SD_CurrentSales_01_TR" cs
-             WHERE (cs."distribution_channel" = '10' OR cs."distribution_channel" = 10)
-               AND (cs."indicator_cancel" IS NULL OR cs."indicator_cancel" NOT IN ('X', 'Y', '1'))
-               AND cs."FKART" NOT IN ('ZBCL', 'ZGOV', 'ZCC', 'ZBHU')
-               AND NOT EXISTS (SELECT 1 FROM "SAP_S4"."ZPVF_SD_SalesHistory_01_TR" sh WHERE sh."invoice_number" = cs."invoice_number")
-         ) fact
+     - Default Distribution Channel: fact."distribution_channel" = '10' (Replacement/Domestic channel default, unless OEM=20, STU=30, DEF=40 or all channels specified).
+     - Cancellation Filter: (fact."indicator_cancel" IS NULL OR fact."indicator_cancel" NOT IN ('X', 'Y', '1')).
+     - If the user asks for multi-year trends or historical totals (e.g. "Total Sales Revenue for 2020 to 2026"):
+       Use UNION ALL of both ZPVF_SD_SalesHistory_01_TR and ZPVF_SD_CurrentSales_01_TR with date filters pushed down inside each branch!
 
 2. CANONICAL JOIN PATHS & CONNECTING KEYS (STRICT):
    Sr | From Table (Source)    | To Table (Destination)     | Connecting Keys
@@ -1419,16 +1399,12 @@ CANONICAL DATA MODEL & RELATIONSHIP GRAPH (OFFICIAL):
 
 3. MANDATORY FILTERS & JOIN RULES (OFFICIAL DATASPHERE SPECIFICATION):
    - Customer Master Filter (ZIVF_CustomerMaster_01_MD):
-     MANDATORY FILTER:
-     For aggregate/total sales queries without customer dimensions:
-       ALWAYS USE: AND EXISTS (SELECT 1 FROM "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm WHERE TRIM(LEADING '0' FROM cm."KUNNR") = TRIM(LEADING '0' FROM fact."dealer_code") AND cm."KLABC" <> 'X')
-     For queries with customer details in SELECT:
-       JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm ON TRIM(LEADING '0' FROM cm."KUNNR") = TRIM(LEADING '0' FROM fact."dealer_code")
-       AND FILTER: AND cm."KLABC" <> 'X'
-     CRITICAL: Official SAP Analytics (Zsales_test) requires strictly excluding scrap/test/unmapped accounts. NEVER USE (cm."KLABC" IS NULL)! Invoices without a valid CustomerMaster record must be excluded.
+     ALWAYS JOIN: LEFT JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm ON TRIM(LEADING '0' FROM cm."KUNNR") = TRIM(LEADING '0' FROM fact."dealer_code")
+     MANDATORY FILTER: (cm."KLABC" IS NULL OR cm."KLABC" <> 'X')
+     CRITICAL: Official SAP Analytics (Zsales_test) requires excluding scrap/test accounts (KLABC = 'X') from all sales metrics (NDP value, volume, quantity, invoice value).
    - Sales Data Filters:
      * Distribution Channel: fact."distribution_channel" = '10' (Default replacement/domestic sales, unless OEM/20, STU/30, DEF/40 or other channels requested).
-     * Cancellation Filter: (fact."indicator_cancel" IS NULL OR fact."indicator_cancel" <> 'X').
+     * Cancellation Filter: (fact."indicator_cancel" IS NULL OR fact."indicator_cancel" NOT IN ('X', 'Y', '1')).
    - Other Master Tables (Territory, Region, Zone, SKU, Category):
      Join them ONLY when territory, region, zone, SKU, or category names/dimensions/breakdowns are requested.
    - Customer Name: COALESCE(NULLIF(TRIM(cm.NAME1), ''), NULLIF(TRIM(cm.BNAME), ''), fact."dealer_code") AS customer_name
@@ -1550,7 +1526,7 @@ CANONICAL DATA MODEL & RELATIONSHIP GRAPH (OFFICIAL):
      LEFT JOIN "SAP_S4"."ZIVF_TerritoryMaster_01_TR" tm ON cm.BZIRK = tm.BZIRK
      LEFT JOIN "SAP_S4"."ZIVF_RegionMaster_MD_01" rm ON (tm.REGIO = rm."region_code" OR cm.REGIO = rm."region_code")
      WHERE (fact."indicator_cancel" IS NULL OR fact."indicator_cancel" NOT IN ('X', 'Y', '1'))
-       AND cm.KLABC <> 'X'
+       AND (cm.KLABC IS NULL OR cm.KLABC <> 'X')
        AND UPPER(TRIM(rm."region_name")) LIKE UPPER('%Jaipur%')
      GROUP BY COALESCE(NULLIF(TRIM(cm.NAME1), ''), NULLIF(TRIM(cm.BNAME), ''), fact."dealer_code"), fact."dealer_code", rm."region_name"
      ORDER BY total_sales_value DESC
@@ -1565,7 +1541,7 @@ CANONICAL DATA MODEL & RELATIONSHIP GRAPH (OFFICIAL):
      JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm 
        ON (fact."dealer_code" = cm.KUNNR OR LTRIM(fact."dealer_code", '0') = LTRIM(cm.KUNNR, '0'))
      WHERE (fact."indicator_cancel" IS NULL OR fact."indicator_cancel" NOT IN ('X', 'Y', '1'))
-       AND cm.KLABC <> 'X'
+       AND (cm.KLABC IS NULL OR cm.KLABC <> 'X')
      GROUP BY COALESCE(NULLIF(TRIM(cm.NAME1), ''), NULLIF(TRIM(cm.BNAME), ''), fact."dealer_code"), fact."dealer_code"
      ORDER BY total_sales DESC
      LIMIT 2
@@ -1579,7 +1555,7 @@ CANONICAL DATA MODEL & RELATIONSHIP GRAPH (OFFICIAL):
      JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm 
        ON (fact."dealer_code" = cm.KUNNR OR LTRIM(fact."dealer_code", '0') = LTRIM(cm.KUNNR, '0'))
      WHERE (fact."indicator_cancel" IS NULL OR fact."indicator_cancel" NOT IN ('X', 'Y', '1'))
-       AND cm.KLABC <> 'X'
+       AND (cm.KLABC IS NULL OR cm.KLABC <> 'X')
      GROUP BY COALESCE(NULLIF(TRIM(cm.NAME1), ''), NULLIF(TRIM(cm.BNAME), ''), fact."dealer_code"), fact."dealer_code"
      ORDER BY total_sales ASC
      LIMIT 2
@@ -1603,7 +1579,7 @@ CANONICAL DATA MODEL & RELATIONSHIP GRAPH (OFFICIAL):
      JOIN "SAP_S4"."ZIVF_ZoneMaster_01_TR" zm ON tm.P_ZONE = zm.P_ZONE
      WHERE fact."distribution_channel" = '10'
        AND (fact."indicator_cancel" IS NULL OR fact."indicator_cancel" NOT IN ('X', 'Y', '1'))
-       AND cm.KLABC <> 'X'
+       AND (cm.KLABC IS NULL OR cm.KLABC <> 'X')
      GROUP BY zm.NAME, rm."region_name"
      ORDER BY total_sales DESC
 
@@ -1624,7 +1600,7 @@ CANONICAL DATA MODEL & RELATIONSHIP GRAPH (OFFICIAL):
        JOIN "SAP_S4"."ZIVF_ZoneMaster_01_TR" zm ON tm.P_ZONE = zm.P_ZONE
        WHERE fact."distribution_channel" = '10'
          AND (fact."indicator_cancel" IS NULL OR fact."indicator_cancel" NOT IN ('X', 'Y', '1'))
-         AND cm.KLABC <> 'X'
+         AND (cm.KLABC IS NULL OR cm.KLABC <> 'X')
        GROUP BY tm.BZIRK, tm.NAME, rm."region_name", zm.NAME
      ),
      target_plans AS (
@@ -1665,7 +1641,7 @@ CANONICAL DATA MODEL & RELATIONSHIP GRAPH (OFFICIAL):
      ) AS fact
      LEFT JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm ON TRIM(LEADING '0' FROM cm."KUNNR") = TRIM(LEADING '0' FROM fact."dealer_code")
      JOIN "SAP_S4"."ZITR_DayAttribute_01_TR" da ON fact."invoice_date" = da."Date_"
-     WHERE cm."KLABC" <> 'X'
+     WHERE (cm."KLABC" IS NULL OR cm."KLABC" <> 'X')
      GROUP BY da.CAL_YEAR, da.YMONTH
      ORDER BY da.CAL_YEAR, da.YMONTH
 
@@ -1686,7 +1662,7 @@ CANONICAL DATA MODEL & RELATIONSHIP GRAPH (OFFICIAL):
          ON (fact."dealer_code" = cm.KUNNR OR LTRIM(fact."dealer_code", '0') = LTRIM(cm.KUNNR, '0'))
        JOIN "SAP_S4"."ZITR_DayAttribute_01_TR" da ON fact."invoice_date" = da."Date_"
        WHERE (fact."indicator_cancel" IS NULL OR fact."indicator_cancel" NOT IN ('X', 'Y', '1'))
-         AND cm.KLABC <> 'X'
+         AND (cm.KLABC IS NULL OR cm.KLABC <> 'X')
        GROUP BY da.YMONTH, COALESCE(NULLIF(TRIM(cm.NAME1), ''), NULLIF(TRIM(cm.BNAME), ''), fact."dealer_code"), fact."dealer_code"
      )
      SELECT month, dealer_name, dealer_code, total_quantity, total_sales
@@ -2392,7 +2368,7 @@ def _build_geography_prompt(table_cols):
         ) if s4_tgt else ""
         return (
             f"\n\nSAP S/4HANA GEOGRAPHY CHAIN (MANDATORY):\n"
-            f"- Customer Master: \"SAP_S4\".\"{s4_cust}\" cm (JOIN: (fact.\"dealer_code\" = cm.KUNNR OR LTRIM(fact.\"dealer_code\", '0') = LTRIM(cm.KUNNR, '0')), Customer Name: COALESCE(NULLIF(TRIM(cm.NAME1), ''), NULLIF(TRIM(cm.BNAME), ''), fact.\"dealer_code\"), FILTER: cm.KLABC <> 'X')\n"
+            f"- Customer Master: \"SAP_S4\".\"{s4_cust}\" cm (JOIN: (fact.\"dealer_code\" = cm.KUNNR OR LTRIM(fact.\"dealer_code\", '0') = LTRIM(cm.KUNNR, '0')), Customer Name: COALESCE(NULLIF(TRIM(cm.NAME1), ''), NULLIF(TRIM(cm.BNAME), ''), fact.\"dealer_code\"), FILTER: (cm.KLABC IS NULL OR cm.KLABC <> 'X'))\n"
             f"- Territory Master: LEFT JOIN \"SAP_S4\".\"{s4_terr}\" tm ON cm.BZIRK = tm.BZIRK (Territory Name: tm.NAME, Region code: tm.REGIO, Zone code: tm.P_ZONE)\n"
             f"{reg_join}"
             f"{zone_join}"
@@ -2610,7 +2586,7 @@ def _resolve_canonical_churn_sql(question: str):
                 'FROM cust_units cu\n'
                 'LEFT JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm \n'
                 '    ON (cu."dealer_code" = cm."KUNNR" OR LTRIM(cu."dealer_code", \'0\') = LTRIM(cm."KUNNR", \'0\'))\n'
-                'WHERE cm."KLABC" <> \'X\'\n'
+                'WHERE (cm."KLABC" IS NULL OR cm."KLABC" <> \'X\')\n'
                 'ORDER BY cu.total_historical_units DESC'
             ),
             "reasoning": "Exact canonical query for Zero-Sale Active Counters (Last 30 Days) matching Executive Summary calculation."
@@ -2665,7 +2641,7 @@ def _resolve_canonical_churn_sql(question: str):
                 'FROM decline_calc d\n'
                 'LEFT JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm \n'
                 '    ON (d.dealer_code = cm."KUNNR" OR LTRIM(d.dealer_code, \'0\') = LTRIM(cm."KUNNR", \'0\'))\n'
-                'WHERE cm."KLABC" <> \'X\'\n'
+                'WHERE (cm."KLABC" IS NULL OR cm."KLABC" <> \'X\')\n'
                 'ORDER BY d.decline_pct DESC'
             ),
             "reasoning": "Exact canonical query for Accounts with > 5% Sales Decline matching Executive Summary calculation."
@@ -2720,7 +2696,7 @@ def _resolve_canonical_churn_sql(question: str):
                 'FROM decline_calc d\n'
                 'LEFT JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm \n'
                 '    ON (d.dealer_code = cm."KUNNR" OR LTRIM(d.dealer_code, \'0\') = LTRIM(cm."KUNNR", \'0\'))\n'
-                'WHERE cm."KLABC" <> \'X\'\n'
+                'WHERE (cm."KLABC" IS NULL OR cm."KLABC" <> \'X\')\n'
                 'ORDER BY d.decline_pct DESC'
             ),
             "reasoning": "Exact canonical query for Accounts with > 10% Sales Decline matching Executive Summary calculation."
@@ -2767,7 +2743,7 @@ def _resolve_canonical_churn_sql(question: str):
                 'FROM cust_billing cb\n'
                 'LEFT JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm \n'
                 '    ON (cb."dealer_code" = cm."KUNNR" OR LTRIM(cb."dealer_code", \'0\') = LTRIM(cm."KUNNR", \'0\'))\n'
-                'WHERE cm."KLABC" <> \'X\'\n'
+                'WHERE (cm."KLABC" IS NULL OR cm."KLABC" <> \'X\')\n'
                 'ORDER BY cb.total_historical_rev DESC'
             ),
             "reasoning": "Exact canonical query for High-Risk Inactive Accounts (₹2L+ Historical Billing) matching Executive Summary calculation."
@@ -2821,7 +2797,7 @@ def _resolve_canonical_churn_sql(question: str):
                 'FROM decline_calc d\n'
                 'LEFT JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm \n'
                 '    ON (d.dealer_code = cm."KUNNR" OR LTRIM(d.dealer_code, \'0\') = LTRIM(cm."KUNNR", \'0\'))\n'
-                'WHERE cm."KLABC" <> \'X\'\n'
+                'WHERE (cm."KLABC" IS NULL OR cm."KLABC" <> \'X\')\n'
                 'ORDER BY d.decline_pct DESC\n'
                 'LIMIT 20'
             ),
@@ -2867,7 +2843,7 @@ def _resolve_canonical_churn_sql(question: str):
                     'WHERE s."invoice_date" IS NOT NULL\n'
                     '  AND s."distribution_channel" = \'10\'\n'
                     '  AND (s."indicator_cancel" IS NULL OR s."indicator_cancel" NOT IN (\'X\', \'Y\', \'1\'))\n'
-                    '  AND cm."KLABC" <> \'X\'\n'
+                    '  AND (cm."KLABC" IS NULL OR cm."KLABC" <> \'X\')\n'
                     f'  AND (TRIM(cm."KTOKD") = \'{grp_code}\')\n'
                     'GROUP BY s."dealer_code", COALESCE(NULLIF(TRIM(cm."NAME1"), \'\'), NULLIF(TRIM(cm."BNAME"), \'\'), s."dealer_code")\n'
                     'ORDER BY sales_value_cr DESC'
@@ -2957,43 +2933,6 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
     system_prompt = get_prompt(workspace_id, 'rag_chat')
     if not system_prompt or not system_prompt.strip():
         system_prompt = SYS
-
-    # Dynamic Hierarchy Authorization Rule (Row-Level Security)
-    if user_id:
-        try:
-            conn_uha = get_connection_func()
-            cur_uha = _dict_cursor(conn_uha)
-            cur_uha.execute("""
-                SELECT uha.zone_code, uha.region_code, uha.territory_code, hr.rank_name, uha.designation
-                FROM user_hierarchy_access uha
-                LEFT JOIN hierarchy_ranks hr ON uha.rank_id = hr.id
-                WHERE uha.user_id = %s
-                LIMIT 1
-            """, (user_id,))
-            uha_row = cur_uha.fetchone()
-            cur_uha.close()
-            conn_uha.close()
-            if uha_row:
-                z = uha_row.get("zone_code")
-                r = uha_row.get("region_code")
-                t = uha_row.get("territory_code")
-                sec_rules = []
-                if z and str(z).strip().upper() != "ALL":
-                    sec_rules.append(f"- MANDATORY ZONE FILTER: Restrict all queries to ZONE '{str(z).strip()}' (using Zone master or territory mapping zm.P_ZONE = '{str(z).strip()}').")
-                if r and str(r).strip().upper() != "ALL":
-                    sec_rules.append(f"- MANDATORY REGION FILTER: Restrict all queries to REGION_CODE '{str(r).strip()}' (rm.REGION_CODE = '{str(r).strip()}').")
-                if t and str(t).strip().upper() != "ALL":
-                    sec_rules.append(f"- MANDATORY TERRITORY FILTER: Restrict all queries to BZIRK / TERRITORY '{str(t).strip()}'.")
-                
-                if sec_rules:
-                    system_prompt += (
-                        f"\n\n[USER AUTHORIZATION & DATA ACCESS CONTROL]\n"
-                        f"Current Active User Scope: {uha_row.get('designation', 'User')} ({uha_row.get('rank_name', 'Employee')})\n"
-                        + "\n".join(sec_rules) + "\n"
-                        f"CRITICAL: NEVER return or query aggregated data outside this user's assigned scope. If the user asks general sales questions without mentioning an area, automatically apply these scope boundaries in your SQL WHERE clauses.\n"
-                    )
-        except Exception as uha_err:
-            pass
 
     # Greeting
     if question and _is_greet(question):
@@ -3181,51 +3120,48 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
         sql_user = f"Schemas available:\n{schema_context}\n\nOriginal Question: {question}\n\nCanonical Query (Structured Intent):\n{canonical_query_str}"
         if "SAP_S4" in schema_context or "ZPVF_" in schema_context:
             sql_user += (
-                f"\n\nCRITICAL DYNAMIC TABLE ROUTING & MANDATORY DATASPHERE ARCHITECTURE (Active System Month: {current_month_name} / YMONTH: {current_ymonth}):\n"
-                f"1. TRANSACTIONAL SALES FACT ARCHITECTURE (OFFICIAL Zsales_test MODEL):\n"
-                f"   - \"SAP_S4\".\"ZPVF_SD_SalesHistory_01_TR\": Historical sales transactions.\n"
-                f"   - \"SAP_S4\".\"ZPVF_SD_CurrentSales_01_TR\": Rolling active month(s) sales transactions (last 30-60 rolling days).\n"
-                f"   - CRITICAL PERIOD ROUTING RULES:\n"
-                f"     * FOR CLOSED HISTORICAL MONTHS (any month prior to rolling window, e.g. July 2026, April 2026, 2025):\n"
-                f"       Query ONLY \"SAP_S4\".\"ZPVF_SD_SalesHistory_01_TR\" directly! DO NOT use UNION ALL with CurrentSales! DO NOT apply any FKART exclusions on SalesHistory!\n"
-                f"     * FOR ACTIVE ROLLING TRANSITION MONTHS (October 2026, November 2026, MTD, last 30-60 rolling days):\n"
-                f"       Because month-end archiving from CurrentSales to SalesHistory is active, invoices are split across both tables. MUST QUERY BOTH FACT VIEWS using UNION ALL with NOT EXISTS de-duplication:\n"
-                f"       (\n"
-                f"           SELECT \"volume\", \"ndp_value\", \"invoice_value\", \"Tyre_Quantity\", \"dealer_code\", \"invoice_number\", \"plant\", \"FKART\", \"distribution_channel\", \"indicator_cancel\", \"invoice_date\", \"SKU\"\n"
-                f"           FROM \"SAP_S4\".\"ZPVF_SD_SalesHistory_01_TR\"\n"
-                f"           WHERE (\"distribution_channel\" = '10' OR \"distribution_channel\" = 10)\n"
-                f"             AND (\"indicator_cancel\" IS NULL OR \"indicator_cancel\" NOT IN ('X', 'Y', '1'))\n"
-                f"             AND <date_condition>\n"
-                f"           UNION ALL\n"
-                f"           SELECT cs.\"volume\", cs.\"ndp_value\", cs.\"invoice_value\", CASE WHEN cs.\"FKART\" = 'ZROP' THEN 0 ELSE cs.\"Tyre_Quantity\" END AS \"Tyre_Quantity\", cs.\"dealer_code\", cs.\"invoice_number\", cs.\"plant\", cs.\"FKART\", cs.\"distribution_channel\", cs.\"indicator_cancel\", cs.\"invoice_date\", cs.\"SKU\"\n"
-                f"           FROM \"SAP_S4\".\"ZPVF_SD_CurrentSales_01_TR\" cs\n"
-                f"           WHERE (cs.\"distribution_channel\" = '10' OR cs.\"distribution_channel\" = 10)\n"
-                f"             AND (cs.\"indicator_cancel\" IS NULL OR cs.\"indicator_cancel\" NOT IN ('X', 'Y', '1'))\n"
-                f"             AND cs.\"FKART\" NOT IN ('ZBCL', 'ZGOV', 'ZCC', 'ZBHU')\n"
-                f"             AND <date_condition>\n"
-                f"             AND NOT EXISTS (\n"
-                f"                 SELECT 1 FROM \"SAP_S4\".\"ZPVF_SD_SalesHistory_01_TR\" sh \n"
-                f"                 WHERE sh.\"invoice_number\" = cs.\"invoice_number\"\n"
-                f"             )\n"
-                f"       ) fact\n"
-                f"2. MANDATORY CUSTOMER MASTER FILTER (EXACT DATASPHERE SPECIFICATION):\n"
-                f"   - Official SAP Analytics (Zsales_test) requires excluding scrap/test accounts (KLABC = 'X') and unmapped internal accounts.\n"
+                f"\n\nCRITICAL SAP SALES FACT & MASTER DATA RULES (Datasphere Zsales_test Official Benchmark Specification):\n"
+                f"1. TRANSACTIONAL SALES FACT ARCHITECTURE (DYNAMIC ROLLING COMBINATION):\n"
+                f"   - SAP distributes sales transactions across two views: 'ZPVF_SD_SalesHistory_01_TR' (archived history) and 'ZPVF_SD_CurrentSales_01_TR' (active rolling window).\n"
+                f"   - In transition months (like October 2026), sales are split across BOTH views. In closed past months (like July 2026), SalesHistory has all rows while CurrentSales has 0 rows.\n"
+                f"   - Therefore, for ANY actual sales metrics (volume, NDP value, invoice value, tyre quantity) for any month, quarter, or year, ALWAYS COMBINE BOTH VIEWS using UNION ALL with NOT EXISTS de-duplication:\n"
+                f"     (\n"
+                f"         SELECT \"volume\", \"ndp_value\", \"invoice_value\", \"Tyre_Quantity\", \"dealer_code\", \"invoice_number\", \"plant\", \"FKART\", \"distribution_channel\", \"indicator_cancel\", \"invoice_date\", \"SKU\"\n"
+                f"         FROM \"SAP_S4\".\"ZPVF_SD_SalesHistory_01_TR\"\n"
+                f"         WHERE (\"distribution_channel\" = '10' OR \"distribution_channel\" = 10)\n"
+                f"           AND (\"indicator_cancel\" IS NULL OR \"indicator_cancel\" <> 'X')\n"
+                f"           AND <date_condition>\n"
+                f"         UNION ALL\n"
+                f"         SELECT cs.\"volume\", cs.\"ndp_value\", cs.\"invoice_value\", cs.\"Tyre_Quantity\", cs.\"dealer_code\", cs.\"invoice_number\", cs.\"plant\", cs.\"FKART\", cs.\"distribution_channel\", cs.\"indicator_cancel\", cs.\"invoice_date\", cs.\"SKU\"\n"
+                f"         FROM \"SAP_S4\".\"ZPVF_SD_CurrentSales_01_TR\" cs\n"
+                f"         WHERE (cs.\"distribution_channel\" = '10' OR cs.\"distribution_channel\" = 10)\n"
+                f"           AND (cs.\"indicator_cancel\" IS NULL OR cs.\"indicator_cancel\" <> 'X')\n"
+                f"           AND <date_condition>\n"
+                f"           AND NOT EXISTS (\n"
+                f"               SELECT 1 FROM \"SAP_S4\".\"ZPVF_SD_SalesHistory_01_TR\" sh \n"
+                f"               WHERE sh.\"invoice_number\" = cs.\"invoice_number\"\n"
+                f"           )\n"
+                f"     ) fact\n"
+                f"2. MANDATORY CUSTOMER MASTER FILTER (EXACT DATASPHERE BENCHMARK SPECIFICATION):\n"
+                f"   - Official SAP Analytics (Zsales_test) requires excluding scrap/test accounts and unmapped dealers (KLABC = 'X').\n"
                 f"   - When querying total or aggregate sales metrics (volume, NDP value, invoice value, tyre quantity) without customer dimensions in SELECT:\n"
                 f"     ALWAYS filter: AND EXISTS (SELECT 1 FROM \"SAP_S4\".\"ZIVF_CustomerMaster_01_MD\" cm WHERE TRIM(LEADING '0' FROM cm.\"KUNNR\") = TRIM(LEADING '0' FROM fact.\"dealer_code\") AND cm.\"KLABC\" <> 'X')\n"
                 f"   - When customer name or territory/region/zone is requested in SELECT:\n"
-                f"     JOIN \"SAP_S4\".\"ZIVF_CustomerMaster_01_MD\" cm ON TRIM(LEADING '0' FROM cm.\"KUNNR\") = TRIM(LEADING '0' FROM fact.\"dealer_code\")\n"
-                f"     AND filter: AND cm.\"KLABC\" <> 'X'\n"
-                f"   - Official Connecting Keys Hierarchy:\n"
-                f"     1. Sales Data -> SKU Master: TRIM(sk.MATNR) = TRIM(fact.\"SKU\")\n"
-                f"     2. SKU Master -> Category Master: TRIM(cat.CAT_CODE) = TRIM(sk.CAT_CODE)\n"
-                f"     3. Sales Data -> Customer Master: TRIM(LEADING '0' FROM cm.KUNNR) = TRIM(LEADING '0' FROM fact.\"dealer_code\") [Filter: cm.KLABC <> 'X']\n"
-                f"     4. Customer Master -> Territory Master: TRIM(tm.BZIRK) = TRIM(cm.BZIRK)\n"
-                f"     5. Territory Master -> Region Master: TRIM(rm.\"region_code\") = TRIM(tm.REGIO)\n"
-                f"     6. Region Master -> Zone Master: TRIM(zm.P_ZONE) = TRIM(rm.\"zone_code\")\n"
-                f"     7. Sales Data -> Day Date: fact.\"invoice_date\" = da.\"Date_\"\n"
-                f"3. MANDATORY SALES VALUE METRIC:\n"
-                f"   - Sales Revenue / Sales Value MUST ALWAYS be calculated as COALESCE(fact.\"ndp_value\", 0) (NDP Value)! NEVER use invoice_value or taxable_value as revenue unless specifically asked.\n"
-
+                f"     JOIN \"SAP_S4\".\"ZIVF_CustomerMaster_01_MD\" cm ON TRIM(LEADING '0' FROM cm.\"KUNNR\") = TRIM(LEADING '0' FROM fact.\"dealer_code\") AND cm.\"KLABC\" <> 'X'\n"
+                f"3. STANDARD MEASURES & DEFAULTS:\n"
+                f"   - Default Distribution Channel: fact.\"distribution_channel\" = '10' (Replacement Sales).\n"
+                f"   - Sales Revenue / NDP Value: COALESCE(SUM(fact.\"ndp_value\"), 0).\n"
+                f"   - Sales Volume: COALESCE(SUM(fact.\"volume\"), 0).\n"
+                f"   - Invoice Value: COALESCE(SUM(fact.\"invoice_value\"), 0).\n"
+                f"   - Tyre Quantity: COALESCE(SUM(fact.\"Tyre_Quantity\"), 0).\n"
+                f"4. Official Connecting Keys Hierarchy:\n"
+                f"   1. Sales Data -> SKU Master: TRIM(sk.MATNR) = TRIM(fact.\"SKU\")\n"
+                f"   2. SKU Master -> Category Master: TRIM(cat.CAT_CODE) = TRIM(sk.CAT_CODE)\n"
+                f"   3. Sales Data -> Customer Master: TRIM(LEADING '0' FROM cm.KUNNR) = TRIM(LEADING '0' FROM fact.\"dealer_code\")\n"
+                f"   4. Customer Master -> Territory Master: TRIM(tm.BZIRK) = TRIM(cm.BZIRK)\n"
+                f"   5. Territory Master -> Region Master: TRIM(rm.\"region_code\") = TRIM(tm.REGIO)\n"
+                f"   6. Region Master -> Zone Master: TRIM(zm.P_ZONE) = TRIM(rm.\"zone_code\")\n"
+                f"   7. Sales Data -> Day Date: fact.\"invoice_date\" = da.\"Date_\"\n"
                 "\n\nCRITICAL MANDATE FOR NAMES & DESCRIPTIONS:\n"
                 "When the question asks for customers, products, categories, territories, regions, or zones, "
                 "you MUST join the corresponding Master table to the point and SELECT the human-readable NAME / DESCRIPTION:\n"
@@ -3774,18 +3710,24 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                         f_alias = "fact"
 
                                     if "ZIVF_CustomerMaster_01_MD" not in branch_sql:
-                                        cm_join = f' LEFT JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm ON TRIM(LEADING \'0\' FROM cm."KUNNR") = TRIM(LEADING \'0\' FROM {f_alias}."dealer_code") '
-                                        if re.search(r'\bWHERE\b', branch_sql, re.I):
-                                            branch_sql = re.sub(r'(\bWHERE\b)', f'{cm_join}WHERE', branch_sql, count=1, flags=re.I)
-                                        else:
-                                            branch_sql += f'{cm_join}'
-
-                                        if "KLABC" not in branch_sql:
-                                            k_filter = "cm.\"KLABC\" <> 'X'"
+                                        if not re.search(r'\b(customer|dealer|client|account)\b', question_str, re.I):
+                                            cm_filter = f'EXISTS (SELECT 1 FROM "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm WHERE TRIM(LEADING \'0\' FROM cm."KUNNR") = TRIM(LEADING \'0\' FROM {f_alias}."dealer_code") AND cm."KLABC" <> \'X\')'
                                             if re.search(r'\bWHERE\s+', branch_sql, re.I):
-                                                branch_sql = re.sub(r'(\bWHERE\s+)', f'\\1{k_filter} AND ', branch_sql, count=1, flags=re.I)
+                                                branch_sql = re.sub(r'(\bWHERE\s+)', f'\\1{cm_filter} AND ', branch_sql, count=1, flags=re.I)
                                             else:
-                                                branch_sql += f' WHERE {k_filter}'
+                                                branch_sql += f' WHERE {cm_filter}'
+                                        else:
+                                            cm_join = f' LEFT JOIN "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm ON TRIM(LEADING \'0\' FROM cm."KUNNR") = TRIM(LEADING \'0\' FROM {f_alias}."dealer_code") '
+                                            if re.search(r'\bWHERE\b', branch_sql, re.I):
+                                                branch_sql = re.sub(r'(\bWHERE\b)', f'{cm_join}WHERE', branch_sql, count=1, flags=re.I)
+                                            else:
+                                                branch_sql += f'{cm_join}'
+                                            if "KLABC" not in branch_sql:
+                                                k_filter = 'cm."KLABC" <> \'X\''
+                                                if re.search(r'\bWHERE\s+', branch_sql, re.I):
+                                                    branch_sql = re.sub(r'(\bWHERE\s+)', f'\\1{k_filter} AND ', branch_sql, count=1, flags=re.I)
+                                                else:
+                                                    branch_sql += f' WHERE {k_filter}'
                                     elif "KLABC" not in branch_sql:
                                         cm_m = re.search(r'"?ZIVF_CustomerMaster_01_MD"?\s+(?:AS\s+)?([a-zA-Z0-9_]+)', branch_sql, re.I)
                                         cm_alias = cm_m.group(1) if cm_m and cm_m.group(1).lower() not in SQL_RESERVED else "cm"
@@ -3796,7 +3738,7 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                             branch_sql += f' WHERE {k_filter}'
 
                                     if "indicator_cancel" not in branch_sql.lower():
-                                        canc_filter = f'({f_alias}."indicator_cancel" IS NULL OR {f_alias}."indicator_cancel" <> \'X\')'
+                                        canc_filter = f'({f_alias}."indicator_cancel" IS NULL OR {f_alias}."indicator_cancel" NOT IN (\'X\', \'Y\', \'1\'))'
                                         if re.search(r'\bWHERE\s+', branch_sql, re.I):
                                             branch_sql = re.sub(r'(\bWHERE\s+)', f'\\1{canc_filter} AND ', branch_sql, count=1, flags=re.I)
                                         else:
@@ -3845,7 +3787,6 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                                                     end_alias_idx = close_idx + 1
                                                                 break
                                                 if close_idx and end_alias_idx:
-                                                    # A. Ensure "dealer_code" and "invoice_number" ONLY inside subquery SELECT branches (NEVER in outer SELECT)
                                                     sub_text = run_query[open_idx:close_idx]
                                                     u_branches = re.split(r'(\bUNION\s+(?:ALL\s+)?\b)', sub_text, flags=re.I)
                                                     fixed_branches = []
@@ -3853,74 +3794,33 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                                         if re.match(r'^\s*UNION\b', ub, re.I):
                                                             fixed_branches.append(ub)
                                                         else:
+                                                            # Ensure dealer_code is projected in each branch if not present
                                                             m_f = re.search(r'\bFROM\b', ub, re.I)
                                                             sel_p = ub[:m_f.start()].lower() if m_f else ub.lower()
-                                                            for col_req in ["volume", "ndp_value", "invoice_value", "Tyre_Quantity", "dealer_code", "invoice_number", "plant", "FKART", "distribution_channel", "indicator_cancel", "invoice_date", "SKU"]:
-                                                                if col_req.lower() not in sel_p:
-                                                                    ub = re.sub(r'(\bSELECT\s+(?:\n\s*)?)', rf'\1"{col_req}",\n    ', ub, count=1, flags=re.I)
+                                                            if "dealer_code" not in sel_p:
+                                                                m_cs_al = re.search(r'"?ZPVF_SD_CurrentSales_01_TR"?\s+(?:AS\s+)?([a-zA-Z0-9_]+)', ub, re.I)
+                                                                pfx = f'{m_cs_al.group(1)}.' if m_cs_al and m_cs_al.group(1).lower() not in SQL_RESERVED else ''
+                                                                ub = re.sub(r'(\bSELECT\s+(?:\n\s*)?)', rf'\1{pfx}"dealer_code",\n    ', ub, count=1, flags=re.I)
 
-                                                            # Mandatory: Standardize indicator_cancel to exclude cancellations ('X', 'Y', '1')
-                                                            ub = re.sub(
-                                                                r'([a-zA-Z0-9_."]*indicator_cancel"?\s+IS\s+NULL\s+OR\s+[a-zA-Z0-9_."]*indicator_cancel"?)\s*<>\s*\'X\'',
-                                                                lambda m: f"{m.group(1)} NOT IN ('X', 'Y', '1')",
-                                                                ub,
-                                                                flags=re.I
-                                                            )
-                                                            ub = re.sub(
-                                                                r'([a-zA-Z0-9_."]*indicator_cancel"?)\s*<>\s*\'X\'',
-                                                                lambda m: f"{m.group(1)} NOT IN ('X', 'Y', '1')",
-                                                                ub,
-                                                                flags=re.I
-                                                            )
-
-                                                            # Mandatory: Filter non-replacement & cancellation billing types to match official Datasphere Zsales_test model
-                                                            if "currentsales" in ub.lower():
+                                                            # Ensure NOT EXISTS de-duplication in CurrentSales branch
+                                                            if "currentsales" in ub.lower() and "not exists" not in ub.lower():
                                                                 m_cs_al = re.search(r'"?ZPVF_SD_CurrentSales_01_TR"?\s+(?:AS\s+)?([a-zA-Z0-9_]+)', ub, re.I)
                                                                 cs_al = m_cs_al.group(1) if m_cs_al and m_cs_al.group(1).lower() not in SQL_RESERVED else "cs"
-                                                                
-                                                                # Align Tyre_Quantity: ZROP in CurrentSales is a price credit memo without physical tyre movement
-                                                                if "zrop" not in ub.lower():
-                                                                    ub = re.sub(
-                                                                        rf'(?:{cs_al}\.)?"?Tyre_Quantity"?(\s*(?:AS\s+"?Tyre_Quantity"?)?)',
-                                                                        lambda m: f'CASE WHEN {cs_al}."FKART" = \'ZROP\' THEN 0 ELSE {cs_al}."Tyre_Quantity" END AS "Tyre_Quantity"',
-                                                                        ub,
-                                                                        count=1,
-                                                                        flags=re.I
-                                                                    )
-                                                                
-                                                                if "zbcl" not in ub.lower():
-                                                                    fk_filter = f"{cs_al}.\"FKART\" NOT IN ('ZBCL', 'ZGOV', 'ZCC', 'ZBHU')"
-                                                                    if re.search(r'\bWHERE\s+', ub, re.I):
-                                                                        ub = re.sub(r'(\bWHERE\s+)', lambda m: f"{m.group(1)}{fk_filter} AND ", ub, count=1, flags=re.I)
-                                                                    else:
-                                                                        ub += f' WHERE {fk_filter}'
-                                                                if "not exists" not in ub.lower():
-                                                                    ne_clause = f' NOT EXISTS (SELECT 1 FROM "SAP_S4"."ZPVF_SD_SalesHistory_01_TR" sh WHERE sh."invoice_number" = {cs_al}."invoice_number") '
-                                                                    if re.search(r'\bWHERE\s+', ub, re.I):
-                                                                        ub = re.sub(r'(\bWHERE\s+)', lambda m: f"{m.group(1)}{ne_clause} AND ", ub, count=1, flags=re.I)
-                                                                    elif re.search(r'\b(GROUP\s+BY|ORDER\s+BY|LIMIT)\b', ub, re.I):
-                                                                        ub = re.sub(r'(\b(GROUP\s+BY|ORDER\s+BY|LIMIT)\b)', lambda m: f"\nWHERE {ne_clause}\n{m.group(1)}", ub, count=1, flags=re.I)
-                                                                    else:
-                                                                        ub = ub.rstrip() + f'\nWHERE {ne_clause}'
+                                                                ne_clause = f' NOT EXISTS (SELECT 1 FROM "SAP_S4"."ZPVF_SD_SalesHistory_01_TR" sh WHERE sh."invoice_number" = {cs_al}."invoice_number") '
+                                                                if re.search(r'\bWHERE\s+', ub, re.I):
+                                                                    ub = re.sub(r'(\bWHERE\s+)', lambda m: f"{m.group(1)}{ne_clause} AND ", ub, count=1, flags=re.I)
+                                                                elif re.search(r'\b(GROUP\s+BY|ORDER\s+BY|LIMIT)\b', ub, re.I):
+                                                                    ub = re.sub(r'(\b(GROUP\s+BY|ORDER\s+BY|LIMIT)\b)', lambda m: f"\nWHERE {ne_clause}\n{m.group(1)}", ub, count=1, flags=re.I)
                                                                 else:
-                                                                    # Strictly enforce that NOT EXISTS matches only on invoice_number alone
-                                                                    ub = re.sub(
-                                                                        r'(\bNOT\s+EXISTS\s*\(\s*SELECT\s+.*?\bFROM\s+"?SAP_S4"?\.?"?ZPVF_SD_SalesHistory_01_TR"?\s+[a-zA-Z0-9_]+\s+WHERE\s+)(?:[^\)]+?)(\s*\))',
-                                                                        lambda m: f'{m.group(1)}sh."invoice_number" = {cs_al}."invoice_number"{m.group(2)}',
-                                                                        ub,
-                                                                        flags=re.I | re.DOTALL
-                                                                    )
-                                                            elif "saleshistory" in ub.lower():
-                                                                pass
+                                                                    ub = ub.rstrip() + f'\nWHERE {ne_clause}'
 
                                                             fixed_branches.append(ub)
                                                     sub_fixed = "".join(fixed_branches)
                                                     run_query = run_query[:open_idx] + sub_fixed + run_query[close_idx:]
-                                                    # recalculate end_alias_idx
                                                     diff_len = len(sub_fixed) - len(sub_text)
                                                     end_alias_idx += diff_len
 
-                                                    # B. Inject CustomerMaster EXISTS filter (NEVER INNER JOIN, to prevent fan-out duplicate rows!)
+                                                    # Inject CustomerMaster EXISTS filter on outer query (prevents fan-out duplicates & drops unmapped/scrap dealers)
                                                     if "ZIVF_CustomerMaster_01_MD" not in run_query:
                                                         cm_exists = f'\nWHERE EXISTS (SELECT 1 FROM "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm WHERE TRIM(LEADING \'0\' FROM cm."KUNNR") = TRIM(LEADING \'0\' FROM {f_alias}."dealer_code") AND cm."KLABC" <> \'X\')'
                                                         outer_p = run_query[end_alias_idx:]
@@ -3942,65 +3842,6 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                         run_query = _inject_into_single_branch(run_query, question)
 
                                 run_query = re.sub(r'\n{3,}', '\n\n', run_query).strip()
-
-                                # Mandatory fix: Clean up corrupted subqueries inside EXISTS/NOT EXISTS (e.g. SELECT "dealer_code", 1 -> SELECT 1)
-                                run_query = re.sub(r'(\bNOT\s+EXISTS\s*\(\s*SELECT\s+)[^Ff]+?(\bFROM\b)', r'\1 1 \2', run_query, flags=re.I)
-                                run_query = re.sub(r'(\bEXISTS\s*\(\s*SELECT\s+)[^Ff]+?(\bFROM\b)', r'\1 1 \2', run_query, flags=re.I)
-
-                                # Mandatory fix: De-duplication between CurrentSales and SalesHistory MUST strictly match on invoice_number alone
-                                run_query = re.sub(
-                                    r'(\bNOT\s+EXISTS\s*\(\s*SELECT\s+.*?\bFROM\s+"?SAP_S4"?\.?"?ZPVF_SD_SalesHistory_01_TR"?\s+[a-zA-Z0-9_]+\s+WHERE\s+)(?:[^\)]+?)(\s*\))',
-                                    r'\1sh."invoice_number" = cs."invoice_number"\2',
-                                    run_query,
-                                    flags=re.I | re.DOTALL
-                                )
-
-                                # Mandatory fix: Exclude unmapped/scrap customers (KLABC <> 'X') strictly. Strip any cm.KLABC <> 'X'
-                                run_query = re.sub(r'\([a-zA-Z0-9_."]*KLABC"?\s+IS\s+NULL\s+OR\s+([a-zA-Z0-9_."]*KLABC"?\s*<>\s*\'X\')\)', r'\1', run_query, flags=re.I)
-                                run_query = re.sub(r'[a-zA-Z0-9_."]*KLABC"?\s+IS\s+NULL\s+OR\s+', '', run_query, flags=re.I)
-
-                                # Mandatory fix: Exclude unmapped/scrap customers (KLABC <> 'X') strictly. Strip any cm.KLABC <> 'X'
-                                run_query = re.sub(r'\([a-zA-Z0-9_."]*KLABC"?\s+IS\s+NULL\s+OR\s+([a-zA-Z0-9_."]*KLABC"?\s*<>\s*\'X\')\)', r'\1', run_query, flags=re.I)
-                                run_query = re.sub(r'[a-zA-Z0-9_."]*KLABC"?\s+IS\s+NULL\s+OR\s+', '', run_query, flags=re.I)
-
-                                # Mandatory fix: Standardize indicator_cancel to strictly exclude cancellations ('X', 'Y', '1')
-                                run_query = re.sub(r'([a-zA-Z0-9_."]*indicator_cancel"?\s*<>\s*\'X\')', r'(\1 AND \g<1> NOT IN (\'X\', \'Y\', \'1\'))', run_query, flags=re.I)
-                                run_query = re.sub(r'([a-zA-Z0-9_."]*indicator_cancel"?\s+IS\s+NULL\s+OR\s+[a-zA-Z0-9_."]*indicator_cancel"?)\s*<>\s*\'X\'', r'\1 NOT IN (\'X\', \'Y\', \'1\')', run_query, flags=re.I)
-
-                                # Mandatory fix: Strip any CancelledSalesInvoice references to match exact verified model
-                                run_query = re.sub(r'\bAND\s+NOT\s+EXISTS\s*\(\s*SELECT\s+.*?\bFROM\s+"?SAP_S4"?\.?"?ZPVF_SD_CancelledSalesInvoice_01_TR"?.*?\)', '', run_query, flags=re.I | re.DOTALL)
-                                run_query = re.sub(r'\bWHERE\s+NOT\s+EXISTS\s*\(\s*SELECT\s+.*?\bFROM\s+"?SAP_S4"?\.?"?ZPVF_SD_CancelledSalesInvoice_01_TR"?.*?\)\s*(?:AND\s+)?', 'WHERE ', run_query, flags=re.I | re.DOTALL)
-
-                                # Mandatory fix: If Customer columns (NAME1, etc.) are NOT in outer SELECT list, convert INNER/LEFT JOIN CustomerMaster to WHERE EXISTS
-                                # to eliminate row multiplication (fan-out) across duplicate KUNNR sales areas in CustomerMaster
-                                m_sel = re.search(r'\bSELECT\s+(.+?)\bFROM\b', run_query, re.I | re.DOTALL)
-                                sel_str = m_sel.group(1).lower() if m_sel else ""
-                                if "cm." not in sel_str and "customer_name" not in sel_str and not re.search(r'\b(dealer_name|customer)\b', question, re.I):
-                                    if re.search(r'\b(?:INNER\s+|LEFT\s+)?JOIN\s+"?SAP_S4"?\.?"?ZIVF_CustomerMaster_01_MD"?', run_query, re.I):
-                                        run_query = re.sub(
-                                            r'\b(?:INNER\s+|LEFT\s+)?JOIN\s+"?SAP_S4"?\.?"?ZIVF_CustomerMaster_01_MD"?\s+[a-zA-Z0-9_]+\s+ON\s+.*?(?=\bWHERE\b|\bGROUP\b|\bORDER\b|\bLIMIT\b|$)',
-                                            '',
-                                            run_query,
-                                            flags=re.I | re.DOTALL
-                                        )
-                                        if re.search(r'\bWHERE\s+[a-zA-Z0-9_.]*\"?KLABC\"?\s*<>\s*\'X\'', run_query, re.I):
-                                            run_query = re.sub(
-                                                r'\bWHERE\s+[a-zA-Z0-9_.]*\"?KLABC\"?\s*<>\s*\'X\'',
-                                                'WHERE EXISTS (SELECT 1 FROM "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm WHERE TRIM(LEADING \'0\' FROM cm."KUNNR") = TRIM(LEADING \'0\' FROM fact."dealer_code") AND cm."KLABC" <> \'X\')',
-                                                run_query,
-                                                flags=re.I
-                                            )
-                                        elif re.search(r'\bWHERE\b', run_query, re.I):
-                                            run_query = re.sub(
-                                                r'\bWHERE\s+',
-                                                'WHERE EXISTS (SELECT 1 FROM "SAP_S4"."ZIVF_CustomerMaster_01_MD" cm WHERE TRIM(LEADING \'0\' FROM cm."KUNNR") = TRIM(LEADING \'0\' FROM fact."dealer_code") AND cm."KLABC" <> \'X\') AND ',
-                                                run_query,
-                                                count=1,
-                                                flags=re.I
-                                            )
-                                        else:
-                                            run_query += "\nWHERE EXISTS (SELECT 1 FROM \"SAP_S4\".\"ZIVF_CustomerMaster_01_MD\" cm WHERE TRIM(LEADING '0' FROM cm.\"KUNNR\") = TRIM(LEADING '0' FROM fact.\"dealer_code\") AND cm.\"KLABC\" <> 'X')"
-
                                 sql_query = run_query
 
                                 print(f"[SQL_EXEC] Executing on SAP HANA:\n{run_query}")
