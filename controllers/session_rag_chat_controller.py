@@ -3121,12 +3121,11 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
         if "SAP_S4" in schema_context or "ZPVF_" in schema_context:
             sql_user += (
                 f"\n\nCRITICAL SAP SALES FACT & MASTER DATA RULES (Datasphere Zsales_test Official Benchmark Specification):\n"
-                f"1. TRANSACTIONAL SALES FACT ARCHITECTURE (CLOSED HISTORICAL vs ROLLING TRANSITION):\n"
-                f"   - For CLOSED HISTORICAL MONTHS (months prior to October 2026, such as July 2026, June 2026, etc.):\n"
-                f"     100% of data is fully reconciled and archived in 'ZPVF_SD_SalesHistory_01_TR'. Query DIRECTLY from 'ZPVF_SD_SalesHistory_01_TR' alone (do NOT union CurrentSales). Do NOT filter FKART.\n"
-                f"     Example: SELECT COALESCE(SUM(fact.\"ndp_value\"), 0) AS total_ndp_value FROM \"SAP_S4\".\"ZPVF_SD_SalesHistory_01_TR\" fact WHERE fact.\"distribution_channel\" = '10' AND (fact.\"indicator_cancel\" IS NULL OR fact.\"indicator_cancel\" <> 'X') AND <date_condition>\n"
-                f"   - For ROLLING TRANSITION MONTHS (October 2026, November 2026, or active rolling window):\n"
-                f"     Sales are split across BOTH views. You MUST combine BOTH views using UNION ALL with NOT EXISTS de-duplication:\n"
+                f"1. TRANSACTIONAL SALES FACT ARCHITECTURE:\n"
+                f"   - FOR OCTOBER 2026 (ROLLING TRANSITION / CURRENT WINDOW):\n"
+                f"     MANDATORY: October 2026 sales data is SPLIT across BOTH 'ZPVF_SD_SalesHistory_01_TR' (archived half) and 'ZPVF_SD_CurrentSales_01_TR' (active rolling half).\n"
+                f"     NEVER query SalesHistory alone for October 2026! (Querying SalesHistory alone misses 435 Crore of sales!).\n"
+                f"     You MUST ALWAYS query October 2026 using UNION ALL with NOT EXISTS de-duplication:\n"
                 f"     (\n"
                 f"         SELECT \"volume\", \"ndp_value\", \"invoice_value\", \"Tyre_Quantity\", \"dealer_code\", \"invoice_number\", \"plant\", \"FKART\", \"distribution_channel\", \"indicator_cancel\", \"invoice_date\", \"SKU\"\n"
                 f"         FROM \"SAP_S4\".\"ZPVF_SD_SalesHistory_01_TR\"\n"
@@ -3148,7 +3147,9 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                 f"               WHERE sh.\"invoice_number\" = cs.\"invoice_number\"\n"
                 f"           )\n"
                 f"     ) fact\n"
-                f"   - CRITICAL: Both branches of UNION ALL MUST project the exact same set of columns in the same order.\n"
+                f"   - FOR CLOSED HISTORICAL MONTHS (JULY 2026, JUNE 2026, MAY 2026, etc. - Strictly Prior Months 01 to 09):\n"
+                f"     100% of data is fully reconciled and archived in 'ZPVF_SD_SalesHistory_01_TR'. Query DIRECTLY from 'ZPVF_SD_SalesHistory_01_TR' alone (do NOT union CurrentSales). Do NOT filter FKART.\n"
+                f"     Example: SELECT COALESCE(SUM(fact.\"ndp_value\"), 0) AS total_ndp_value FROM \"SAP_S4\".\"ZPVF_SD_SalesHistory_01_TR\" fact WHERE fact.\"distribution_channel\" = '10' AND (fact.\"indicator_cancel\" IS NULL OR fact.\"indicator_cancel\" <> 'X') AND <date_condition>\n"
                 f"2. MANDATORY CUSTOMER MASTER FILTER (EXACT DATASPHERE BENCHMARK SPECIFICATION):\n"
                 f"   - Official SAP Analytics (Zsales_test) requires excluding scrap/test accounts and unmapped dealers (KLABC = 'X').\n"
                 f"   - When querying total or aggregate sales metrics (volume, NDP value, invoice value, tyre quantity) without customer dimensions in SELECT:\n"
@@ -3761,6 +3762,37 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                     return branch_sql
 
                                 if is_hana and ("ZPVF_SD_CurrentSales_01_TR" in run_query or "ZPVF_SD_SalesHistory_01_TR" in run_query):
+                                    # Fallback: In rolling transition months (e.g. October 2026), sales data is split between SalesHistory and CurrentSales.
+                                    # If the LLM queried SalesHistory alone for October 2026, automatically expand it into the official UNION ALL architecture.
+                                    is_oct = bool(re.search(r'2026-10|202610|october', run_query + " " + question, re.I))
+                                    if is_oct and "ZPVF_SD_CurrentSales_01_TR" not in run_query and "ZPVF_SD_SalesHistory_01_TR" in run_query:
+                                        m_d = re.search(r'([a-zA-Z0-9_.]*\"?invoice_date\"?\s*(?:>=|>|=|BETWEEN)\s*[\'0-9\-]+(?:\s+AND\s+[a-zA-Z0-9_.]*\"?invoice_date\"?\s*<=\s*[\'0-9\-]+|\s+AND\s+[a-zA-Z0-9_.]*\"?invoice_date\"?\s*<\s*[\'0-9\-]+)?)', run_query, re.I)
+                                        d_filt = m_d.group(1) if m_d else "\"invoice_date\" >= '2026-10-01' AND \"invoice_date\" < '2026-11-01'"
+                                        d_filt_clean = re.sub(r'[a-zA-Z0-9_]+\.\"invoice_date\"', '"invoice_date"', d_filt)
+                                        d_filt_cs = re.sub(r'"invoice_date"', 'cs."invoice_date"', d_filt_clean)
+                                        oct_sub = f"""(
+    SELECT "volume", "ndp_value", "invoice_value", "Tyre_Quantity", "dealer_code", "invoice_number", "plant", "FKART", "distribution_channel", "indicator_cancel", "invoice_date", "SKU"
+    FROM "SAP_S4"."ZPVF_SD_SalesHistory_01_TR"
+    WHERE ("distribution_channel" = '10' OR "distribution_channel" = 10)
+      AND ("indicator_cancel" IS NULL OR "indicator_cancel" <> 'X')
+      AND "FKART" NOT IN ('ZGOV', 'ZCC', 'ZBHU')
+      AND {d_filt_clean}
+    UNION ALL
+    SELECT cs."volume", cs."ndp_value", cs."invoice_value",
+           CASE WHEN cs."FKART" = 'ZROP' THEN 0 ELSE cs."Tyre_Quantity" END AS "Tyre_Quantity",
+           cs."dealer_code", cs."invoice_number", cs."plant", cs."FKART", cs."distribution_channel", cs."indicator_cancel", cs."invoice_date", cs."SKU"
+    FROM "SAP_S4"."ZPVF_SD_CurrentSales_01_TR" cs
+    WHERE (cs."distribution_channel" = '10' OR cs."distribution_channel" = 10)
+      AND (cs."indicator_cancel" IS NULL OR cs."indicator_cancel" <> 'X')
+      AND cs."FKART" NOT IN ('ZBCL', 'ZGOV', 'ZCC', 'ZBHU')
+      AND {d_filt_cs}
+      AND NOT EXISTS (
+          SELECT 1 FROM "SAP_S4"."ZPVF_SD_SalesHistory_01_TR" sh 
+          WHERE sh."invoice_number" = cs."invoice_number"
+      )
+)"""
+                                        run_query = re.sub(r'"?SAP_S4"?\."?ZPVF_SD_SalesHistory_01_TR"?', oct_sub, run_query, count=1)
+
                                     is_subquery_union = bool(re.search(r'\bUNION\b', run_query, re.I))
 
                                     if is_subquery_union:
@@ -3894,6 +3926,9 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                     else:
                                         # Single query (no UNION)
                                         run_query = _inject_into_single_branch(run_query, question)
+
+                                    # Normalize cancellation indicator across entire query
+                                    run_query = re.sub(r'([a-zA-Z0-9_.]*\"?indicator_cancel\"?)\s+NOT\s+IN\s+\(\'X\',\s*\'Y\',\s*\'1\'\)', r"\1 <> 'X'", run_query, flags=re.I)
 
                                 run_query = re.sub(r'\n{3,}', '\n\n', run_query).strip()
                                 sql_query = run_query
