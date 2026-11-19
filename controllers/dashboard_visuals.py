@@ -12,6 +12,17 @@ from database.hana_metadata_service import HANA_DB_TYPES, TARGET_SCHEMA, get_han
 # DB / Cursor Helpers for Cross-DB Compatibility (MySQL & SAP HANA)
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _get_dict_cursor(conn):
+    try:
+        return conn.cursor(dictionary=True)
+    except TypeError:
+        try:
+            import pymysql.cursors
+            return conn.cursor(pymysql.cursors.DictCursor)
+        except Exception:
+            return conn.cursor()
+
+
 def get_sap_connection_for_session(mysql_conn, session_id, user_id=None):
     """
     Checks if session_id (or user_id) has SAP HANA credentials in database_credential
@@ -785,7 +796,7 @@ def tyre_sales_data_controller(get_db_connection):
         # Enforce user hierarchy access control
         if user_id and conn:
             try:
-                cur_uha = conn.cursor(dictionary=True) if hasattr(conn, "cursor") else conn.cursor()
+                cur_uha = _get_dict_cursor(conn)
                 cur_uha.execute("SELECT rank_id, zone_code, region_code FROM user_hierarchy_access WHERE user_id = %s LIMIT 1", (user_id,))
                 uha_row = cur_uha.fetchone()
                 cur_uha.close()
@@ -813,7 +824,7 @@ def tyre_sales_data_controller(get_db_connection):
 
         if not session_id:
             try:
-                cur_ws = conn.cursor(dictionary=True) if hasattr(conn, "cursor") else conn.cursor()
+                cur_ws = _get_dict_cursor(conn)
                 cur_ws.execute("SELECT session_id FROM workspaces WHERE session_id IS NOT NULL AND session_id != '' ORDER BY id ASC LIMIT 1")
                 ws_row = cur_ws.fetchone()
                 if ws_row and ws_row.get("session_id"):
@@ -1141,7 +1152,7 @@ def sales_by_zone_data_controller(get_db_connection):
 
         if not session_id:
             try:
-                cur_ws = conn.cursor(dictionary=True) if hasattr(conn, "cursor") else conn.cursor()
+                cur_ws = _get_dict_cursor(conn)
                 cur_ws.execute("SELECT session_id FROM workspaces WHERE session_id IS NOT NULL AND session_id != '' ORDER BY id ASC LIMIT 1")
                 ws_row = cur_ws.fetchone()
                 if ws_row and ws_row.get("session_id"):
@@ -1641,7 +1652,7 @@ def year_wise_sales_comparison_controller(get_db_connection):
 
         if not session_id:
             try:
-                cur_ws = conn.cursor(dictionary=True) if hasattr(conn, "cursor") else conn.cursor()
+                cur_ws = _get_dict_cursor(conn)
                 cur_ws.execute("SELECT session_id FROM workspaces WHERE session_id IS NOT NULL AND session_id != '' ORDER BY id ASC LIMIT 1")
                 ws_row = cur_ws.fetchone()
                 if ws_row and ws_row.get("session_id"):
@@ -2342,6 +2353,7 @@ def default_dashboard_metrics_controller(get_db_connection):
     end_date = data.get("end_date")
     zone_param = data.get("zone")
     region_param = data.get("region")
+    territory_param = data.get("territory")
 
     # Clean filter params
     if str(year_param).strip().upper() in ("ALL", "", "NONE", "NULL"):
@@ -2356,6 +2368,8 @@ def default_dashboard_metrics_controller(get_db_connection):
         zone_param = None
     if str(region_param).strip().upper() in ("ALL", "", "NONE", "NULL"):
         region_param = None
+    if str(territory_param).strip().upper() in ("ALL", "", "NONE", "NULL"):
+        territory_param = None
 
     cleaned_months = []
     if months_param:
@@ -2367,9 +2381,9 @@ def default_dashboard_metrics_controller(get_db_connection):
         cleaned_months = [int(month_param)]
     cleaned_months = sorted(list(set(cleaned_months)))
 
-    is_filtered = bool(year_param or cleaned_months or start_date or end_date or zone_param or region_param)
+    is_filtered = bool(year_param or cleaned_months or start_date or end_date or zone_param or region_param or territory_param)
     months_ctx = "-".join(str(m) for m in cleaned_months) if cleaned_months else "all"
-    geo_ctx = f"geo_{zone_param or 'all'}_{region_param or 'all'}"
+    geo_ctx = f"geo_{zone_param or 'all'}_{region_param or 'all'}_{territory_param or 'all'}"
     filter_context = f"{geo_ctx}_filter_{year_param or 'all'}_{months_ctx}_{start_date or 'none'}_{end_date or 'none'}" if is_filtered else "all"
 
     conn = None
@@ -2401,10 +2415,15 @@ def default_dashboard_metrics_controller(get_db_connection):
         if not conn:
             return jsonify({"error": "Failed to connect to database."}), 500
 
-        # Dynamically resolve user hierarchy boundary if zone/region not in payload
-        if (not zone_param or not region_param) and user_id:
+        # Dynamically resolve user hierarchy boundary if user_id is provided
+        user_rank_id = None
+        user_assigned_zone = None
+        user_assigned_region = None
+        user_assigned_territory = None
+
+        if user_id:
             try:
-                cur_h = conn.cursor(dictionary=True) if hasattr(conn, "cursor") else conn.cursor()
+                cur_h = _get_dict_cursor(conn)
                 cur_h.execute("""
                     SELECT zone_code, region_code, territory_code, rank_id
                     FROM user_hierarchy_access
@@ -2414,18 +2433,55 @@ def default_dashboard_metrics_controller(get_db_connection):
                 h_row = cur_h.fetchone()
                 cur_h.close()
                 if h_row:
+                    user_rank_id = int(h_row.get("rank_id") or 4)
                     z = h_row.get("zone_code") if isinstance(h_row, dict) else h_row[0]
                     r = h_row.get("region_code") if isinstance(h_row, dict) else h_row[1]
-                    if not zone_param and z and str(z).strip().upper() != "ALL":
-                        zone_param = str(z).strip()
-                    if not region_param and r and str(r).strip().upper() != "ALL":
-                        region_param = str(r).strip()
-                    if zone_param or region_param:
-                        is_filtered = True
-                        geo_ctx = f"geo_{zone_param or 'all'}_{region_param or 'all'}"
-                        filter_context = f"{geo_ctx}_{filter_context}"
+                    t = h_row.get("territory_code") if isinstance(h_row, dict) else h_row[2]
+                    if z and str(z).strip().upper() not in ("ALL", "NONE", "NULL", ""):
+                        user_assigned_zone = str(z).strip()
+                    if r and str(r).strip().upper() not in ("ALL", "NONE", "NULL", ""):
+                        user_assigned_region = str(r).strip()
+                    if t and str(t).strip().upper() not in ("ALL", "NONE", "NULL", ""):
+                        user_assigned_territory = str(t).strip()
+                    if not zone_param and user_assigned_zone:
+                        zone_param = user_assigned_zone
+                    if not region_param and user_assigned_region:
+                        region_param = user_assigned_region
+                    if not territory_param and user_assigned_territory:
+                        territory_param = user_assigned_territory
             except Exception:
                 pass
+
+        ZONE_CODE_MAP = {
+            "CENTRAL ZONE": "CZ", "CZ": "CZ",
+            "EAST ZONE": "EZ", "EZ": "EZ",
+            "NORTH ZONE": "NZ", "NZ": "NZ",
+            "SOUTH ZONE I": "SZ", "SZ": "SZ", "SOUTH ZONE": "SZ",
+            "SOUTH ZONE II": "TZ", "TZ": "TZ",
+            "WEST ZONE": "WZ", "WZ": "WZ"
+        }
+        ZONE_NAME_MAP = {
+            "CZ": "Central Zone", "CENTRAL ZONE": "Central Zone",
+            "EZ": "East Zone", "EAST ZONE": "East Zone",
+            "NZ": "North Zone", "NORTH ZONE": "North Zone",
+            "SZ": "South Zone I", "SOUTH ZONE I": "South Zone I", "SOUTH ZONE": "South Zone I",
+            "TZ": "South Zone II", "SOUTH ZONE II": "South Zone II",
+            "WZ": "West Zone", "WEST ZONE": "West Zone"
+        }
+
+        norm_zone_code = ZONE_CODE_MAP.get(zone_param.upper(), zone_param) if zone_param else None
+        norm_zone_name = ZONE_NAME_MAP.get(zone_param.upper(), ZONE_NAME_MAP.get(norm_zone_code, zone_param)) if zone_param else None
+
+        is_geo_restricted = bool(
+            (user_rank_id and user_rank_id > 1 and (user_assigned_zone or user_assigned_region or user_assigned_territory))
+            or (zone_param and str(zone_param).strip().upper() not in ("ALL", "NONE", "NULL", ""))
+            or (region_param and str(region_param).strip().upper() not in ("ALL", "NONE", "NULL", ""))
+            or (territory_param and str(territory_param).strip().upper() not in ("ALL", "NONE", "NULL", ""))
+        )
+        if is_geo_restricted:
+            is_filtered = True
+            geo_ctx = f"geo_{zone_param or 'all'}_{region_param or 'all'}_{territory_param or 'all'}"
+            filter_context = f"{geo_ctx}_filter_{year_param or 'all'}_{months_ctx}_{start_date or 'none'}_{end_date or 'none'}"
 
         from helper.dashboard_cache_service import (
             get_cached_component_data,
@@ -2438,7 +2494,7 @@ def default_dashboard_metrics_controller(get_db_connection):
 
         if not session_id:
             try:
-                cur_ws = conn.cursor(dictionary=True) if hasattr(conn, "cursor") else conn.cursor()
+                cur_ws = _get_dict_cursor(conn)
                 cur_ws.execute("SELECT session_id FROM workspaces WHERE session_id IS NOT NULL AND session_id != '' ORDER BY id ASC LIMIT 1")
                 ws_row = cur_ws.fetchone()
                 if ws_row and ws_row.get("session_id"):
@@ -2605,7 +2661,7 @@ def default_dashboard_metrics_controller(get_db_connection):
         reg_tbl = find_table(["zivfregionmaster", "regionmaster", "region"])
         zone_tbl = find_table(["zivfzonemaster", "zonemaster", "zone"])
         sku_tbl = find_table(["zivrskumaster", "skumaster", "materialmaster", "material", "sku"])
-        cat_tbl = find_table(["zivfcategorymaster", "categorymaster", "category"])
+        cat_tbl = find_table(["catgmaster", "catg_master", "catg", "zivfcategorymaster", "categorymaster", "category"])
         tyre_tbl = find_table(["tyretypemaster", "tyretype"])
         day_attr_tbl = find_table(["zitrdayattribute", "dayattribute", "day_attribute"])
         target_tbl = find_table(["zivfsdsalesplantarget", "salestarget", "sales_target", "target", "budget", "sales_plan"])
@@ -2761,6 +2817,61 @@ def default_dashboard_metrics_controller(get_db_connection):
 
         real_revenue_col = check_col(sales_cols, ["invoice_value", "ndp_value", "invoice_value_inr", "taxable_value", "taxable_value_inr", "ndp_inr"])
         has_revenue = bool(real_revenue_col)
+
+        # MySQL / single-table geo-filtering wrapper for sales_from
+        sales_cust_c = check_col(sales_cols, ["customer", "dealercode", "dealer_code", "kunnr"]) or "customer"
+        cust_pk = check_col(table_columns.get(cust_tbl, {}), ["kunnr", "customer", "dealercode"]) or "kunnr" if cust_tbl else None
+        cust_terr = check_col(table_columns.get(cust_tbl, {}), ["territory", "bzirk", "territory_code"]) if cust_tbl else None
+        t_code = check_col(table_columns.get(terr_tbl, {}), ["territory_code", "bzirk", "territory"]) or "territory_code" if terr_tbl else None
+        t_name = check_col(table_columns.get(terr_tbl, {}), ["territory_name", "name"]) if terr_tbl else None
+        terr_reg = check_col(table_columns.get(terr_tbl, {}), ["region_code", "regio", "region", "area"]) if terr_tbl else None
+        r_code = check_col(table_columns.get(reg_tbl, {}), ["region", "region_code", "regio"]) or "region" if reg_tbl else None
+        r_name = check_col(table_columns.get(reg_tbl, {}), ["region_name", "name"]) if reg_tbl else None
+        reg_zone = check_col(table_columns.get(reg_tbl, {}), ["zone", "zone_code", "p_zone"]) if reg_tbl else None
+        z_code = check_col(table_columns.get(zone_tbl, {}), ["zone_code", "p_zone", "zone"]) or "zone_code" if zone_tbl else None
+        z_name = check_col(table_columns.get(zone_tbl, {}), ["zone_name", "name"]) if zone_tbl else None
+
+        if not is_hana and is_geo_restricted and cust_tbl:
+            geo_joins = f" JOIN {q_tbl(cust_tbl)} cm_geo ON (s.{q_name(sales_cust_c)} = cm_geo.{q_name(cust_pk)})"
+            geo_wheres = []
+
+            if terr_tbl and cust_terr:
+                geo_joins += f" JOIN {q_tbl(terr_tbl)} tm_geo ON cm_geo.{q_name(cust_terr)} = tm_geo.{q_name(t_code)}"
+                if territory_param:
+                    if t_name:
+                        geo_wheres.append(f"(tm_geo.{q_name(t_code)} = '{territory_param}' OR UPPER(TRIM(tm_geo.{q_name(t_name)})) = UPPER(TRIM('{territory_param}')))")
+                    else:
+                        geo_wheres.append(f"tm_geo.{q_name(t_code)} = '{territory_param}'")
+
+                if reg_tbl and terr_reg:
+                    geo_joins += f" JOIN {q_tbl(reg_tbl)} rm_geo ON tm_geo.{q_name(terr_reg)} = rm_geo.{q_name(r_code)}"
+                    if region_param:
+                        if r_name:
+                            geo_wheres.append(f"(UPPER(TRIM(rm_geo.{q_name(r_name)})) = UPPER(TRIM('{region_param}')) OR CAST(rm_geo.{q_name(r_code)} AS CHAR) = '{region_param}')")
+                        else:
+                            geo_wheres.append(f"CAST(rm_geo.{q_name(r_code)} AS CHAR) = '{region_param}'")
+
+                    if zone_tbl and reg_zone:
+                        geo_joins += f" JOIN {q_tbl(zone_tbl)} zm_geo ON rm_geo.{q_name(reg_zone)} = zm_geo.{q_name(z_code)}"
+                        if zone_param:
+                            z_conds = [f"rm_geo.{q_name(reg_zone)} = '{norm_zone_code}'", f"rm_geo.{q_name(reg_zone)} = '{zone_param}'"]
+                            if z_name:
+                                z_conds.append(f"UPPER(TRIM(zm_geo.{q_name(z_name)})) = UPPER(TRIM('{norm_zone_name}'))")
+                                z_conds.append(f"UPPER(TRIM(zm_geo.{q_name(z_name)})) = UPPER(TRIM('{zone_param}'))")
+                            geo_wheres.append(f"({' OR '.join(z_conds)})")
+                    elif reg_zone and zone_param:
+                        geo_wheres.append(f"(rm_geo.{q_name(reg_zone)} = '{norm_zone_code}' OR rm_geo.{q_name(reg_zone)} = '{zone_param}')")
+
+            klabc_geo = check_col(table_columns.get(cust_tbl, {}), ["klabc"])
+            if klabc_geo:
+                geo_wheres.append(f"(cm_geo.{q_name(klabc_geo)} IS NULL OR cm_geo.{q_name(klabc_geo)} <> 'X')")
+
+            geo_where_str = ("WHERE " + " AND ".join(geo_wheres)) if geo_wheres else ""
+            sales_from = f"""(
+                SELECT s.* FROM {sales_from}
+                {geo_joins}
+                {geo_where_str}
+            ) s"""
 
         if has_revenue:
             if is_hana:
@@ -3004,9 +3115,9 @@ LIMIT 1""".replace('\"{cat_desc2_alias}\"', f'"{cat_desc2}"')
                 if sku_tbl and cat_tbl:
                     sales_mat = check_col(sales_cols, ["sku", "material", "matnr"])
                     sku_mat = check_col(table_columns[sku_tbl], ["matnr", "sku", "material"])
-                    sku_cat = check_col(table_columns[sku_tbl], ["cat_code", "catcode", "category_code", "category"])
-                    cat_code = check_col(table_columns[cat_tbl], ["cat_code", "catcode", "category_code"])
-                    cat_desc = check_col(table_columns[cat_tbl], ["cat_desc", "catdesc", "category_desc", "category_name", "cat_name"])
+                    sku_cat = check_col(table_columns[sku_tbl], ["cat_code", "catcode", "category_code", "category", "catg_code", "db_catg"])
+                    cat_code = check_col(table_columns[cat_tbl], ["cat_code", "catcode", "category_code", "catg_code"])
+                    cat_desc = check_col(table_columns[cat_tbl], ["cat_desc", "catdesc", "category_desc", "category_name", "cat_name", "catg_description", "catg_desc"])
 
                     if sales_mat and sku_mat and sku_cat and cat_code and cat_desc:
                         try:
@@ -3020,7 +3131,7 @@ LIMIT 1""".replace('\"{cat_desc2_alias}\"', f'"{cat_desc2}"')
                                     WHERE s.{q_name(sales_mat)} IS NOT NULL
                                     GROUP BY s.{q_name(sales_mat)}
                                 ) ms
-                                JOIN {q_tbl(sku_tbl)} sm ON (ms.mat_id = sm.{q_name(sku_mat)} OR LTRIM(ms.mat_id, '0') = LTRIM(sm.{q_name(sku_mat)}, '0'))
+                                JOIN {q_tbl(sku_tbl)} sm ON (ms.mat_id = sm.{q_name(sku_mat)}{" OR LTRIM(ms.mat_id, '0') = LTRIM(sm." + q_name(sku_mat) + ", '0')" if is_hana else ""})
                                 JOIN {q_tbl(cat_tbl)} cat ON sm.{q_name(sku_cat)} = cat.{q_name(cat_code)}
                                 WHERE cat.{q_name(cat_desc)} IS NOT NULL AND cat.{q_name(cat_desc)} <> ''
                                 GROUP BY cat.{q_name(cat_desc)}
@@ -3051,7 +3162,7 @@ LIMIT 1""".replace('\"{cat_desc2_alias}\"', f'"{cat_desc2}"')
                                     WHERE s.{q_name(sales_mat)} IS NOT NULL
                                     GROUP BY s.{q_name(sales_mat)}
                                 ) ms
-                                JOIN {q_tbl(cat_tbl)} cat ON (ms.mat_id = cat.{q_name(cat_mat)} OR LTRIM(ms.mat_id, '0') = LTRIM(cat.{q_name(cat_mat)}, '0'))
+                                JOIN {q_tbl(cat_tbl)} cat ON (ms.mat_id = cat.{q_name(cat_mat)}{" OR LTRIM(ms.mat_id, '0') = LTRIM(cat." + q_name(cat_mat) + ", '0')" if is_hana else ""})
                                 WHERE cat.{q_name(cat_desc)} IS NOT NULL AND cat.{q_name(cat_desc)} <> ''
                                 GROUP BY cat.{q_name(cat_desc)}
                                 ORDER BY revenue DESC
@@ -3081,7 +3192,7 @@ LIMIT 1""".replace('\"{cat_desc2_alias}\"', f'"{cat_desc2}"')
                                     WHERE s.{q_name(sales_mat)} IS NOT NULL
                                     GROUP BY s.{q_name(sales_mat)}
                                 ) ms
-                                JOIN {q_tbl(sku_tbl)} sm ON (ms.mat_id = sm.{q_name(sku_mat)} OR LTRIM(ms.mat_id, '0') = LTRIM(sm.{q_name(sku_mat)}, '0'))
+                                JOIN {q_tbl(sku_tbl)} sm ON (ms.mat_id = sm.{q_name(sku_mat)}{" OR LTRIM(ms.mat_id, '0') = LTRIM(sm." + q_name(sku_mat) + ", '0')" if is_hana else ""})
                                 WHERE sm.{q_name(sku_tyre)} IS NOT NULL AND sm.{q_name(sku_tyre)} NOT IN ('', '0', '-')
                                 GROUP BY sm.{q_name(sku_tyre)}
                                 ORDER BY revenue DESC
@@ -3201,6 +3312,7 @@ LIMIT 1"""
                         cust_reg = check_col(table_columns[cust_tbl], ["regio", "region_code", "region"])
                         r_code = check_col(table_columns[reg_tbl], ["region_code", "region", "regio"])
 
+                        r_join_cond = f"(t.{q_name(terr_reg)} = r.{q_name(r_code)} OR c.{q_name(cust_reg)} = r.{q_name(r_code)})" if cust_reg else f"t.{q_name(terr_reg)} = r.{q_name(r_code)}"
                         if sales_cust and cust_id and cust_terr and terr_code and terr_reg and r_code and r_name:
                             try:
                                 q_r3 = f"""
@@ -3213,9 +3325,9 @@ LIMIT 1"""
                                         WHERE s.{q_name(sales_cust)} IS NOT NULL
                                         GROUP BY s.{q_name(sales_cust)}
                                     ) ds
-                                    JOIN {q_tbl(cust_tbl)} c ON (ds.d_code = c.{q_name(cust_id)} OR LTRIM(ds.d_code, '0') = LTRIM(c.{q_name(cust_id)}, '0'))
+                                    JOIN {q_tbl(cust_tbl)} c ON (ds.d_code = c.{q_name(cust_id)}{" OR LTRIM(ds.d_code, '0') = LTRIM(c." + q_name(cust_id) + ", '0')" if is_hana else ""})
                                     LEFT JOIN {q_tbl(terr_tbl)} t ON c.{q_name(cust_terr)} = t.{q_name(terr_code)}
-                                    LEFT JOIN {q_tbl(reg_tbl)} r ON (t.{q_name(terr_reg)} = r.{q_name(r_code)} OR c.{q_name(cust_reg)} = r.{q_name(r_code)})
+                                    LEFT JOIN {q_tbl(reg_tbl)} r ON {r_join_cond}
                                     WHERE (c.{q_name('KLABC')} IS NULL OR c.{q_name('KLABC')} <> 'X')
                                       AND r.{q_name(r_name)} IS NOT NULL AND r.{q_name(r_name)} <> ''
                                     GROUP BY COALESCE(r.{q_name(r_name)}, r.{q_name(r_code)}, 'Unknown')
@@ -3249,7 +3361,7 @@ LIMIT 1"""
                                     WHERE s.{q_name(sales_cust)} IS NOT NULL
                                     GROUP BY s.{q_name(sales_cust)}
                                 ) ds
-                                JOIN {q_tbl(cust_tbl)} c ON (ds.d_code = c.{q_name(cust_id)} OR LTRIM(ds.d_code, '0') = LTRIM(c.{q_name(cust_id)}, '0'))
+                                JOIN {q_tbl(cust_tbl)} c ON (ds.d_code = c.{q_name(cust_id)}{" OR LTRIM(ds.d_code, '0') = LTRIM(c." + q_name(cust_id) + ", '0')" if is_hana else ""})
                                 JOIN {q_tbl(reg_tbl)} r ON c.{q_name(cust_reg)} = r.{q_name(r_code)}
                                 WHERE (c.{q_name('KLABC')} IS NULL OR c.{q_name('KLABC')} <> 'X')
                                   AND r.{q_name(r_name)} IS NOT NULL AND r.{q_name(r_name)} <> ''
@@ -3456,6 +3568,25 @@ ORDER BY yr DESC"""
             cust_tbl_h = find_table(["zivfcustomermaster", "customermaster", "customer"])
             canc_tbl_h = find_table(["zpvfsdcancelledsalesinvoice", "cancelledsalesinvoice", "cancelled"])
 
+            # Geo filters for SAP HANA Customer Master
+            cm_geo_join = ""
+            cm_geo_where = ""
+            geo_filters_cm = []
+            if zone_param:
+                geo_filters_cm.append(f"(zm.\"P_ZONE\" = '{norm_zone_code}' OR UPPER(TRIM(zm.\"NAME\")) = UPPER(TRIM('{zone_param}')))")
+            if region_param:
+                geo_filters_cm.append(f"(rm.\"REGION_CODE\" = '{region_param}' OR UPPER(TRIM(rm.\"REGION_NAME\")) = UPPER(TRIM('{region_param}')))")
+            if territory_param:
+                geo_filters_cm.append(f"(tm_bz.\"BZIRK\" = '{territory_param}' OR UPPER(TRIM(tm_bz.\"NAME\")) = UPPER(TRIM('{territory_param}')))")
+
+            if is_geo_restricted and geo_filters_cm:
+                cm_geo_join = f"""
+                LEFT JOIN "{user_db}"."ZIVF_TerritoryMaster_01_TR" tm_bz ON (cm."BZIRK" = tm_bz."BZIRK")
+                LEFT JOIN "{user_db}"."ZIVF_RegionMaster_MD_01" rm ON (rm."REGION_CODE" = COALESCE(NULLIF(TRIM(tm_bz."REGIO"), ''), NULLIF(TRIM(TO_VARCHAR(cm."REGIO")), '')))
+                LEFT JOIN "{user_db}"."ZIVF_ZoneMaster_01_TR" zm ON (zm."P_ZONE" = COALESCE(NULLIF(TRIM(tm_bz."P_ZONE"), ''), NULLIF(TRIM(rm."ZONE_CODE"), '')))
+                """
+                cm_geo_where = f" AND {' AND '.join(geo_filters_cm)}"
+
             # 5. Billing Scope (Distinct customers billed with valid distribution channel 10)
             try:
                 q_bscope_h = f"""
@@ -3483,6 +3614,16 @@ ORDER BY yr DESC"""
                   AND NOT EXISTS (
                       SELECT 1 FROM {q_tbl(cust_tbl_h)} cm
                       WHERE cm."KUNNR" = s."dealer_code" AND UPPER(TRIM(cm."KLABC")) = 'X'
+                  )"""
+                if is_geo_restricted and geo_filters_cm and cust_tbl_h:
+                    q_bscope_h += f"""
+                  AND EXISTS (
+                      SELECT 1 FROM {q_tbl(cust_tbl_h)} cm
+                      LEFT JOIN "{user_db}"."ZIVF_TerritoryMaster_01_TR" tm_bz ON (cm."BZIRK" = tm_bz."BZIRK")
+                      LEFT JOIN "{user_db}"."ZIVF_RegionMaster_MD_01" rm ON (rm."REGION_CODE" = COALESCE(NULLIF(TRIM(tm_bz."REGIO"), ''), NULLIF(TRIM(TO_VARCHAR(cm."REGIO")), '')))
+                      LEFT JOIN "{user_db}"."ZIVF_ZoneMaster_01_TR" zm ON (zm."P_ZONE" = COALESCE(NULLIF(TRIM(tm_bz."P_ZONE"), ''), NULLIF(TRIM(rm."ZONE_CODE"), '')))
+                      WHERE cm."KUNNR" = s."dealer_code"
+                        AND {' AND '.join(geo_filters_cm)}
                   )"""
                 execute_query(cursor, q_bscope_h, is_hana=True)
                 b_row = fetchone_dict(cursor)
@@ -3524,7 +3665,9 @@ ORDER BY yr DESC"""
                             THEN cm."KUNNR" END
                         ) AS attrition_count
                     FROM {q_tbl(cust_tbl_h)} cm
+                    {cm_geo_join}
                     WHERE COALESCE(cm."KLABC", '') <> 'X'
+                    {cm_geo_where}
                     """
                     execute_query(cursor, q_cm_kpis, is_hana=True)
                     cm_row = fetchone_dict(cursor)
@@ -3640,7 +3783,7 @@ ORDER BY yr DESC"""
                                 WHERE s.{q_name(real_cust_col_sales)} IS NOT NULL
                             ) s
                             JOIN {q_tbl(cust_tbl)} c 
-                              ON (s.d_code = c.{q_name(cust_id_col)} OR LTRIM(s.d_code, '0') = LTRIM(CAST(c.{q_name(cust_id_col)} AS NVARCHAR(20)), '0'))
+                              ON (s.d_code = c.{q_name(cust_id_col)}{" OR LTRIM(s.d_code, '0') = LTRIM(CAST(c." + q_name(cust_id_col) + " AS NVARCHAR(20)), '0')" if is_hana else ""})
                             WHERE 1=1 {klabc_filter} {dealer_filter}
                         """
                         execute_query(cursor, q_ds, is_hana=is_hana)
@@ -3732,6 +3875,50 @@ ORDER BY yr DESC"""
             if attrition == "N/A":
                 attrition = "0"
 
+            # Dynamic non-HANA fallback for New Dealer & Attrition from sales_data
+            if new_dealer_val in ("N/A", "0") and real_date_col and real_cust_col_sales:
+                try:
+                    q_nd_dyn = f"""
+                        SELECT COUNT(DISTINCT first_billed.cust) AS nd_count
+                        FROM (
+                            SELECT s.{q_name(real_cust_col_sales)} AS cust, MIN(YEAR(s.{q_name(real_date_col)})) AS first_yr
+                            FROM {sales_from}
+                            GROUP BY s.{q_name(real_cust_col_sales)}
+                            HAVING first_yr = {int(current_year_num) if current_year_num else 2026}
+                        ) first_billed
+                    """
+                    execute_query(cursor, q_nd_dyn, is_hana=is_hana)
+                    row_nd = fetchone_dict(cursor)
+                    if row_nd and row_nd.get("nd_count") is not None and int(row_nd["nd_count"]) > 0:
+                        new_dealer_val = str(row_nd["nd_count"])
+                        new_dealer_subtext = f"Onboarded in {current_year_num or '2026'}"
+                except Exception:
+                    pass
+
+            if attrition in ("N/A", "0") and real_date_col and real_cust_col_sales:
+                try:
+                    q_att_dyn = f"""
+                        SELECT COUNT(DISTINCT d_prev.cust) AS att_cnt
+                        FROM (
+                            SELECT DISTINCT s.{q_name(real_cust_col_sales)} AS cust
+                            FROM {sales_from}
+                            WHERE YEAR(s.{q_name(real_date_col)}) = {int(current_year_num) - 1 if current_year_num else 2025}
+                        ) d_prev
+                        LEFT JOIN (
+                            SELECT DISTINCT s.{q_name(real_cust_col_sales)} AS cust
+                            FROM {sales_from}
+                            WHERE YEAR(s.{q_name(real_date_col)}) = {int(current_year_num) if current_year_num else 2026}
+                        ) d_curr ON d_prev.cust = d_curr.cust
+                        WHERE d_curr.cust IS NULL
+                    """
+                    execute_query(cursor, q_att_dyn, is_hana=is_hana)
+                    row_att = fetchone_dict(cursor)
+                    if row_att and row_att.get("att_cnt") is not None and int(row_att["att_cnt"]) > 0:
+                        attrition = str(row_att["att_cnt"])
+                        att_subtext = f"Inactive since {current_year_num or '2026'}"
+                except Exception:
+                    pass
+
 
         # 11. Sales Target and Achievement
         sales_target_val = "N/A"
@@ -3745,9 +3932,9 @@ ORDER BY yr DESC"""
                 if target_col:
                     t_val = 0.0
                     ref_sales = 0.0
-                    target_filter = ""
+                    target_conds = []
                     if ymonth_col and current_year > 0 and current_year_num:
-                        target_filter = f"WHERE CAST({q_name(ymonth_col)} AS NVARCHAR(20)) LIKE '{current_year_num}%'"
+                        target_conds.append(f"LEFT(CAST({q_name(ymonth_col)} AS NVARCHAR(20)), 4) = '{current_year_num}'" if is_hana else f"LEFT(CAST(st.{q_name(ymonth_col)} AS CHAR(20)), 4) = '{current_year_num}'")
                         ref_sales = current_year
                         target_subtext = f"{current_year_num} Target"
                         ach_subtext = f"{current_year_num} Achievement"
@@ -3756,14 +3943,51 @@ ORDER BY yr DESC"""
                         target_subtext = "Lifetime Target"
                         ach_subtext = "Lifetime Achievement"
 
+                    target_joins = ""
+                    if is_geo_restricted and terr_tbl:
+                        t_col_terr = check_col(table_columns[target_tbl], ["terr_code", "territory_code", "bzirk"])
+                        if t_col_terr:
+                            t_code_tgt = check_col(table_columns[terr_tbl], ["territory_code", "bzirk", "territory"]) or "territory_code"
+                            t_name_tgt = check_col(table_columns[terr_tbl], ["territory_name", "name"])
+                            target_joins += f" JOIN {q_tbl(terr_tbl)} tm_tgt ON st.{q_name(t_col_terr)} = tm_tgt.{q_name(t_code_tgt)}"
+                            if territory_param:
+                                if t_name_tgt:
+                                    target_conds.append(f"(tm_tgt.{q_name(t_code_tgt)} = '{territory_param}' OR UPPER(TRIM(tm_tgt.{q_name(t_name_tgt)})) = UPPER(TRIM('{territory_param}')))")
+                                else:
+                                    target_conds.append(f"tm_tgt.{q_name(t_code_tgt)} = '{territory_param}'")
+                            terr_reg_tgt = check_col(table_columns[terr_tbl], ["region_code", "regio", "region", "area"])
+                            if reg_tbl and terr_reg_tgt:
+                                r_code_tgt = check_col(table_columns[reg_tbl], ["region", "region_code", "regio"]) or "region"
+                                r_name_tgt = check_col(table_columns[reg_tbl], ["region_name", "name"])
+                                target_joins += f" JOIN {q_tbl(reg_tbl)} rm_tgt ON tm_tgt.{q_name(terr_reg_tgt)} = rm_tgt.{q_name(r_code_tgt)}"
+                                if region_param:
+                                    if r_name_tgt:
+                                        target_conds.append(f"(UPPER(TRIM(rm_tgt.{q_name(r_name_tgt)})) = UPPER(TRIM('{region_param}')) OR CAST(rm_tgt.{q_name(r_code_tgt)} AS CHAR) = '{region_param}')")
+                                    else:
+                                        target_conds.append(f"CAST(rm_tgt.{q_name(r_code_tgt)} AS CHAR) = '{region_param}'")
+                                reg_zone_tgt = check_col(table_columns[reg_tbl], ["zone", "zone_code", "p_zone"])
+                                if zone_tbl and reg_zone_tgt:
+                                    z_code_tgt = check_col(table_columns[zone_tbl], ["zone_code", "p_zone", "zone"]) or "zone_code"
+                                    z_name_tgt = check_col(table_columns[zone_tbl], ["zone_name", "name"])
+                                    target_joins += f" JOIN {q_tbl(zone_tbl)} zm_tgt ON rm_tgt.{q_name(reg_zone_tgt)} = zm_tgt.{q_name(z_code_tgt)}"
+                                    if zone_param:
+                                        z_conds_t = [f"rm_tgt.{q_name(reg_zone_tgt)} = '{norm_zone_code}'", f"rm_tgt.{q_name(reg_zone_tgt)} = '{zone_param}'"]
+                                        if z_name_tgt:
+                                            z_conds_t.append(f"UPPER(TRIM(zm_tgt.{q_name(z_name_tgt)})) = UPPER(TRIM('{norm_zone_name}'))")
+                                            z_conds_t.append(f"UPPER(TRIM(zm_tgt.{q_name(z_name_tgt)})) = UPPER(TRIM('{zone_param}'))")
+                                        target_conds.append(f"({' OR '.join(z_conds_t)})")
+                                elif reg_zone_tgt and zone_param:
+                                    target_conds.append(f"(rm_tgt.{q_name(reg_zone_tgt)} = '{norm_zone_code}' OR rm_tgt.{q_name(reg_zone_tgt)} = '{zone_param}')")
+
+                    target_filter = ("WHERE " + " AND ".join(target_conds)) if target_conds else ""
                     if is_hana:
-                        execute_query(cursor, f"SELECT SUM(COALESCE({q_name(target_col)}, 0)) AS total_target FROM {q_tbl(target_tbl)} {target_filter}", is_hana=is_hana)
+                        execute_query(cursor, f"SELECT SUM(COALESCE(st.{q_name(target_col)}, 0)) AS total_target FROM {q_tbl(target_tbl)} st {target_joins} {target_filter}", is_hana=is_hana)
                     else:
-                        execute_query(cursor, f"SELECT SUM(CAST(REPLACE(TRIM({q_name(target_col)}), ',', '') AS DECIMAL(18,2))) AS total_target FROM {q_tbl(target_tbl)} {target_filter}", is_hana=is_hana)
+                        execute_query(cursor, f"SELECT SUM(CAST(REPLACE(TRIM(st.{q_name(target_col)}), ',', '') AS DECIMAL(18,2))) AS total_target FROM {q_tbl(target_tbl)} st {target_joins} {target_filter}", is_hana=is_hana)
                     t_row = fetchone_dict(cursor)
                     if t_row and t_row.get("total_target") is not None and float(t_row["total_target"]) > 0:
                         t_val = float(t_row["total_target"])
-                    elif target_filter:
+                    elif target_filter and not is_geo_restricted:
                         # Fallback to total target if year filter yielded zero
                         if is_hana:
                             execute_query(cursor, f"SELECT SUM(COALESCE({q_name(target_col)}, 0)) AS total_target FROM {q_tbl(target_tbl)}", is_hana=is_hana)
@@ -3792,14 +4016,13 @@ ORDER BY yr DESC"""
                                 ach = (ref_sales / t_val) * 100
                                 achievement_val = f"{ach:.2f}%"
             except Exception as e:
-                # print(f"[Default Metrics] Sales target query failed: {e}")
-                pass
+                print(f"[Default Metrics] Sales target query failed: {e}", flush=True)
 
         # 12. New Dealer (Onboarded in current operational year, e.g. 2026)
-        new_dealer_val = "N/A"
         target_yr_str = str(current_year_num) if current_year_num else str(datetime.now().year)
-        new_dealer_subtext = f"Onboarded in {target_yr_str}"
-        if cust_tbl:
+        if new_dealer_val == "N/A":
+            new_dealer_subtext = f"Onboarded in {target_yr_str}"
+        if cust_tbl and new_dealer_val in ("N/A", "0"):
             erdat_col = check_col(table_columns[cust_tbl], ["erdat", "created_date", "fs_bill_dt", "first_bill_date"])
             klabc_col = check_col(table_columns[cust_tbl], ["klabc"])
             klabc_filter = f"AND ({q_name(klabc_col)} IS NULL OR {q_name(klabc_col)} <> 'X')" if klabc_col else ""
@@ -3829,36 +4052,29 @@ ORDER BY yr DESC"""
                     row = fetchone_dict(cursor)
                     if row and row.get("nd_count") is not None and int(row["nd_count"]) > 0:
                         new_dealer_val = str(row["nd_count"])
-                    else:
-                        # Fallback to previous year if current year has 0
-                        prev_yr_str = str(int(target_yr_str) - 1)
-                        q_nd_prev = f"""
-                            SELECT COUNT(*) AS nd_count 
-                            FROM {q_tbl(cust_tbl)} 
-                            WHERE {q_name(erdat_col)} IS NOT NULL 
-                              AND (
-                                  CAST({q_name(erdat_col)} AS NVARCHAR(20)) LIKE '{prev_yr_str}%'
-                                  OR LEFT(CAST({q_name(erdat_col)} AS NVARCHAR(20)), 4) = '{prev_yr_str}'
-                              )
-                              {klabc_filter}
-                        """ if is_hana else f"""
-                            SELECT COUNT(*) AS nd_count 
-                            FROM {q_tbl(cust_tbl)} 
-                            WHERE {q_name(erdat_col)} IS NOT NULL 
-                              AND (
-                                  CAST({q_name(erdat_col)} AS CHAR(20)) LIKE '{prev_yr_str}%'
-                                  OR LEFT(CAST({q_name(erdat_col)} AS CHAR(20)), 4) = '{prev_yr_str}'
-                              )
-                              {klabc_filter}
-                        """
-                        execute_query(cursor, q_nd_prev, is_hana=is_hana)
-                        row_p = fetchone_dict(cursor)
-                        if row_p and row_p.get("nd_count") is not None and int(row_p["nd_count"]) > 0:
-                            new_dealer_val = str(row_p["nd_count"])
-                            new_dealer_subtext = f"Onboarded in {prev_yr_str}"
                 except Exception as e:
                     # print(f"[Default Metrics] New dealer query failed: {e}")
                     pass
+
+        # Dynamic fallback for New Dealer from sales_from if still N/A or 0
+        if new_dealer_val in ("N/A", "0") and real_date_col and real_cust_col_sales:
+            try:
+                q_nd_dyn = f"""
+                    SELECT COUNT(DISTINCT first_billed.cust) AS nd_count
+                    FROM (
+                        SELECT s.{q_name(real_cust_col_sales)} AS cust, MIN(YEAR(s.{q_name(real_date_col)})) AS first_yr
+                        FROM {sales_from}
+                        GROUP BY s.{q_name(real_cust_col_sales)}
+                        HAVING first_yr = {int(target_yr_str)}
+                    ) first_billed
+                """
+                execute_query(cursor, q_nd_dyn, is_hana=is_hana)
+                row_nd = fetchone_dict(cursor)
+                if row_nd and row_nd.get("nd_count") is not None and int(row_nd["nd_count"]) > 0:
+                    new_dealer_val = str(row_nd["nd_count"])
+                    new_dealer_subtext = f"Onboarded in {target_yr_str}"
+            except Exception:
+                pass
 
         # Format total revenue
         # Total Sales Revenue
@@ -3896,6 +4112,117 @@ ORDER BY yr DESC"""
             formatted_actual = formatted_revenue
             actual_subtext = "Lifetime Actual"
 
+        # Determine KPI #3 (Position / Leading Region)
+        kpi3_label = "Leading Region"
+        kpi3_val = str(leading_region)
+        kpi3_subtext = "Most profitable region"
+
+        if is_geo_restricted:
+            if region_param:
+                # Region restricted: show region's position within their zone
+                reg_rank = None
+                zone_display = norm_zone_name or norm_zone_code or "Central Zone"
+                try:
+                    if not norm_zone_code and reg_tbl:
+                        r_code_c = check_col(table_columns.get(reg_tbl, {}), ["region", "region_code", "regio"]) or "region"
+                        r_name_c = check_col(table_columns.get(reg_tbl, {}), ["region_name", "name"]) or "region_name"
+                        reg_zone_c = check_col(table_columns.get(reg_tbl, {}), ["zone", "zone_code"])
+                        if reg_zone_c:
+                            execute_query(cursor, f"SELECT {q_name(reg_zone_c)} AS z FROM {q_tbl(reg_tbl)} WHERE UPPER(TRIM({q_name(r_name_c)})) = UPPER(TRIM('{region_param}')) OR CAST({q_name(r_code_c)} AS CHAR) = '{region_param}' LIMIT 1", is_hana=is_hana)
+                            zr = fetchone_dict(cursor)
+                            if zr and zr.get("z"):
+                                norm_zone_code = ZONE_CODE_MAP.get(str(zr["z"]).strip().upper(), str(zr["z"]).strip())
+                                zone_display = ZONE_NAME_MAP.get(norm_zone_code.upper(), norm_zone_code)
+
+                    z_cond = f"WHERE rm_rnk.{q_name(reg_zone or 'zone')} = '{norm_zone_code}'" if norm_zone_code and reg_zone else ""
+                    if zone_tbl and norm_zone_name and z_name and reg_zone:
+                        z_cond = f"WHERE (rm_rnk.{q_name(reg_zone)} = '{norm_zone_code}' OR UPPER(TRIM(zm_rnk.{q_name(z_name)})) = UPPER(TRIM('{norm_zone_name}')))"
+
+                    rank_q = f"""
+                        SELECT rm_rnk.{q_name(r_name or 'region_name')} AS reg_name, SUM({join_revenue_expr.replace('s.', 's_rnk.')}) AS rev
+                        FROM {q_tbl(primary_sales_tbl)} s_rnk
+                        JOIN {q_tbl(cust_tbl)} cm_rnk ON (s_rnk.{q_name(sales_cust_c)} = cm_rnk.{q_name(cust_pk)})
+                        JOIN {q_tbl(terr_tbl)} tm_rnk ON cm_rnk.{q_name(cust_terr)} = tm_rnk.{q_name(t_code)}
+                        JOIN {q_tbl(reg_tbl)} rm_rnk ON tm_rnk.{q_name(terr_reg)} = rm_rnk.{q_name(r_code)}
+                        LEFT JOIN {q_tbl(zone_tbl)} zm_rnk ON rm_rnk.{q_name(reg_zone or 'zone')} = zm_rnk.{q_name(z_code or 'zone_code')}
+                        {z_cond}
+                        GROUP BY rm_rnk.{q_name(r_name or 'region_name')}
+                        ORDER BY rev DESC
+                    """
+                    execute_query(cursor, rank_q, is_hana=is_hana)
+                    rank_rows = fetchall_dict(cursor)
+                    if rank_rows:
+                        for idx, r_row in enumerate(rank_rows):
+                            r_nm = str(r_row.get("reg_name") or "").strip().upper()
+                            if r_nm == region_param.strip().upper():
+                                reg_rank = idx + 1
+                                break
+                except Exception:
+                    pass
+
+                kpi3_label = "Region Position"
+                kpi3_val = f"#{reg_rank}" if reg_rank else "#1"
+                kpi3_subtext = f"Position in {zone_display}"
+            elif zone_param:
+                # Zone restricted: show zone's position among all zones
+                zone_rank = None
+                try:
+                    rank_z_q = f"""
+                        SELECT zm_rnk.{q_name(z_code or 'zone_code')} AS z_code, zm_rnk.{q_name(z_name or 'zone_name')} AS z_name, SUM({join_revenue_expr.replace('s.', 's_rnk.')}) AS rev
+                        FROM {q_tbl(primary_sales_tbl)} s_rnk
+                        JOIN {q_tbl(cust_tbl)} cm_rnk ON (s_rnk.{q_name(sales_cust_c)} = cm_rnk.{q_name(cust_pk)})
+                        JOIN {q_tbl(terr_tbl)} tm_rnk ON cm_rnk.{q_name(cust_terr)} = tm_rnk.{q_name(t_code)}
+                        JOIN {q_tbl(reg_tbl)} rm_rnk ON tm_rnk.{q_name(terr_reg)} = rm_rnk.{q_name(r_code)}
+                        JOIN {q_tbl(zone_tbl)} zm_rnk ON rm_rnk.{q_name(reg_zone or 'zone')} = zm_rnk.{q_name(z_code or 'zone_code')}
+                        GROUP BY zm_rnk.{q_name(z_code or 'zone_code')}, zm_rnk.{q_name(z_name or 'zone_name')}
+                        ORDER BY rev DESC
+                    """
+                    execute_query(cursor, rank_z_q, is_hana=is_hana)
+                    z_rows = fetchall_dict(cursor)
+                    if z_rows:
+                        for idx, z_row in enumerate(z_rows):
+                            zc_m = str(z_row.get("z_code") or "").strip().upper()
+                            zn_m = str(z_row.get("z_name") or "").strip().upper()
+                            if (norm_zone_code and zc_m == norm_zone_code.upper()) or (norm_zone_name and zn_m == norm_zone_name.upper()) or (zone_param and (zc_m == zone_param.upper() or zn_m == zone_param.upper())):
+                                zone_rank = idx + 1
+                                break
+                except Exception:
+                    pass
+
+                kpi3_label = "Zone Position"
+                kpi3_val = f"#{zone_rank}" if zone_rank else "#1"
+                kpi3_subtext = "Position among all Zones"
+            elif territory_param:
+                # Territory restricted: show territory position in region
+                terr_rank = None
+                reg_disp = region_param or "Region"
+                try:
+                    rank_t_q = f"""
+                        SELECT tm_rnk.{q_name(t_code or 'territory_code')} AS t_code, tm_rnk.{q_name(t_name or 'territory_name')} AS t_name, SUM({join_revenue_expr.replace('s.', 's_rnk.')}) AS rev
+                        FROM {q_tbl(primary_sales_tbl)} s_rnk
+                        JOIN {q_tbl(cust_tbl)} cm_rnk ON (s_rnk.{q_name(sales_cust_c)} = cm_rnk.{q_name(cust_pk)})
+                        JOIN {q_tbl(terr_tbl)} tm_rnk ON cm_rnk.{q_name(cust_terr)} = tm_rnk.{q_name(t_code)}
+                        JOIN {q_tbl(reg_tbl)} rm_rnk ON tm_rnk.{q_name(terr_reg)} = rm_rnk.{q_name(r_code)}
+                        WHERE (rm_rnk.{q_name(r_name or 'region_name')} = '{region_param}' OR CAST(rm_rnk.{q_name(r_code or 'region')} AS CHAR) = '{region_param}')
+                        GROUP BY tm_rnk.{q_name(t_code or 'territory_code')}, tm_rnk.{q_name(t_name or 'territory_name')}
+                        ORDER BY rev DESC
+                    """
+                    execute_query(cursor, rank_t_q, is_hana=is_hana)
+                    t_rows = fetchall_dict(cursor)
+                    if t_rows:
+                        for idx, t_row in enumerate(t_rows):
+                            tc_m = str(t_row.get("t_code") or "").strip().upper()
+                            tn_m = str(t_row.get("t_name") or "").strip().upper()
+                            if tc_m == territory_param.strip().upper() or tn_m == territory_param.strip().upper():
+                                terr_rank = idx + 1
+                                break
+                except Exception:
+                    pass
+
+                kpi3_label = "Territory Position"
+                kpi3_val = f"#{terr_rank}" if terr_rank else "#1"
+                kpi3_subtext = f"Position in {reg_disp}"
+
         metrics_data = {
             "metric_1": {
                 "label": "Total Sales Revenue", 
@@ -3908,9 +4235,9 @@ ORDER BY yr DESC"""
                 "subtext": "Highest revenue generator"
             },
             "metric_3": {
-                "label": "Leading Region", 
-                "value": str(leading_region), 
-                "subtext": "Most profitable region"
+                "label": kpi3_label, 
+                "value": str(kpi3_val), 
+                "subtext": kpi3_subtext
             },
             "metric_4": {
                 "label": "Year-over-Year Growth", 
