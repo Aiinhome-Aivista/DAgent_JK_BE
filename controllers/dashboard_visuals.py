@@ -1298,16 +1298,16 @@ def sales_by_zone_data_controller(get_db_connection):
 
                 # Sales source selection
                 if valid_years and all(y <= 2025 for y in valid_years):
-                    sales_src_sql = f"""SELECT "INVOICE_NUMBER", "PLANT", "FKART", "DEALER_CODE", "SKU", "INVOICE_DATE",
-                                   "DISTRIBUTION_CHANNEL", "INDICATOR_CANCEL", "INVOICE_VALUE", "TYRE_QUANTITY"
+                    sales_src_sql = f"""SELECT "invoice_number", "plant", "FKART", "dealer_code", "SKU", "invoice_date",
+                                   "distribution_channel", "indicator_cancel", "ndp_value", "invoice_value", "Tyre_Quantity"
                             FROM "{schema}"."{hist_tbl}" """
                 else:
-                    sales_src_sql = f"""SELECT "INVOICE_NUMBER", "PLANT", "FKART", "DEALER_CODE", "SKU", "INVOICE_DATE",
-                                   "DISTRIBUTION_CHANNEL", "INDICATOR_CANCEL", "INVOICE_VALUE", "TYRE_QUANTITY"
+                    sales_src_sql = f"""SELECT "invoice_number", "plant", "FKART", "dealer_code", "SKU", "invoice_date",
+                                   "distribution_channel", "indicator_cancel", "ndp_value", "invoice_value", "Tyre_Quantity"
                             FROM "{schema}"."{hist_tbl}"
                             UNION ALL
-                            SELECT "INVOICE_NUMBER", "PLANT", "FKART", "DEALER_CODE", "SKU", "INVOICE_DATE",
-                                   "DISTRIBUTION_CHANNEL", "INDICATOR_CANCEL", "INVOICE_VALUE", "TYRE_QUANTITY"
+                            SELECT "invoice_number", "plant", "FKART", "dealer_code", "SKU", "invoice_date",
+                                   "distribution_channel", "indicator_cancel", "ndp_value", "invoice_value", "Tyre_Quantity"
                             FROM "{schema}"."{curr_tbl}" """
 
                 where_combined = " AND ".join(filter_conds)
@@ -1331,6 +1331,7 @@ ZONE_MAP AS (
         "P_ZONE",
         "NAME"
     FROM "{schema}"."{zone_tbl}"
+    WHERE "NAME" IS NOT NULL AND TRIM("NAME") <> '' AND UPPER(TRIM("NAME")) NOT LIKE '%UNKNOWN%'
 ),
 SALES_SOURCE AS (
     {sales_src_sql}
@@ -1338,14 +1339,14 @@ SALES_SOURCE AS (
 SALES_AGGREGATED AS (
     SELECT
         TM."P_ZONE",
-        SUM(IFNULL(S."INVOICE_VALUE", 0)) AS "TOTAL_SALES",
-        SUM(IFNULL(S."TYRE_QUANTITY", 0)) AS "TOTAL_QUANTITY",
+        SUM(COALESCE(S."ndp_value", S."invoice_value", 0)) AS "TOTAL_SALES",
+        SUM(IFNULL(S."Tyre_Quantity", 0)) AS "TOTAL_QUANTITY",
         COUNT(*) AS "TOTAL_RECORDS",
         COUNT(DISTINCT S."invoice_number") AS "TOTAL_INVOICES",
         COUNT(DISTINCT S."dealer_code") AS "TOTAL_DEALERS"
     FROM SALES_SOURCE S
     INNER JOIN CUSTOMER_MAP CM
-        ON LPAD(TRIM(S."dealer_code"), 10, '0') = CM."KUNNR"
+        ON (LPAD(TRIM(S."dealer_code"), 10, '0') = CM."KUNNR" OR LTRIM(S."dealer_code", '0') = LTRIM(CM."KUNNR", '0'))
     INNER JOIN TERRITORY_MAP TM
         ON CM."BZIRK" = TM."BZIRK"
     WHERE
