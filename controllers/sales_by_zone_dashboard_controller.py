@@ -665,33 +665,17 @@ def bulk_sync_sales_by_zone_permutations(mysql_conn, session_id: str, user_id=No
                     ) AS CONSTRUCTION_TYPE,
                     COALESCE(NULLIF(TRIM(cat."CAT_CODE"), ''), NULLIF(TRIM(sku."TYRE_TYPE"), ''), 'UNKNOWN') AS TYRE_TYPE,
                     COALESCE(NULLIF(TRIM(cat."CAT_DESC"), ''), 'UNKNOWN') AS TYRE_DESC,
-                    ROUND(SUM(COALESCE(s."invoice_value", s."ndp_value", s."taxable_value", 0)), 2) AS TOTAL_SALES,
+                    ROUND(SUM(COALESCE(s."ndp_value", 0)), 2) AS TOTAL_SALES,
                     ROUND(SUM(COALESCE(s."Tyre_Quantity", 0)), 2) AS TOTAL_QUANTITY
                 FROM "{schema}"."{table_name}" s
                 INNER JOIN "{schema}"."ZIVF_CustomerMaster_01_MD" cm 
-                    ON (s."dealer_code" = cm."KUNNR" OR LPAD(TRIM(s."dealer_code"), 10, '0') = cm."KUNNR" OR LTRIM(s."dealer_code", '0') = LTRIM(cm."KUNNR", '0'))
-                LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm_plant 
-                    ON (s."plant" = tm_plant."WERKS" OR cm."VWERK" = tm_plant."WERKS")
-                LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm_bzirk 
-                    ON (cm."BZIRK" = tm_bzirk."BZIRK")
+                    ON LTRIM(s."dealer_code", '0') = LTRIM(cm."KUNNR", '0')
+                LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm 
+                    ON TRIM(cm."BZIRK") = TRIM(tm."BZIRK")
                 LEFT JOIN "{schema}"."ZIVF_RegionMaster_MD_01" rm 
-                    ON (rm."region_code" = COALESCE(NULLIF(TRIM(tm_plant."REGIO"), ''), NULLIF(TRIM(tm_bzirk."REGIO"), ''), NULLIF(TRIM(TO_VARCHAR(cm."REGIO")), '')))
+                    ON TRIM(tm."REGIO") = TRIM(rm."region_code")
                 INNER JOIN "{schema}"."ZIVF_ZoneMaster_01_TR" zm 
-                    ON (zm."P_ZONE" = COALESCE(
-                        NULLIF(TRIM(tm_plant."P_ZONE"), ''),
-                        NULLIF(TRIM(tm_bzirk."P_ZONE"), ''),
-                        NULLIF(TRIM(rm."zone_code"), ''),
-                        CASE 
-                            WHEN SUBSTRING(TO_VARCHAR(s."plant"), 1, 2) IN ('36', '71', '72') THEN 'CZ'
-                            WHEN SUBSTRING(TO_VARCHAR(s."plant"), 1, 1) = '3' THEN 'NZ'
-                            WHEN SUBSTRING(TO_VARCHAR(s."plant"), 1, 1) = '1' THEN 'EZ'
-                            WHEN SUBSTRING(TO_VARCHAR(s."plant"), 1, 1) = '8' THEN 'NP'
-                            WHEN SUBSTRING(TO_VARCHAR(s."plant"), 1, 2) IN ('51', '52') THEN 'TZ'
-                            WHEN SUBSTRING(TO_VARCHAR(s."plant"), 1, 1) = '5' THEN 'SZ'
-                            WHEN SUBSTRING(TO_VARCHAR(s."plant"), 1, 1) = '7' THEN 'WZ'
-                            ELSE NULL
-                        END
-                    ))
+                    ON zm."P_ZONE" = COALESCE(NULLIF(TRIM(rm."zone_code"), ''), NULLIF(TRIM(tm."P_ZONE"), ''))
                 LEFT JOIN "{schema}"."ZIVR_SKUMaster_01_TR" sku 
                     ON (TRIM(s."SKU") = TRIM(sku."MATNR"))
                 LEFT JOIN "{schema}"."ZIVF_CategoryMaster_01_TR" cat 
@@ -700,7 +684,7 @@ def bulk_sync_sales_by_zone_permutations(mysql_conn, session_id: str, user_id=No
                   AND ("indicator_cancel" IS NULL OR "indicator_cancel" NOT IN ('X', 'Y', '1'))
                   AND IFNULL(cm."KLABC", '') <> 'X'
                   AND s."invoice_date" IS NOT NULL
-                  AND zm."P_ZONE" IS NOT NULL AND TRIM(zm."P_ZONE") <> ''
+                  AND zm."NAME" IS NOT NULL AND TRIM(zm."NAME") <> '' AND UPPER(TRIM(zm."NAME")) NOT LIKE '%UNKNOWN%'
                   {extra_filter}
                 GROUP BY 
                     zm."P_ZONE",
@@ -723,11 +707,11 @@ def bulk_sync_sales_by_zone_permutations(mysql_conn, session_id: str, user_id=No
                     COALESCE(NULLIF(TRIM(cat."CAT_DESC"), ''), 'UNKNOWN')
             """
 
-            # 1. CurrentSales (2026 active)
+            # 1. CurrentSales (Active rolling period >= 2026-10-18)
             sql_curr = base_query_template.format(
                 schema=sap_schema,
                 table_name="ZPVF_SD_CurrentSales_01_TR",
-                extra_filter="AND s.\"invoice_date\" >= '2024-01-01'"
+                extra_filter="AND s.\"invoice_date\" >= '2026-10-18'"
             )
             try:
                 cursor.execute(sql_curr)
@@ -735,11 +719,11 @@ def bulk_sync_sales_by_zone_permutations(mysql_conn, session_id: str, user_id=No
             except Exception as e:
                 print(f"[Bulk Sync Sales by Zone] CurrentSales query warning: {e}", flush=True)
 
-            # 2. SalesHistory (2024 - 2025)
+            # 2. SalesHistory (Closed historical invoices < 2026-10-18)
             sql_hist = base_query_template.format(
                 schema=sap_schema,
                 table_name="ZPVF_SD_SalesHistory_01_TR",
-                extra_filter="AND s.\"invoice_date\" >= '2024-01-01'"
+                extra_filter="AND s.\"invoice_date\" >= '2024-01-01' AND s.\"invoice_date\" < '2026-10-18'"
             )
             try:
                 cursor.execute(sql_hist)
