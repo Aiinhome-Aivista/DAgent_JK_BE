@@ -895,7 +895,7 @@ def tyre_sales_data_controller(get_db_connection):
 
         required_metrics = {
             "vehicle_type": ["cat_desc", "category_name", "category", "tyre_type_description", "tyre_type_desc", "tyre_type_name", "vehicle_type", "tyre_type", "maktx"],
-            "invoice_value": ["invoice_value", "ndp_value", "taxable_value", "revenue", "Invoice_Value_INR"]
+            "invoice_value": ["ndp_value", "ndp", "ndp_inr", "invoice_value", "taxable_value"]
         }
         optional_dims = {}
         if has_valid_filters(selected_years):
@@ -1703,7 +1703,7 @@ def year_wise_sales_comparison_controller(get_db_connection):
             return any(f and str(f).strip().lower() != "all" for f in filters)
 
         required_metrics = {
-            "invoice_value": ["invoice_value", "ndp_value", "Invoice_Value", "taxable_value", "Invoice_Value_INR"],
+            "invoice_value": ["ndp_value", "ndp", "ndp_inr", "invoice_value", "taxable_value"],
             "invoice_date": ["invoice_date", "date", "billing__doc_date", "fkdat"]
         }
         optional_dims = {}
@@ -2817,7 +2817,7 @@ def default_dashboard_metrics_controller(get_db_connection):
             sales_cols = table_columns.get(found_tbl, {})
             primary_sales_tbl = found_tbl
 
-        real_revenue_col = check_col(sales_cols, ["invoice_value", "ndp_value", "invoice_value_inr", "taxable_value", "taxable_value_inr", "ndp_inr"])
+        real_revenue_col = check_col(sales_cols, ["ndp_value", "ndp", "ndp_inr", "invoice_value", "taxable_value"])
         has_revenue = bool(real_revenue_col)
 
         # MySQL / single-table geo-filtering wrapper for sales_from
@@ -2946,8 +2946,8 @@ def default_dashboard_metrics_controller(get_db_connection):
                     # Resolve exact column names from the view metadata
                     curr_c = table_columns.get(curr_sales_tbl, {})
                     hist_c = table_columns.get(hist_sales_tbl, {})
-                    _c_rev  = check_col(curr_c, ["ndp_value", "ndp", "ndp_inr"]) or "NDP_VALUE"
-                    _h_rev  = check_col(hist_c, ["ndp_value", "ndp", "ndp_inr"]) or "NDP_VALUE"
+                    _c_rev  = "ndp_value"
+                    _h_rev  = "ndp_value"
                     _c_date = check_col(curr_c, ["invoice_date", "date", "fkdat"]) or "invoice_date"
                     _h_date = check_col(hist_c, ["invoice_date", "date", "fkdat"]) or "invoice_date"
                     _c_cust = check_col(curr_c, ["dealer_code", "dealercode", "customer", "kunnr"]) or "dealer_code"
@@ -3063,8 +3063,8 @@ def default_dashboard_metrics_controller(get_db_connection):
                 try:
                     curr_c2 = table_columns.get(curr_sales_tbl, {})
                     hist_c2 = table_columns.get(hist_sales_tbl, {})
-                    _h_rev2  = check_col(hist_c2,  ["invoice_value", "ndp_value", "invoice_value_inr", "taxable_value"]) or "invoice_value"
-                    _c_rev2  = check_col(curr_c2,  ["invoice_value", "ndp_value", "invoice_value_inr", "taxable_value"]) or "invoice_value"
+                    _h_rev2  = "ndp_value"
+                    _c_rev2  = "ndp_value"
                     _h_date2 = check_col(hist_c2,  ["invoice_date", "date", "fkdat"]) or "invoice_date"
                     _c_date2 = check_col(curr_c2,  ["invoice_date", "date", "fkdat"]) or "invoice_date"
                     _h_cust2 = check_col(hist_c2,  ["dealer_code", "dealercode", "customer", "kunnr"]) or "dealer_code"
@@ -3253,8 +3253,8 @@ LIMIT 1""".replace('\"{cat_desc2_alias}\"', f'"{cat_desc2}"')
                 try:
                     curr_c3 = table_columns.get(curr_sales_tbl, {})
                     hist_c3 = table_columns.get(hist_sales_tbl, {})
-                    _h_rev3  = check_col(hist_c3,  ["invoice_value", "ndp_value", "invoice_value_inr", "taxable_value"]) or "invoice_value"
-                    _c_rev3  = check_col(curr_c3,  ["invoice_value", "ndp_value", "invoice_value_inr", "taxable_value"]) or "invoice_value"
+                    _h_rev3  = "ndp_value"
+                    _c_rev3  = "ndp_value"
                     _h_date3 = check_col(hist_c3,  ["invoice_date", "date", "fkdat"]) or "invoice_date"
                     _c_date3 = check_col(curr_c3,  ["invoice_date", "date", "fkdat"]) or "invoice_date"
                     _h_cust3 = check_col(hist_c3,  ["dealer_code", "dealercode", "customer", "kunnr"]) or "dealer_code"
@@ -3459,8 +3459,8 @@ LIMIT 1"""
                 try:
                     curr_c4 = table_columns.get(curr_sales_tbl, {})
                     hist_c4 = table_columns.get(hist_sales_tbl, {})
-                    _h_rev4  = check_col(hist_c4,  ["invoice_value", "ndp_value", "invoice_value_inr", "taxable_value"]) or "invoice_value"
-                    _c_rev4  = check_col(curr_c4,  ["invoice_value", "ndp_value", "invoice_value_inr", "taxable_value"]) or "invoice_value"
+                    _h_rev4  = "ndp_value"
+                    _c_rev4  = "ndp_value"
                     _h_date4 = check_col(hist_c4,  ["invoice_date", "date", "fkdat"]) or "invoice_date"
                     _c_date4 = check_col(curr_c4,  ["invoice_date", "date", "fkdat"]) or "invoice_date"
                     _h_cust4 = check_col(hist_c4,  ["dealer_code", "dealercode", "customer", "kunnr"]) or "dealer_code"
@@ -3486,12 +3486,14 @@ WITH base AS (
            "{_h_dc4}" AS "distribution_channel", "{_h_canc4}" AS "indicator_cancel",
            "{_h_rev4}" AS "invoice_value"
     FROM {q_tbl(hist_sales_tbl)}
+    WHERE "{_h_date4}" < '2026-10-18'
     UNION ALL
     SELECT "{_c_inv4}" AS "invoice_number", "{_c_plt4}" AS "plant", "{_c_fk4}" AS "FKART",
            "{_c_cust4}" AS "dealer_code", "{_c_date4}" AS "invoice_date",
            "{_c_dc4}" AS "distribution_channel", "{_c_canc4}" AS "indicator_cancel",
            "{_c_rev4}" AS "invoice_value"
     FROM {q_tbl(curr_sales_tbl)}
+    WHERE "{_c_date4}" >= '2026-10-18'
 )
 SELECT YEAR(t."invoice_date") AS yr,
        ROUND(SUM(COALESCE(t."invoice_value", 0)) / 10000000, 2) AS revenue
@@ -3613,19 +3615,22 @@ ORDER BY yr DESC"""
             cm_geo_join = hana_geo_join_cm
             cm_geo_where = hana_geo_where_cm
 
-            # 5. Billing Scope (Distinct customers billed with valid distribution channel 10)
+            # 5. Billing Scope (Distinct customers billed in operational year e.g. 2026 with valid distribution channel 10)
             try:
                 q_bscope_h = f"""
                 SELECT COUNT(DISTINCT s."dealer_code") AS cust_count
                 FROM (
-                    SELECT "dealer_code", "distribution_channel", "indicator_cancel", "invoice_number", "plant", "FKART"
+                    SELECT "dealer_code", "distribution_channel", "indicator_cancel", "invoice_number", "plant", "FKART", "invoice_date"
                     FROM {q_tbl(hist_sales_tbl)}
+                    WHERE "invoice_date" < '2026-10-18'
                     UNION ALL
-                    SELECT "dealer_code", "distribution_channel", "indicator_cancel", "invoice_number", "plant", "FKART"
+                    SELECT "dealer_code", "distribution_channel", "indicator_cancel", "invoice_number", "plant", "FKART", "invoice_date"
                     FROM {q_tbl(curr_sales_tbl)}
+                    WHERE "invoice_date" >= '2026-10-18'
                 ) s
                 WHERE CAST(s."distribution_channel" AS NVARCHAR(10)) = '10'
                   AND COALESCE(s."indicator_cancel", '') NOT IN ('X', 'Y', '1')
+                  AND s."invoice_date" >= '{target_yr_str}-01-01'
                 """
                 if canc_tbl_h:
                     q_bscope_h += f"""
@@ -3647,7 +3652,6 @@ ORDER BY yr DESC"""
                 b_row = fetchone_dict(cursor)
                 if b_row and b_row.get("cust_count") is not None:
                     billing_scope = str(b_row["cust_count"])
-                    # print(f"[Default Metrics] HANA Billing Scope: {billing_scope}")
             except Exception as b_err:
                 print(f"[Default Metrics] HANA Billing Scope failed: {b_err}", flush=True)
                 pass
@@ -3658,7 +3662,8 @@ ORDER BY yr DESC"""
                     q_cm_kpis = f"""
                     SELECT 
                         COUNT(DISTINCT CASE 
-                            WHEN (UPPER(TRIM(cm."CH_TYPE")) = 'DL' OR cm."KTOKD" IN ('0001', 'Z001') OR COALESCE(cm."DLR_CNT", 0) > 0 OR UPPER(TRIM(cm."ACTIVE_CM")) = 'Y')
+                            WHEN (UPPER(TRIM(cm."CH_TYPE")) = 'DL' OR cm."KTOKD" IN ('0001', 'Z001') OR COALESCE(cm."DLR_CNT", 0) > 0)
+                              AND UPPER(TRIM(cm."ACTIVE_CM")) = 'Y'
                             THEN cm."KUNNR" END
                         ) AS active_dealers,
                         
@@ -3690,7 +3695,7 @@ ORDER BY yr DESC"""
                     execute_query(cursor, q_cm_kpis, is_hana=True)
                     cm_row = fetchone_dict(cursor)
                     if cm_row:
-                        # Dealer Spread
+                        # Dealer Spread (Active authorized dealers)
                         act_dlrs = int(cm_row.get("active_dealers") or 0)
                         if act_dlrs > 0:
                             dealer_spread = str(act_dlrs)
@@ -3729,19 +3734,20 @@ ORDER BY yr DESC"""
                         else:
                             sas_variance_val = "0.0%"
 
-                        # Rotation
-                        tot_st = float(cm_row.get("tot_sale_tot") or 0)
-                        if od_val > 0 and tot_st > 0:
-                            rot = round(tot_st / od_val, 1)
+                        # Rotation (Receivables Turnover Ratio = Annual Sales / Receivables)
+                        ref_sales_amt = (current_year * 10000000) if current_year > 0 else float(cm_row.get("tot_sale_tot") or 0)
+                        sas_rec_amt = float(cm_row.get("tot_sas_in") or 0)
+                        if ref_sales_amt > 0 and sas_rec_amt > 0:
+                            rot = round(ref_sales_amt / sas_rec_amt, 1)
                             rotation_val = f"{rot:.1f}x"
                             rot_subtext = "Receivables turnover"
-                        elif current_year > 0 and od_val > 0:
-                            rot = round((current_year * 10000000) / od_val, 1)
+                        elif od_val > 1000000 and ref_sales_amt > 0:
+                            rot = round(ref_sales_amt / od_val, 1)
                             rotation_val = f"{rot:.1f}x"
-                            rot_subtext = "Receivables turnover"
+                            rot_subtext = "Overdue turnover"
                         else:
-                            rotation_val = "0.0x"
-                            rot_subtext = "Receivables turnover"
+                            rotation_val = "N/A"
+                            rot_subtext = "Turnover ratio"
 
                         # New Dealer
                         nd_cnt = int(cm_row.get("new_dealers_curr") or 0)
@@ -3754,12 +3760,40 @@ ORDER BY yr DESC"""
                         att_cnt = int(cm_row.get("attrition_count") or 0)
                         if att_cnt > 0:
                             attrition = str(att_cnt)
-                            att_subtext = f"Inactive since Sep {target_yr_str}"
+                            att_subtext = f"Inactive since {target_yr_str}"
                         else:
-                            attrition = "0"
-                            att_subtext = f"Inactive since Sep {target_yr_str}"
-
-                        # print(f"[Default Metrics] HANA KPIs: Dealers={dealer_spread}, Overdue={overdue_val}, Exposure={exposure_val}, New={new_dealer_val}, Attrition={attrition}")
+                            # Dynamic Attrition: Billed in previous year (e.g. 2025) but zero bills in current year (2026)
+                            try:
+                                prev_yr_num = int(target_yr_str) - 1
+                                q_att_h = f"""
+                                SELECT COUNT(DISTINCT d_prev."dealer_code") AS att_cnt
+                                FROM (
+                                    SELECT DISTINCT "dealer_code"
+                                    FROM {q_tbl(hist_sales_tbl)}
+                                    WHERE YEAR("invoice_date") = {prev_yr_num}
+                                      AND CAST("distribution_channel" AS NVARCHAR(10)) = '10'
+                                      AND COALESCE("indicator_cancel", '') NOT IN ('X', 'Y', '1')
+                                ) d_prev
+                                WHERE d_prev."dealer_code" NOT IN (
+                                    SELECT DISTINCT "dealer_code"
+                                    FROM (
+                                        SELECT "dealer_code" FROM {q_tbl(hist_sales_tbl)} WHERE YEAR("invoice_date") = {int(target_yr_str)} AND CAST("distribution_channel" AS NVARCHAR(10)) = '10' AND COALESCE("indicator_cancel", '') NOT IN ('X', 'Y', '1')
+                                        UNION
+                                        SELECT "dealer_code" FROM {q_tbl(curr_sales_tbl)} WHERE YEAR("invoice_date") = {int(target_yr_str)} AND CAST("distribution_channel" AS NVARCHAR(10)) = '10' AND COALESCE("indicator_cancel", '') NOT IN ('X', 'Y', '1')
+                                    )
+                                )
+                                """
+                                execute_query(cursor, q_att_h, is_hana=True)
+                                att_row = fetchone_dict(cursor)
+                                if att_row and att_row.get("att_cnt") is not None:
+                                    attrition = str(att_row["att_cnt"])
+                                    att_subtext = f"Inactive in {target_yr_str}"
+                                else:
+                                    attrition = "0"
+                                    att_subtext = f"Inactive in {target_yr_str}"
+                            except Exception as att_e:
+                                attrition = "0"
+                                att_subtext = f"Inactive in {target_yr_str}"
                 except Exception as cm_err:
                     print(f"[Default Metrics] HANA CustomerMaster KPIs query failed: {cm_err}", flush=True)
                     pass
@@ -4320,7 +4354,7 @@ ORDER BY yr DESC"""
             "metric_7": {"label": "Sales Actual", "value": formatted_actual, "subtext": actual_subtext},
             "metric_8": {"label": "SAS IN", "value": sas_in_val, "subtext": "SAS IN value"},
             "metric_9": {"label": "SAS Variance", "value": sas_variance_val, "subtext": "Variance"},
-            "metric_10": {"label": "Billing Scope", "value": billing_scope, "subtext": "Customers billed"},
+            "metric_10": {"label": "Billing Scope", "value": billing_scope, "subtext": f"Billed in {target_yr_str}" if target_yr_str else "Customers billed"},
             "metric_11": {"label": "Dealer Spread", "value": dealer_spread, "subtext": "Active dealers"},
             "metric_12": {"label": "Overdue", "value": overdue_val, "subtext": "Outstanding balance"},
             "metric_13": {"label": "Exposure", "value": exposure_val, "subtext": "Credit exposure"},
