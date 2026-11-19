@@ -3197,7 +3197,8 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                 "     FROM DUMMY;\n"
                 "   - For grouped comparisons (by Zone, Region, Territory), ALWAYS use FULL OUTER JOIN with target_plans as primary:\n"
                 "     FROM target_plans t FULL OUTER JOIN actual_sales a ON t.zone_name = a.zone_name\n"
-                "     and in SELECT and WHERE, use COALESCE(t.zone_name, a.zone_name, 'Unknown')! NEVER use actual_sales LEFT JOIN target_plans!\n"
+                "     and in SELECT and WHERE, use COALESCE(t.zone_name, a.zone_name)! NEVER use actual_sales LEFT JOIN target_plans!\n"
+                "     CRITICAL: DO NOT return 'Unknown' or 'UNK' zones! Always filter: zm.NAME IS NOT NULL AND UPPER(TRIM(zm.NAME)) NOT LIKE '%UNKNOWN%'. Only report official corporate zones (NORTH, WEST, CENTRAL, EAST, SOUTH, SOUTH - II, NEPAL).\n"
                 "3. TARGET VIEW 'ZIVF_SD_Sales_Plan_Target_01_TR' RULES:\n"
                 "   - Target view ALREADY has 'YMONTH' directly on the view! NEVER join 'ZITR_DayAttribute_01_TR' to the target view (Cartesian blow-up)!\n"
                 "   - In YMONTH filter: CAST(tgt.YMONTH AS VARCHAR) = '202607'.\n"
@@ -3208,8 +3209,8 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                 "     * In ZIVF_ZoneMaster_01_TR, zm.NAME is 'NORTH', 'WEST', 'SOUTH', 'EAST', 'CENTRAL' (WITHOUT 'Zone'!) and zm.P_ZONE is 'NZ', 'WZ', 'SZ', 'EZ', 'CZ'.\n"
                 "     * Filter: (UPPER(TRIM(zm.NAME)) = 'NORTH' OR tm.P_ZONE = 'NZ').\n"
                 "     * Group CTEs ONLY by zm.NAME AS zone_name (or tm.P_ZONE). NEVER group by region when answering a Zone question!\n"
-                "     * In actual_sales: JOIN CustomerMaster cm, TerritoryMaster tm ON cm.BZIRK = tm.BZIRK, ZoneMaster zm ON tm.P_ZONE = zm.P_ZONE.\n"
-                "     * In target_plans: JOIN TerritoryMaster tm ON tgt.TERR_CODE = tm.BZIRK, ZoneMaster zm ON tm.P_ZONE = zm.P_ZONE.\n"
+                "     * In actual_sales: JOIN CustomerMaster cm, TerritoryMaster tm ON cm.BZIRK = tm.BZIRK, ZoneMaster zm ON tm.P_ZONE = zm.P_ZONE WHERE zm.NAME IS NOT NULL AND UPPER(TRIM(zm.NAME)) NOT LIKE '%UNKNOWN%'.\n"
+                "     * In target_plans: JOIN TerritoryMaster tm ON tgt.TERR_CODE = tm.BZIRK, ZoneMaster zm ON tm.P_ZONE = zm.P_ZONE WHERE zm.NAME IS NOT NULL AND UPPER(TRIM(zm.NAME)) NOT LIKE '%UNKNOWN%'.\n"
                 "     * Outer Query: FROM target_plans t FULL OUTER JOIN actual_sales a ON t.zone_name = a.zone_name.\n"
                 "   - REGION (e.g. Jaipur Region):\n"
                 "     * In target_plans: JOIN TerritoryMaster tm ON tgt.TERR_CODE = tm.BZIRK, JOIN RegionMaster rm ON tm.REGIO = rm.\"region_code\". Filter: UPPER(TRIM(rm.\"region_name\")) LIKE '%JAIPUR%'.\n"
@@ -4086,6 +4087,16 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                                         print(f"[SQL_EXEC] Rescued 0-target column '{tk}' with true plan value: {r[tk]}")
                                                 except Exception as _tr_err:
                                                     print(f"[SQL_EXEC] 0-target rescue error: {_tr_err}")
+
+                            # Filter out 'Unknown' / 'UNK' records from zone queries to match official corporate zones
+                            if sql_results and any('zone' in k.lower() for k in sql_results[0].keys()):
+                                non_unk = [
+                                    r for r in sql_results 
+                                    if str(r.get('ZONE_NAME') or r.get('zone_name') or '').strip().upper() not in ('UNKNOWN', 'UNK', 'NONE', '')
+                                    and str(r.get('zone_code') or r.get('ZONE_CODE') or '').strip().upper() not in ('UNK', 'UNKNOWN', 'NONE', '')
+                                ]
+                                if non_unk:
+                                    sql_results = non_unk
 
                             agg_sql_error = None
                             print(f"[SQL_EXEC] Success! Returned {len(sql_results)} rows.")
