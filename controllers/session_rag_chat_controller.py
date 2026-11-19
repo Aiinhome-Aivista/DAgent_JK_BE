@@ -1516,6 +1516,12 @@ CANONICAL DATA MODEL & RELATIONSHIP GRAPH (OFFICIAL):
    - RESULT SET BOUNDING & ACTIONABLE LIMITS:
      * When generating granular reports across multiple dimensions (e.g. region + territory + category + month) without narrow user filters, ALWAYS append an appropriate ORDER BY ... DESC LIMIT 100 (or LIMIT 50) to keep results actionable, fast, and UI-friendly.
      * EXCEPTION: When the user explicitly asks to "List all ..." (e.g. all active customers in a specific Account Group / KTOKD), do NOT add a LIMIT clause so the complete dataset can be exported to CSV when it exceeds the display threshold.
+   - CATEGORICAL BREAKDOWN ORDERING (ALPHABETICAL A TO Z):
+     * Unless the user specifically asks for ranking (e.g. Top N, Bottom N, Highest, Lowest, Worst, Best), whenever returning a breakdown or list grouped by dimension entities (Zone, Region, Territory, Customer Name, Category, Brand, Plant, etc.), ALWAYS ORDER BY the entity name ASC (Alphabetical order A to Z).
+     * Example: For zone breakdown, ORDER BY zone_name ASC (Central, East, Nepal, North, South, South - II, West).
+     * For customer lists, ORDER BY customer_name ASC.
+     * For category breakdown, ORDER BY cat_desc ASC.
+     * Only use ORDER BY metric DESC when ranking (e.g. Top N, Highest Sales, Most units) is explicitly requested.
 4. CANONICAL EXAMPLES:
    - Top N Customers in a Region / Territory / Zone (e.g. Jaipur):
      SELECT 
@@ -4097,6 +4103,32 @@ def session_rag_chat_controller(get_connection_func, status_callback=None):
                                 ]
                                 if non_unk:
                                     sql_results = non_unk
+
+                            # Universal Alphabetical Sorting for categorical/dimension lists (Zone, Region, Territory, Customer, Category, etc.)
+                            if sql_results and len(sql_results) > 1 and not re.search(r'\b(top|bottom|highest|lowest|worst|best|rank|leading|lagging|most|least)\b', question, re.I):
+                                first_row = sql_results[0]
+                                dim_col = None
+                                preferred_order = [
+                                    'zone_name', 'zone', 'region_name', 'region', 'territory_name', 'territory',
+                                    'customer_name', 'dealer_name', 'customer', 'dealer', 'cat_desc', 'category_desc',
+                                    'category', 'prod_title', 'material_description', 'sku', 'brand', 'plant', 'state', 'city'
+                                ]
+                                for pref in preferred_order:
+                                    matching_k = next((k for k in first_row.keys() if pref == k.lower() or pref in k.lower()), None)
+                                    if matching_k:
+                                        dim_col = matching_k
+                                        break
+                                if not dim_col:
+                                    for k, v in first_row.items():
+                                        if isinstance(v, str) and not any(m in k.lower() for m in ('date', 'month', 'year', 'status', 'cancel', 'code')):
+                                            dim_col = k
+                                            break
+                                if dim_col:
+                                    try:
+                                        sql_results = sorted(sql_results, key=lambda r: str(r.get(dim_col) or '').strip().upper())
+                                        print(f"[SQL_EXEC] Alphabetically sorted {len(sql_results)} rows by '{dim_col}' (A to Z).")
+                                    except Exception as sort_err:
+                                        print(f"[SQL_EXEC] Alphabetical sorting note: {sort_err}")
 
                             agg_sql_error = None
                             print(f"[SQL_EXEC] Success! Returned {len(sql_results)} rows.")
