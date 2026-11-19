@@ -603,6 +603,126 @@ def save_data_to_table(mysql_conn, session_id: str, year_month: str, selected_da
         return False
 
 
+def fetch_zone_wise_domestic_achievement(mysql_conn, session_id: str, year_month: str, hana_conn=None, schema="SAP_S4", selected_date=None):
+    """
+    Fetches dynamic zone-wise sales achievement metrics from `sales_summary_sales_report_by_values` cache table
+    or computes via HANA if cache not present.
+    Format returned matches Sheet 1 column structure:
+    [
+        {
+            "zone": "East",
+            "prev_year_actual_month": 115.99,
+            "prev_year_actual_mtd": 115.99,
+            "target": 140.91,
+            "actual": 66.13,
+            "achievement_pct": 47.0,
+            "sale_for_the_day": 2.41,
+            "growth_over_lysmt": -43.0,
+            "is_total": False
+        },
+        ...
+        {
+            "zone": "Total (Repl)",
+            "prev_year_actual_month": 827.26,
+            "prev_year_actual_mtd": 827.26,
+            "target": 1029.23,
+            "actual": 971.32,
+            "achievement_pct": 94.0,
+            "sale_for_the_day": 19.98,
+            "growth_over_lysmt": 17.0,
+            "is_total": True
+        }
+    ]
+    """
+    zone_rows = []
+    try:
+        cur = mysql_conn.cursor(dictionary=True) if hasattr(mysql_conn, "cursor") else mysql_conn.cursor()
+        cur.execute("""
+            SELECT `zone_name`, `prev_4w`, `prev_23w`, `prev_total`,
+                   `target_4w`, `target_23w`, `target_total`,
+                   `actual_4w`, `actual_23w`, `actual_total`,
+                   `achievement_pct`, `sale_for_the_day`, `sort_order`, `is_total`
+            FROM `sales_summary_sales_report_by_values`
+            WHERE `session_id` = %s AND `year_month` = %s
+            ORDER BY `sort_order` ASC, `id` ASC
+        """, (str(session_id).strip(), str(year_month).strip()))
+        cached_zones = cur.fetchall()
+        cur.close()
+
+        if cached_zones:
+            for r in cached_zones:
+                z_name = str(r.get("zone_name") or "").strip()
+                if not z_name or "UNKNOWN" in z_name.upper():
+                    continue
+                is_tot = bool(r.get("is_total")) or z_name.lower() == "total"
+                display_name = "Total (Repl)" if is_tot else z_name
+
+                p_mtd = float(r.get("prev_total") or 0.0)
+                p_month = float(r.get("prev_total") or 0.0)
+                tgt = float(r.get("target_total") or 0.0)
+                act = float(r.get("actual_total") or 0.0)
+                achv = float(r.get("achievement_pct") or 0.0)
+                if achv == 0.0 and tgt > 0:
+                    achv = round((act * 100.0 / tgt), 2)
+                day_sale = float(r.get("sale_for_the_day") or 0.0)
+                grth = round(((act - p_mtd) * 100.0 / p_mtd), 2) if p_mtd > 0 else 0.0
+
+                zone_rows.append({
+                    "zone": display_name,
+                    "prev_year_actual_month": p_month,
+                    "prev_year_actual_mtd": p_mtd,
+                    "target": tgt,
+                    "actual": act,
+                    "achievement_pct": achv,
+                    "sale_for_the_day": day_sale,
+                    "growth_over_lysmt": grth,
+                    "is_total": is_tot
+                })
+    except Exception as e:
+        print(f"[{TABLE_NAME}] Error fetching cached zone achievement: {e}", flush=True)
+
+    # If not in cache and HANA available, compute via HANA query
+    if not zone_rows and hana_conn:
+        try:
+            from controllers.sales_report_by_values_controller import query_sales_report_by_values_hana
+            h_cur = hana_conn.cursor()
+            hana_res = query_sales_report_by_values_hana(h_cur, schema, year_month, selected_date or f"{year_month[:4]}-{year_month[4:6]}-01")
+            h_cur.close()
+            if hana_res:
+                for r in hana_res:
+                    z_name = str(r.get("zone") or "").strip()
+                    if not z_name or "UNKNOWN" in z_name.upper():
+                        continue
+                    is_tot = bool(r.get("is_total")) or z_name.lower() == "total"
+                    display_name = "Total (Repl)" if is_tot else z_name
+
+                    p_mtd = float(r.get("prev_total") or 0.0)
+                    p_month = float(r.get("prev_total") or 0.0)
+                    tgt = float(r.get("target_total") or 0.0)
+                    act = float(r.get("actual_total") or 0.0)
+                    achv = float(r.get("achievement_pct") or 0.0)
+                    if achv == 0.0 and tgt > 0:
+                        achv = round((act * 100.0 / tgt), 2)
+                    day_sale = float(r.get("sale_for_the_day") or 0.0)
+                    grth = round(((act - p_mtd) * 100.0 / p_mtd), 2) if p_mtd > 0 else 0.0
+
+                    zone_rows.append({
+                        "zone": display_name,
+                        "prev_year_actual_month": p_month,
+                        "prev_year_actual_mtd": p_mtd,
+                        "target": tgt,
+                        "actual": act,
+                        "achievement_pct": achv,
+                        "sale_for_the_day": day_sale,
+                        "growth_over_lysmt": grth,
+                        "is_total": is_tot
+                    })
+        except Exception as e:
+            print(f"[{TABLE_NAME}] Error calculating zone achievement from HANA: {e}", flush=True)
+
+    return zone_rows
+
+
 def get_domestic_sales_value_achievement_controller(get_db_connection):
     """
     HTTP Controller for Domestic Sales Value Achievement.
@@ -717,10 +837,14 @@ def get_domestic_sales_value_achievement_controller(get_db_connection):
         if not force_refresh:
             cached = get_cached_data(mysql_conn, effective_session, year_month)
             if cached and cached.get("data"):
+                zone_data = fetch_zone_wise_domestic_achievement(
+                    mysql_conn, effective_session, year_month, hana_conn, schema, selected_date
+                )
                 return jsonify({
                     "status": "success",
                     "source": TABLE_NAME,
                     "data": cached["data"],
+                    "zone_data": zone_data,
                     "months": master_months,
                     "selected_month": selected_mo_num,
                     "current_year": current_year,
@@ -752,10 +876,15 @@ def get_domestic_sales_value_achievement_controller(get_db_connection):
         if rows:
             save_data_to_table(mysql_conn, effective_session, year_month, selected_date, rows)
 
+        zone_data = fetch_zone_wise_domestic_achievement(
+            mysql_conn, effective_session, year_month, hana_conn, schema, selected_date
+        )
+
         return jsonify({
             "status": "success",
             "source": TABLE_NAME,
             "data": rows,
+            "zone_data": zone_data,
             "months": master_months,
             "selected_month": selected_mo_num,
             "current_year": current_year,

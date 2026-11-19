@@ -75,6 +75,8 @@ def _execute_sync_task(origin: str = "scheduled"):
         ensure_account_category_sales_table(conn)
         from controllers.domestic_sales_value_achievement_controller import ensure_table as ensure_domestic_sales_table
         ensure_domestic_sales_table(conn)
+        from controllers.zone_wise_sales_achievement_controller import ensure_table as ensure_zone_wise_table
+        ensure_zone_wise_table(conn)
         from controllers.sales_report_by_values_controller import ensure_table as ensure_sales_report_by_values_table
         ensure_sales_report_by_values_table(conn)
         from controllers.sales_summary_no_values_controller import ensure_table as ensure_sales_summary_no_values_table
@@ -196,6 +198,13 @@ def _execute_sync_task(origin: str = "scheduled"):
                 print(f"[Scheduler] ❌ [6/13] Error syncing sales_summary_no_values: {e}", flush=True)
                 try: log_system_error(session_id=s_id, module_name="scheduler:sales_summary_no_values", error_msg=str(e))
                 except Exception: pass
+
+            # 6b. Zone-Wise Sales Achievement (Dedicated table: sales_summary_zone_wise_sales_achievement - All Month Permutations)
+            try:
+                from controllers.zone_wise_sales_achievement_controller import bulk_sync_zone_wise_sales_achievement
+                bulk_sync_zone_wise_sales_achievement(conn, s_id, u_id)
+            except Exception as e:
+                print(f"[Scheduler] ❌ Error syncing zone_wise_sales_achievement: {e}", flush=True)
 
             # 7. Sales Revenue Plan vs Sale (Dedicated controller & table)
             t_step = time.time()
