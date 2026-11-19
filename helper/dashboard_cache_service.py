@@ -71,6 +71,17 @@ def ensure_cache_tables(conn):
             except Exception: pass
 
 
+def _get_dict_cursor(conn):
+    try:
+        return conn.cursor(dictionary=True)
+    except TypeError:
+        try:
+            import pymysql.cursors
+            return conn.cursor(pymysql.cursors.DictCursor)
+        except Exception:
+            return conn.cursor()
+
+
 def make_filter_context(params) -> str:
     """
     Builds a consistent, normalized filter context string from incoming filter parameters.
@@ -133,7 +144,7 @@ def get_cached_component_data(conn, session_id: str, component_key: str, filter_
     cur = None
     try:
         ensure_cache_tables(conn)
-        cur = conn.cursor(dictionary=True) if hasattr(conn, "cursor") else conn.cursor()
+        cur = _get_dict_cursor(conn)
         row = None
         if session_id:
             cur.execute("""
@@ -224,7 +235,7 @@ def get_scheduler_config(conn, job_name: str = "sync_dashboard_metrics"):
     cur = None
     try:
         ensure_cache_tables(conn)
-        cur = conn.cursor(dictionary=True) if hasattr(conn, "cursor") else conn.cursor()
+        cur = _get_dict_cursor(conn)
         cur.execute("SELECT * FROM scheduler_configurations WHERE job_name = %s LIMIT 1", (job_name,))
         row = cur.fetchone()
         return row
@@ -323,24 +334,22 @@ CREATE TABLE IF NOT EXISTS `dashboard_key_metrics` (
 _key_metrics_table_initialized = False
 
 def ensure_key_metrics_table(conn):
-    global _key_metrics_table_initialized
-    if _key_metrics_table_initialized or not conn:
+    if not conn:
         return
     try:
         cur = conn.cursor()
         cur.execute(KEY_METRICS_TABLE_SQL)
         conn.commit()
         cur.close()
-        _key_metrics_table_initialized = True
     except Exception as e:
-        print(f"[Key Metrics Table] init note: {e}", flush=True)
+        pass
 
 def get_dashboard_key_metrics(conn, session_id: str):
     if not conn or not session_id:
         return None
     try:
         ensure_key_metrics_table(conn)
-        cur = conn.cursor(dictionary=True) if hasattr(conn, "cursor") else conn.cursor()
+        cur = _get_dict_cursor(conn)
         cur.execute("""
             SELECT metric_key, metric_label, metric_value, metric_subtext, last_synced_at
             FROM `dashboard_key_metrics`
@@ -448,7 +457,7 @@ def get_sales_by_zone_table_data(conn, session_id: str, zone_filter: str = "ALL"
     try:
         ensure_sales_by_zone_table(conn)
         z_code = str(zone_filter).strip().upper() if zone_filter and str(zone_filter).lower() != "all" else "ALL"
-        cur = conn.cursor(dictionary=True) if hasattr(conn, "cursor") else conn.cursor()
+        cur = _get_dict_cursor(conn)
         cur.execute("""
             SELECT zone_code, zone_name, sales_value, percentage, quantity, last_synced_at
             FROM `dashboard_sales_by_zone`
@@ -548,7 +557,7 @@ def get_tyre_sales_table_data(conn, session_id: str):
         return None
     try:
         ensure_tyre_sales_table(conn)
-        cur = conn.cursor(dictionary=True) if hasattr(conn, "cursor") else conn.cursor()
+        cur = _get_dict_cursor(conn)
         cur.execute("""
             SELECT tyre_type, sales_value, last_synced_at
             FROM `dashboard_tyre_sales_top_10`
@@ -646,7 +655,7 @@ def get_category_sales_table_data(conn, session_id: str, zone: str = None):
     try:
         ensure_category_sales_table(conn)
         z_code = str(zone).strip() if zone and str(zone).strip().lower() != "all" else "ALL"
-        cur = conn.cursor(dictionary=True) if hasattr(conn, "cursor") else conn.cursor()
+        cur = _get_dict_cursor(conn)
         cur.execute("""
             SELECT category_name, total_sales_cr, last_synced_at
             FROM `dashboard_category_sales`
@@ -741,7 +750,7 @@ def get_account_category_sales_table_data(conn, session_id: str, zone: str = Non
     try:
         ensure_account_category_sales_table(conn)
         z_code = str(zone).strip() if zone and str(zone).strip().lower() != "all" else "ALL"
-        cur = conn.cursor(dictionary=True) if hasattr(conn, "cursor") else conn.cursor()
+        cur = _get_dict_cursor(conn)
         cur.execute("""
             SELECT category_title, sales_value_cr, last_synced_at
             FROM `dashboard_account_category_sales`
