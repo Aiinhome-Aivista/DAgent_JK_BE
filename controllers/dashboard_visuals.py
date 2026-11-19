@@ -1231,6 +1231,7 @@ def sales_by_zone_data_controller(get_db_connection):
 
                 cust_tbl = find_hana_tbl(["zivfcustomermaster", "customermaster", "customer"]) or "ZIVF_CustomerMaster_01_MD"
                 terr_tbl = find_hana_tbl(["zivfterritorymaster", "territorymaster", "territory"]) or "ZIVF_TerritoryMaster_01_TR"
+                reg_tbl  = find_hana_tbl(["zivfregionmaster", "regionmaster", "region"]) or "ZIVF_RegionMaster_MD_01"
                 zone_tbl = find_hana_tbl(["zivfzonemaster", "zonemaster", "zone"]) or "ZIVF_ZoneMaster_01_TR"
                 sku_tbl  = find_hana_tbl(["zivrskumaster", "skumaster", "sku"]) or "ZIVR_SKUMaster_01_TR"
                 cat_tbl  = find_hana_tbl(["zivfcategorymaster", "categorymaster", "category"]) or "ZIVF_CategoryMaster_01_TR"
@@ -1307,19 +1308,21 @@ def sales_by_zone_data_controller(get_db_connection):
                       AND C."FKART" = S."FKART"
                 )""")
 
-                # Sales source selection
+                # Sales source selection (strictly NDP value, with clean date boundary)
                 if valid_years and all(y <= 2025 for y in valid_years):
                     sales_src_sql = f"""SELECT "invoice_number", "plant", "FKART", "dealer_code", "SKU", "invoice_date",
-                                   "distribution_channel", "indicator_cancel", "ndp_value", "invoice_value", "Tyre_Quantity"
+                                   "distribution_channel", "indicator_cancel", "ndp_value", "Tyre_Quantity"
                             FROM "{schema}"."{hist_tbl}" """
                 else:
                     sales_src_sql = f"""SELECT "invoice_number", "plant", "FKART", "dealer_code", "SKU", "invoice_date",
-                                   "distribution_channel", "indicator_cancel", "ndp_value", "invoice_value", "Tyre_Quantity"
+                                   "distribution_channel", "indicator_cancel", "ndp_value", "Tyre_Quantity"
                             FROM "{schema}"."{hist_tbl}"
+                            WHERE "invoice_date" < '2026-10-18'
                             UNION ALL
                             SELECT "invoice_number", "plant", "FKART", "dealer_code", "SKU", "invoice_date",
-                                   "distribution_channel", "indicator_cancel", "ndp_value", "invoice_value", "Tyre_Quantity"
-                            FROM "{schema}"."{curr_tbl}" """
+                                   "distribution_channel", "indicator_cancel", "ndp_value", "Tyre_Quantity"
+                            FROM "{schema}"."{curr_tbl}"
+                            WHERE "invoice_date" >= '2026-10-18' """
 
                 where_combined = " AND ".join(filter_conds)
 
@@ -1327,15 +1330,17 @@ def sales_by_zone_data_controller(get_db_connection):
 WITH CUSTOMER_MAP AS (
     SELECT DISTINCT
         "KUNNR",
-        "BZIRK"
+        TRIM("BZIRK") AS "BZIRK"
     FROM "{schema}"."{cust_tbl}"
     WHERE IFNULL("KLABC", '') <> 'X'
 ),
 TERRITORY_MAP AS (
     SELECT DISTINCT
-        "BZIRK",
-        "P_ZONE"
-    FROM "{schema}"."{terr_tbl}"
+        TRIM(TM."BZIRK") AS "BZIRK",
+        COALESCE(NULLIF(TRIM(RM."zone_code"), ''), NULLIF(TRIM(TM."P_ZONE"), '')) AS "P_ZONE"
+    FROM "{schema}"."{terr_tbl}" TM
+    LEFT JOIN "{schema}"."{reg_tbl}" RM
+        ON TRIM(TM."REGIO") = TRIM(RM."region_code")
 ),
 ZONE_MAP AS (
     SELECT DISTINCT
@@ -1350,8 +1355,8 @@ SALES_SOURCE AS (
 SALES_AGGREGATED AS (
     SELECT
         TM."P_ZONE",
-        SUM(COALESCE(S."ndp_value", S."invoice_value", 0)) AS "TOTAL_SALES",
-        SUM(IFNULL(S."Tyre_Quantity", 0)) AS "TOTAL_QUANTITY",
+        ROUND(SUM(COALESCE(S."ndp_value", 0)), 2) AS "TOTAL_SALES",
+        ROUND(SUM(COALESCE(S."Tyre_Quantity", 0)), 2) AS "TOTAL_QUANTITY",
         COUNT(*) AS "TOTAL_RECORDS",
         COUNT(DISTINCT S."invoice_number") AS "TOTAL_INVOICES",
         COUNT(DISTINCT S."dealer_code") AS "TOTAL_DEALERS"
@@ -1381,10 +1386,9 @@ ORDER BY IFNULL(SA."TOTAL_SALES", 0) DESC
                     execute_query(cursor, hana_zone_sql, is_hana=True)
                     results = fetchall_dict(cursor)
                 except Exception as union_e:
-                    # print(f"[Sales by Zone] HANA union query failed: {union_e}, retrying with SalesHistory only...")
                     # Fallback to SalesHistory only if UNION hits memory limit
                     sales_src_sql_fb = f"""SELECT "invoice_number", "plant", "FKART", "dealer_code", "SKU", "invoice_date",
-                                       "distribution_channel", "indicator_cancel", "invoice_value", "Tyre_Quantity"
+                                       "distribution_channel", "indicator_cancel", "ndp_value", "Tyre_Quantity"
                                 FROM "{schema}"."{hist_tbl}" """
                     hana_zone_sql_fb = hana_zone_sql.replace(sales_src_sql, sales_src_sql_fb)
                     execute_query(cursor, hana_zone_sql_fb, is_hana=True)
