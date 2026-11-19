@@ -2592,10 +2592,7 @@ def default_dashboard_metrics_controller(get_db_connection):
             user_db = sap_schema
             table_columns = get_sap_table_columns(conn, hana_conn, user_db, session_id)
         else:
-            try:
-                cursor = conn.cursor(dictionary=True)
-            except TypeError:
-                cursor = conn.cursor()
+            cursor = _get_dict_cursor(conn)
 
             cursor.execute("""
                 SELECT new_user_db, table_name 
@@ -2612,7 +2609,7 @@ def default_dashboard_metrics_controller(get_db_connection):
                 # print(f"[Default Metrics] No dynamic table found for session {session_id}")
                 return jsonify({"status": "success", "data": metrics_data}), 200
 
-            user_db = sync_row["new_user_db"]
+            user_db = sync_row["new_user_db"] if isinstance(sync_row, dict) else sync_row[0]
             cursor.execute(f"USE `{user_db}`")
             cursor.execute("SHOW TABLES")
             db_tables = [list(r.values())[0] if isinstance(r, dict) else r[0] for r in cursor.fetchall()]
@@ -2883,6 +2880,52 @@ def default_dashboard_metrics_controller(get_db_connection):
 
         real_date_col = check_col(sales_cols, ["invoice_date", "date", "billing__doc_date", "billing_doc_date", "fkdat"])
 
+        # Reusable SAP HANA Geo-Filter strings
+        hana_geo_exists_sales = ""
+        hana_geo_join_cm = ""
+        hana_geo_where_cm = ""
+        if is_hana and is_geo_restricted:
+            geo_conds_h = []
+            if zone_param:
+                geo_conds_h.append(f"(COALESCE(tm_bz.\"P_ZONE\", rm.ZONE_CODE) = '{norm_zone_code}' OR UPPER(TRIM(COALESCE(tm_bz.\"P_ZONE\", rm.ZONE_CODE))) = UPPER(TRIM('{zone_param}')) OR UPPER(TRIM(COALESCE(zm.\"NAME\", zm.\"P_ZONE\"))) LIKE UPPER(TRIM('%{zone_param}%')))")
+            if region_param:
+                geo_conds_h.append(f"(UPPER(TRIM(rm.REGION_NAME)) = UPPER(TRIM('{region_param}')) OR UPPER(TRIM(rm.REGION_CODE)) = UPPER(TRIM('{region_param}')) OR UPPER(TRIM(tm_bz.\"REGIO\")) = UPPER(TRIM('{region_param}')) OR UPPER(TRIM(rm.REGION_NAME)) LIKE UPPER(TRIM('%{region_param}%')))")
+            if territory_param:
+                geo_conds_h.append(f"(tm_bz.\"BZIRK\" = '{territory_param}' OR UPPER(TRIM(tm_bz.\"NAME\")) = UPPER(TRIM('{territory_param}')))")
+
+            if geo_conds_h:
+                geo_where_str = " AND ".join(geo_conds_h)
+                hana_c_tbl = cust_tbl or "ZIVF_CustomerMaster_01_MD"
+                hana_t_tbl = terr_tbl or "ZIVF_TerritoryMaster_01_TR"
+                hana_r_tbl = reg_tbl or "ZIVF_RegionMaster_MD_01"
+                hana_z_tbl = zone_tbl or "ZIVF_ZoneMaster_01_TR"
+
+                hana_geo_exists_sales = f"""
+                      AND EXISTS (
+                          SELECT 1 FROM "{user_db}"."{hana_c_tbl}" cm_g
+                          LEFT JOIN "{user_db}"."{hana_t_tbl}" tm_bz ON (TRIM(cm_g."BZIRK") = TRIM(tm_bz."BZIRK") OR LTRIM(TRIM(cm_g."BZIRK"), '0') = LTRIM(TRIM(tm_bz."BZIRK"), '0'))
+                          LEFT JOIN (
+                              SELECT DISTINCT TRIM("region_code") AS REGION_CODE, TRIM("region_name") AS REGION_NAME, TRIM("zone_code") AS ZONE_CODE
+                              FROM "{user_db}"."{hana_r_tbl}"
+                          ) rm ON (rm.REGION_CODE = tm_bz."REGIO" OR (tm_bz."P_ZONE" = rm.ZONE_CODE AND tm_bz."REGIO" = rm.REGION_NAME) OR rm.REGION_CODE = TO_VARCHAR(cm_g."REGIO"))
+                          LEFT JOIN "{user_db}"."{hana_z_tbl}" zm ON (zm."P_ZONE" = COALESCE(NULLIF(TRIM(tm_bz."P_ZONE"), ''), NULLIF(TRIM(rm.ZONE_CODE), '')))
+                          WHERE (
+                              LPAD(TRIM(t."dealer_code"), 10, '0') = LPAD(TO_NVARCHAR(cm_g."KUNNR"), 10, '0')
+                              OR LTRIM(t."dealer_code", '0') = LTRIM(cm_g."KUNNR", '0')
+                          )
+                            AND {geo_where_str}
+                      )"""
+
+                hana_geo_join_cm = f"""
+                LEFT JOIN "{user_db}"."{hana_t_tbl}" tm_bz ON (TRIM(cm."BZIRK") = TRIM(tm_bz."BZIRK") OR LTRIM(TRIM(cm."BZIRK"), '0') = LTRIM(TRIM(tm_bz."BZIRK"), '0'))
+                LEFT JOIN (
+                    SELECT DISTINCT TRIM("region_code") AS REGION_CODE, TRIM("region_name") AS REGION_NAME, TRIM("zone_code") AS ZONE_CODE
+                    FROM "{user_db}"."{hana_r_tbl}"
+                ) rm ON (rm.REGION_CODE = tm_bz."REGIO" OR (tm_bz."P_ZONE" = rm.ZONE_CODE AND tm_bz."REGIO" = rm.REGION_NAME) OR rm.REGION_CODE = TO_VARCHAR(cm."REGIO"))
+                LEFT JOIN "{user_db}"."{hana_z_tbl}" zm ON (zm."P_ZONE" = COALESCE(NULLIF(TRIM(tm_bz."P_ZONE"), ''), NULLIF(TRIM(rm.ZONE_CODE), '')))
+                """
+                hana_geo_where_cm = f" AND {geo_where_str}"
+
         # 1. Total Sales Revenue & Dynamic Lifetime Period
         # For SAP HANA (both history + current views): exact CTE matching the reference query -
         #   UNION ALL both views, filter distribution_channel='10', exclude cancelled invoices
@@ -2968,26 +3011,12 @@ def default_dashboard_metrics_controller(get_db_connection):
                         rev_q += f"""
                       AND NOT EXISTS (
                           SELECT 1 FROM {q_tbl(cust_tbl_rev)} cm
-                          WHERE cm."KUNNR" = t."dealer_code"
+                          WHERE (cm."KUNNR" = t."dealer_code" OR LTRIM(cm."KUNNR", '0') = LTRIM(t."dealer_code", '0'))
                             AND UPPER(TRIM(cm."KLABC")) = 'X'
                       )"""
 
-                    if (zone_param or region_param) and cust_tbl_rev:
-                        geo_filters = []
-                        if zone_param:
-                            geo_filters.append(f"(zm.P_ZONE = '{zone_param}' OR UPPER(TRIM(zm.NAME)) = UPPER(TRIM('{zone_param}')))")
-                        if region_param:
-                            geo_filters.append(f"(rm.REGION_CODE = '{region_param}' OR UPPER(TRIM(rm.REGION_NAME)) = UPPER(TRIM('{region_param}')))")
-                        
-                        rev_q += f"""
-                      AND EXISTS (
-                          SELECT 1 FROM {q_tbl(cust_tbl_rev)} cm
-                          LEFT JOIN "{user_db}"."ZIVF_TerritoryMaster_01_TR" tm_bz ON (cm.BZIRK = tm_bz.BZIRK)
-                          LEFT JOIN "{user_db}"."ZIVF_RegionMaster_MD_01" rm ON (rm.REGION_CODE = COALESCE(NULLIF(TRIM(tm_bz.REGIO), ''), NULLIF(TRIM(TO_VARCHAR(cm.REGIO)), '')))
-                          LEFT JOIN "{user_db}"."ZIVF_ZoneMaster_01_TR" zm ON (zm.P_ZONE = COALESCE(NULLIF(TRIM(tm_bz.P_ZONE), ''), NULLIF(TRIM(rm.ZONE_CODE), '')))
-                          WHERE cm."KUNNR" = t."dealer_code"
-                            AND {' AND '.join(geo_filters)}
-                      )"""
+                    if is_geo_restricted and hana_geo_exists_sales:
+                        rev_q += hana_geo_exists_sales
 
                     execute_query(cursor, rev_q, is_hana=True)
                     row = fetchone_dict(cursor)
@@ -2995,7 +3024,6 @@ def default_dashboard_metrics_controller(get_db_connection):
                         total_revenue = float(row.get("total_sales_revenue") or 0)
                         min_sales_yr  = row.get("min_yr")
                         max_sales_yr  = row.get("max_yr")
-                        # print(f"[Default Metrics] HANA Lifetime Revenue (ch=10, excl cancelled+dummy): ₹{total_revenue:,.2f} Cr")
                 else:
                     # MySQL / single-table path: use existing sales_from
                     rev_q = f"SELECT SUM({join_revenue_expr}) AS total_sales_revenue"
@@ -3009,7 +3037,7 @@ def default_dashboard_metrics_controller(get_db_connection):
                         min_sales_yr  = row.get("min_yr")
                         max_sales_yr  = row.get("max_yr")
             except Exception as rev_err:
-                # print(f"[Default Metrics] Total revenue query failed: {rev_err}")
+                print(f"[Default Metrics] Total revenue query failed: {rev_err}", flush=True)
                 # Fallback: plain SUM without filters
                 try:
                     rev_q_fb = f"SELECT SUM({join_revenue_expr}) AS total_sales_revenue FROM {sales_from}"
@@ -3017,6 +3045,8 @@ def default_dashboard_metrics_controller(get_db_connection):
                     row = fetchone_dict(cursor)
                     if row:
                         total_revenue = float(row.get("total_sales_revenue") or 0)
+                        if is_hana and total_revenue >= 10000000:
+                            total_revenue = total_revenue / 10000000
                 except Exception:
                     pass
 
@@ -3093,8 +3123,11 @@ WHERE CAST(t."distribution_channel" AS NVARCHAR(10)) = '10'
                             q_tyre_hana += f"""
   AND NOT EXISTS (
       SELECT 1 FROM {q_tbl(cust_tbl2)} cm
-      WHERE cm."KUNNR" = t."dealer_code" AND UPPER(TRIM(cm."KLABC")) = 'X'
+      WHERE (cm."KUNNR" = t."dealer_code" OR LTRIM(cm."KUNNR", '0') = LTRIM(t."dealer_code", '0')) AND UPPER(TRIM(cm."KLABC")) = 'X'
   )"""
+
+                        if is_geo_restricted and hana_geo_exists_sales:
+                            q_tyre_hana += hana_geo_exists_sales
 
                         q_tyre_hana += """
 GROUP BY cat.\"{cat_desc2_alias}\"
@@ -3474,8 +3507,11 @@ WHERE CAST(t."distribution_channel" AS NVARCHAR(10)) = '10'
                         q_yoy_hana += f"""
   AND NOT EXISTS (
       SELECT 1 FROM {q_tbl(cust_tbl4)} cm
-      WHERE cm."KUNNR" = t."dealer_code" AND UPPER(TRIM(cm."KLABC")) = 'X'
+      WHERE (cm."KUNNR" = t."dealer_code" OR LTRIM(cm."KUNNR", '0') = LTRIM(t."dealer_code", '0')) AND UPPER(TRIM(cm."KLABC")) = 'X'
   )"""
+
+                    if is_geo_restricted and hana_geo_exists_sales:
+                        q_yoy_hana += hana_geo_exists_sales
 
                     q_yoy_hana += """
 GROUP BY YEAR(t."invoice_date")
@@ -3569,23 +3605,8 @@ ORDER BY yr DESC"""
             canc_tbl_h = find_table(["zpvfsdcancelledsalesinvoice", "cancelledsalesinvoice", "cancelled"])
 
             # Geo filters for SAP HANA Customer Master
-            cm_geo_join = ""
-            cm_geo_where = ""
-            geo_filters_cm = []
-            if zone_param:
-                geo_filters_cm.append(f"(zm.\"P_ZONE\" = '{norm_zone_code}' OR UPPER(TRIM(zm.\"NAME\")) = UPPER(TRIM('{zone_param}')))")
-            if region_param:
-                geo_filters_cm.append(f"(rm.\"REGION_CODE\" = '{region_param}' OR UPPER(TRIM(rm.\"REGION_NAME\")) = UPPER(TRIM('{region_param}')))")
-            if territory_param:
-                geo_filters_cm.append(f"(tm_bz.\"BZIRK\" = '{territory_param}' OR UPPER(TRIM(tm_bz.\"NAME\")) = UPPER(TRIM('{territory_param}')))")
-
-            if is_geo_restricted and geo_filters_cm:
-                cm_geo_join = f"""
-                LEFT JOIN "{user_db}"."ZIVF_TerritoryMaster_01_TR" tm_bz ON (cm."BZIRK" = tm_bz."BZIRK")
-                LEFT JOIN "{user_db}"."ZIVF_RegionMaster_MD_01" rm ON (rm."REGION_CODE" = COALESCE(NULLIF(TRIM(tm_bz."REGIO"), ''), NULLIF(TRIM(TO_VARCHAR(cm."REGIO")), '')))
-                LEFT JOIN "{user_db}"."ZIVF_ZoneMaster_01_TR" zm ON (zm."P_ZONE" = COALESCE(NULLIF(TRIM(tm_bz."P_ZONE"), ''), NULLIF(TRIM(rm."ZONE_CODE"), '')))
-                """
-                cm_geo_where = f" AND {' AND '.join(geo_filters_cm)}"
+            cm_geo_join = hana_geo_join_cm
+            cm_geo_where = hana_geo_where_cm
 
             # 5. Billing Scope (Distinct customers billed with valid distribution channel 10)
             try:
@@ -3613,25 +3634,17 @@ ORDER BY yr DESC"""
                     q_bscope_h += f"""
                   AND NOT EXISTS (
                       SELECT 1 FROM {q_tbl(cust_tbl_h)} cm
-                      WHERE cm."KUNNR" = s."dealer_code" AND UPPER(TRIM(cm."KLABC")) = 'X'
+                      WHERE (cm."KUNNR" = s."dealer_code" OR LTRIM(cm."KUNNR", '0') = LTRIM(s."dealer_code", '0')) AND UPPER(TRIM(cm."KLABC")) = 'X'
                   )"""
-                if is_geo_restricted and geo_filters_cm and cust_tbl_h:
-                    q_bscope_h += f"""
-                  AND EXISTS (
-                      SELECT 1 FROM {q_tbl(cust_tbl_h)} cm
-                      LEFT JOIN "{user_db}"."ZIVF_TerritoryMaster_01_TR" tm_bz ON (cm."BZIRK" = tm_bz."BZIRK")
-                      LEFT JOIN "{user_db}"."ZIVF_RegionMaster_MD_01" rm ON (rm."REGION_CODE" = COALESCE(NULLIF(TRIM(tm_bz."REGIO"), ''), NULLIF(TRIM(TO_VARCHAR(cm."REGIO")), '')))
-                      LEFT JOIN "{user_db}"."ZIVF_ZoneMaster_01_TR" zm ON (zm."P_ZONE" = COALESCE(NULLIF(TRIM(tm_bz."P_ZONE"), ''), NULLIF(TRIM(rm."ZONE_CODE"), '')))
-                      WHERE cm."KUNNR" = s."dealer_code"
-                        AND {' AND '.join(geo_filters_cm)}
-                  )"""
+                if is_geo_restricted and hana_geo_exists_sales:
+                    q_bscope_h += hana_geo_exists_sales.replace('t."dealer_code"', 's."dealer_code"')
                 execute_query(cursor, q_bscope_h, is_hana=True)
                 b_row = fetchone_dict(cursor)
                 if b_row and b_row.get("cust_count") is not None:
                     billing_scope = str(b_row["cust_count"])
                     # print(f"[Default Metrics] HANA Billing Scope: {billing_scope}")
             except Exception as b_err:
-                # print(f"[Default Metrics] HANA Billing Scope failed: {b_err}")
+                print(f"[Default Metrics] HANA Billing Scope failed: {b_err}", flush=True)
                 pass
 
             # 6 to 10 & 12: CustomerMaster-based KPIs in a single fast query
@@ -3743,7 +3756,7 @@ ORDER BY yr DESC"""
 
                         # print(f"[Default Metrics] HANA KPIs: Dealers={dealer_spread}, Overdue={overdue_val}, Exposure={exposure_val}, New={new_dealer_val}, Attrition={attrition}")
                 except Exception as cm_err:
-                    # print(f"[Default Metrics] HANA CustomerMaster KPIs query failed: {cm_err}")
+                    print(f"[Default Metrics] HANA CustomerMaster KPIs query failed: {cm_err}", flush=True)
                     pass
 
         else:
@@ -3803,9 +3816,33 @@ ORDER BY yr DESC"""
                 klabc_col = check_col(table_columns[cust_tbl], ["klabc"])
                 klabc_filter = f"WHERE ({q_name(klabc_col)} IS NULL OR {q_name(klabc_col)} <> 'X')" if klabc_col else "WHERE 1=1"
 
+                c_joins_sql = ""
+                c_wheres_sql = ""
+                if not is_hana and is_geo_restricted:
+                    c_joins_list = []
+                    c_wheres_list = []
+                    if terr_tbl and cust_terr:
+                        c_joins_list.append(f"JOIN {q_tbl(terr_tbl)} tm_c ON c.{q_name(cust_terr)} = tm_c.{q_name(t_code)}")
+                        if reg_tbl and terr_reg:
+                            c_joins_list.append(f"JOIN {q_tbl(reg_tbl)} rm_c ON tm_c.{q_name(terr_reg)} = rm_c.{q_name(r_code)}")
+                            if zone_tbl and reg_zone:
+                                c_joins_list.append(f"JOIN {q_tbl(zone_tbl)} zm_c ON rm_c.{q_name(reg_zone)} = zm_c.{q_name(z_code)}")
+                    if zone_param:
+                        c_wheres_list.append(f"(zm_c.{q_name(z_code)} = '{norm_zone_code}' OR UPPER(TRIM(zm_c.{q_name(z_code)})) = UPPER(TRIM('{zone_param}')) OR UPPER(TRIM(zm_c.{q_name(z_name)})) = UPPER(TRIM('{zone_param}')))")
+                    if region_param:
+                        c_wheres_list.append(f"(rm_c.{q_name(r_code)} = '{region_param}' OR UPPER(TRIM(rm_c.{q_name(r_name)})) = UPPER(TRIM('{region_param}')))")
+                    if territory_param:
+                        c_wheres_list.append(f"(tm_c.{q_name(t_code)} = '{territory_param}' OR UPPER(TRIM(tm_c.{q_name(t_name)})) = UPPER(TRIM('{territory_param}')))")
+                    if c_joins_list:
+                        c_joins_sql = " " + " ".join(c_joins_list)
+                    if c_wheres_list:
+                        c_wheres_sql = " AND " + " AND ".join(c_wheres_list)
+
+                c_klabc = f"WHERE (c.{q_name(klabc_col)} IS NULL OR c.{q_name(klabc_col)} <> 'X')" if klabc_col else "WHERE 1=1"
+
                 if exp_col:
                     try:
-                        execute_query(cursor, f"SELECT SUM(CAST(REPLACE(TRIM({q_name(exp_col)}), ',', '') AS DECIMAL(18,2))) AS val FROM {q_tbl(cust_tbl)} {klabc_filter} AND {q_name(exp_col)} IS NOT NULL AND {q_name(exp_col)} != ''", is_hana=is_hana)
+                        execute_query(cursor, f"SELECT SUM(CAST(REPLACE(TRIM(c.{q_name(exp_col)}), ',', '') AS DECIMAL(18,2))) AS val FROM {q_tbl(cust_tbl)} c{c_joins_sql} {c_klabc} AND c.{q_name(exp_col)} IS NOT NULL AND c.{q_name(exp_col)} != ''{c_wheres_sql}", is_hana=is_hana)
                         row = fetchone_dict(cursor)
                         if row and row.get("val") is not None:
                             exposure_num = float(row["val"])
@@ -3818,7 +3855,7 @@ ORDER BY yr DESC"""
 
                 if out_col:
                     try:
-                        execute_query(cursor, f"SELECT SUM(CAST(REPLACE(TRIM({q_name(out_col)}), ',', '') AS DECIMAL(18,2))) AS val FROM {q_tbl(cust_tbl)} {klabc_filter} AND {q_name(out_col)} IS NOT NULL AND {q_name(out_col)} != ''", is_hana=is_hana)
+                        execute_query(cursor, f"SELECT SUM(CAST(REPLACE(TRIM(c.{q_name(out_col)}), ',', '') AS DECIMAL(18,2))) AS val FROM {q_tbl(cust_tbl)} c{c_joins_sql} {c_klabc} AND c.{q_name(out_col)} IS NOT NULL AND c.{q_name(out_col)} != ''{c_wheres_sql}", is_hana=is_hana)
                         row = fetchone_dict(cursor)
                         if row and row.get("val") is not None:
                             overdue_num = float(row["val"])
@@ -3833,12 +3870,12 @@ ORDER BY yr DESC"""
                 sas_curr_col = check_col(table_columns[cust_tbl], ["sas_curr", "sascurr"])
                 open_sas_col = check_col(table_columns[cust_tbl], ["open_sas", "opensas"])
                 cols_to_sum = []
-                if dmbtr_sas_col: cols_to_sum.append(f"SUM(COALESCE({q_name(dmbtr_sas_col)}, 0)) AS d_sas")
-                if sas_curr_col: cols_to_sum.append(f"SUM(COALESCE({q_name(sas_curr_col)}, 0)) AS c_sas")
-                if open_sas_col: cols_to_sum.append(f"SUM(COALESCE({q_name(open_sas_col)}, 0)) AS o_sas")
+                if dmbtr_sas_col: cols_to_sum.append(f"SUM(COALESCE(c.{q_name(dmbtr_sas_col)}, 0)) AS d_sas")
+                if sas_curr_col: cols_to_sum.append(f"SUM(COALESCE(c.{q_name(sas_curr_col)}, 0)) AS c_sas")
+                if open_sas_col: cols_to_sum.append(f"SUM(COALESCE(c.{q_name(open_sas_col)}, 0)) AS o_sas")
                 if cols_to_sum:
                     try:
-                        q_sas = f"SELECT {', '.join(cols_to_sum)} FROM {q_tbl(cust_tbl)} {klabc_filter}"
+                        q_sas = f"SELECT {', '.join(cols_to_sum)} FROM {q_tbl(cust_tbl)} c{c_joins_sql} {c_klabc}{c_wheres_sql}"
                         execute_query(cursor, q_sas, is_hana=is_hana)
                         row = fetchone_dict(cursor)
                         if row:
@@ -3856,6 +3893,14 @@ ORDER BY yr DESC"""
                     except Exception as e:
                         # print(f"[Default Metrics] SAS query failed: {e}")
                         pass
+
+                # Rotation in Non-HANA path
+                if overdue_num > 0:
+                    raw_rev = current_year if current_year > 0 else total_revenue
+                    ref_rev = raw_rev if raw_rev > 100000 else (raw_rev * 10000000)
+                    if ref_rev > 0:
+                        rot = round(ref_rev / overdue_num, 1)
+                        rotation_val = f"{rot:.1f}X"
 
                 att_col = check_col(table_columns[cust_tbl], ["attration", "attrition"])
                 nobill_col = check_col(table_columns[cust_tbl], ["lm_nobill", "l2m_nobill", "l3m_nobill"])
@@ -3944,7 +3989,26 @@ ORDER BY yr DESC"""
                         ach_subtext = "Lifetime Achievement"
 
                     target_joins = ""
-                    if is_geo_restricted and terr_tbl:
+                    if is_hana and is_geo_restricted and terr_tbl:
+                        hana_t_tbl = terr_tbl or "ZIVF_TerritoryMaster_01_TR"
+                        hana_r_tbl = reg_tbl or "ZIVF_RegionMaster_MD_01"
+                        hana_z_tbl = zone_tbl or "ZIVF_ZoneMaster_01_TR"
+                        t_col_terr = check_col(table_columns[target_tbl], ["terr_code", "territory_code", "bzirk"]) or "TERR_CODE"
+                        target_joins = f"""
+                            INNER JOIN "{user_db}"."{hana_t_tbl}" tm_tgt ON (TRIM(st."{t_col_terr}") = TRIM(tm_tgt."BZIRK") OR LTRIM(TRIM(st."{t_col_terr}"), '0') = LTRIM(TRIM(tm_tgt."BZIRK"), '0'))
+                            LEFT JOIN (
+                                SELECT DISTINCT TRIM("region_code") AS REGION_CODE, TRIM("region_name") AS REGION_NAME, TRIM("zone_code") AS ZONE_CODE
+                                FROM "{user_db}"."{hana_r_tbl}"
+                            ) rm_tgt ON (rm_tgt.REGION_CODE = tm_tgt."REGIO" OR (tm_tgt."P_ZONE" = rm_tgt.ZONE_CODE AND tm_tgt."REGIO" = rm_tgt.REGION_NAME))
+                            LEFT JOIN "{user_db}"."{hana_z_tbl}" zm_tgt ON (zm_tgt."P_ZONE" = COALESCE(NULLIF(TRIM(tm_tgt."P_ZONE"), ''), NULLIF(TRIM(rm_tgt.ZONE_CODE), '')))
+                        """
+                        if zone_param:
+                            target_conds.append(f"(COALESCE(tm_tgt.\"P_ZONE\", rm_tgt.ZONE_CODE) = '{norm_zone_code}' OR UPPER(TRIM(COALESCE(zm_tgt.\"NAME\", zm_tgt.\"P_ZONE\"))) = UPPER(TRIM('{zone_param}')) OR UPPER(TRIM(COALESCE(zm_tgt.\"NAME\", zm_tgt.\"P_ZONE\"))) LIKE UPPER(TRIM('%{zone_param}%')))")
+                        if region_param:
+                            target_conds.append(f"(UPPER(TRIM(rm_tgt.REGION_NAME)) = UPPER(TRIM('{region_param}')) OR UPPER(TRIM(rm_tgt.REGION_CODE)) = UPPER(TRIM('{region_param}')) OR UPPER(TRIM(tm_tgt.\"REGIO\")) = UPPER(TRIM('{region_param}')) OR UPPER(TRIM(rm_tgt.REGION_NAME)) LIKE UPPER(TRIM('%{region_param}%')))")
+                        if territory_param:
+                            target_conds.append(f"(tm_tgt.\"BZIRK\" = '{territory_param}' OR UPPER(TRIM(tm_tgt.\"NAME\")) = UPPER(TRIM('{territory_param}')))")
+                    elif is_geo_restricted and terr_tbl:
                         t_col_terr = check_col(table_columns[target_tbl], ["terr_code", "territory_code", "bzirk"])
                         if t_col_terr:
                             t_code_tgt = check_col(table_columns[terr_tbl], ["territory_code", "bzirk", "territory"]) or "territory_code"
@@ -4031,13 +4095,15 @@ ORDER BY yr DESC"""
                 try:
                     q_nd = f"""
                         SELECT COUNT(*) AS nd_count 
-                        FROM {q_tbl(cust_tbl)} 
-                        WHERE {q_name(erdat_col)} IS NOT NULL 
+                        FROM {q_tbl(cust_tbl)} cm
+                        {hana_geo_join_cm if is_hana else ''}
+                        WHERE cm.{q_name(erdat_col)} IS NOT NULL 
                           AND (
-                              CAST({q_name(erdat_col)} AS NVARCHAR(20)) LIKE '{target_yr_str}%'
-                              OR LEFT(CAST({q_name(erdat_col)} AS NVARCHAR(20)), 4) = '{target_yr_str}'
+                              CAST(cm.{q_name(erdat_col)} AS NVARCHAR(20)) LIKE '{target_yr_str}%'
+                              OR LEFT(CAST(cm.{q_name(erdat_col)} AS NVARCHAR(20)), 4) = '{target_yr_str}'
                           )
                           {klabc_filter}
+                          {hana_geo_where_cm if is_hana else ''}
                     """ if is_hana else f"""
                         SELECT COUNT(*) AS nd_count 
                         FROM {q_tbl(cust_tbl)} 
@@ -4269,7 +4335,7 @@ ORDER BY yr DESC"""
         return jsonify({"status": "success", "data": metrics_data}), 200
 
     except Exception as exc:
-        # print(f"[Default Metrics] Database query failed: {exc}")
+        print(f"[Default Metrics] Database query failed: {exc}", flush=True)
         return jsonify({
             "status": "error",
             "message": "Database query failed.",
