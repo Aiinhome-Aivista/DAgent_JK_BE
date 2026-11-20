@@ -194,7 +194,7 @@ def _close_connections(mysql_conn, hana_conn, tunnel, cursor=None):
             pass
 
 
-def get_cached_sales_revenue(mysql_conn, session_id, zone=None):
+def get_cached_sales_revenue(mysql_conn, session_id, zone=None, level='zone'):
     if not mysql_conn or not session_id:
         return None
     try:
@@ -214,18 +214,28 @@ def get_cached_sales_revenue(mysql_conn, session_id, zone=None):
                 """,
                 (str(session_id).strip(),)
             )
-        else:
+        elif level == 'zone':
+            # At zone level, zone summary is stored under zone_code = 'ALL'
             cur.execute(
                 """
                 SELECT city_or_zone_name, plan_value_cr, sale_value_cr, achiev_value_pct, last_synced_at
                 FROM sales_revenue_plan_vs_sale
-                WHERE session_id = %s AND (
-                    zone_code = %s
-                    OR (zone_code = 'ALL' AND (UPPER(city_or_zone_name) = UPPER(%s) OR UPPER(city_or_zone_name) = UPPER(%s)))
-                )
+                WHERE session_id = %s AND zone_code = 'ALL'
+                  AND (UPPER(city_or_zone_name) = UPPER(%s) OR UPPER(city_or_zone_name) = UPPER(%s))
                 ORDER BY sale_value_cr DESC
                 """,
-                (str(session_id).strip(), zone_val, norm_zone_name or zone_val, norm_zone_code or zone_val)
+                (str(session_id).strip(), norm_zone_name or zone_val, norm_zone_code or zone_val)
+            )
+        else:
+            # At region level, region records are stored under zone_code = <zone_code>
+            cur.execute(
+                """
+                SELECT city_or_zone_name, plan_value_cr, sale_value_cr, achiev_value_pct, last_synced_at
+                FROM sales_revenue_plan_vs_sale
+                WHERE session_id = %s AND zone_code = %s
+                ORDER BY sale_value_cr DESC
+                """,
+                (str(session_id).strip(), zone_val)
             )
         rows = cur.fetchall()
         cur.close()
@@ -645,11 +655,21 @@ def get_sales_revenue_data_controller(get_db_connection):
         if not force_refresh:
             cached_res = get_cached_component_data(mysql_conn, effective_session, "sales_revenue", cache_ctx)
             if cached_res and cached_res.get("data"):
+                data_to_ret = cached_res["data"]
+                if eff_level == "zone" and norm_zone_code:
+                    target_zn = (_normalize_zone_name(norm_zone_code) or "").upper()
+                    filtered_z = [
+                        item for item in data_to_ret
+                        if str(item.get("zoneCode") or "").strip().upper() == norm_zone_code
+                        or str(item.get("zone") or item.get("city") or "").strip().upper() in (norm_zone_code, target_zn)
+                    ]
+                    if filtered_z:
+                        data_to_ret = filtered_z
                 return jsonify({
                     "status": "success",
                     "source": "dashboard_cached_metrics",
                     "level": eff_level,
-                    "data": cached_res["data"],
+                    "data": data_to_ret,
                     "_cached": True,
                     "_last_synced_at": cached_res.get("_last_synced_at")
                 }), 200
@@ -697,13 +717,23 @@ def get_sales_revenue_data_controller(get_db_connection):
 
             # Fallback for zone-level cache in sales_revenue_plan_vs_sale table
             if eff_level == "zone":
-                cached = get_cached_sales_revenue(mysql_conn, effective_session, zone=target_zone)
+                cached = get_cached_sales_revenue(mysql_conn, effective_session, zone=target_zone, level=eff_level)
                 if cached and cached.get("data"):
+                    data_to_ret = cached["data"]
+                    if norm_zone_code:
+                        target_zn = (_normalize_zone_name(norm_zone_code) or "").upper()
+                        filtered_z = [
+                            item for item in data_to_ret
+                            if str(item.get("zoneCode") or "").strip().upper() == norm_zone_code
+                            or str(item.get("zone") or item.get("city") or item.get("city_or_zone_name") or "").strip().upper() in (norm_zone_code, target_zn)
+                        ]
+                        if filtered_z:
+                            data_to_ret = filtered_z
                     return jsonify({
                         "status": "success",
                         "source": "sales_revenue_plan_vs_sale",
                         "level": "zone",
-                        "data": cached["data"],
+                        "data": data_to_ret,
                         "_cached": True,
                         "_last_synced_at": cached.get("_last_synced_at")
                     }), 200
@@ -720,6 +750,16 @@ def get_sales_revenue_data_controller(get_db_connection):
                 territory=target_terr
             )
             cursor.close()
+            # If at zone-level and a specific zone was requested, guarantee only that single zone row is in results!
+            if eff_level == "zone" and norm_zone_code and results:
+                target_zn = (_normalize_zone_name(norm_zone_code) or "").upper()
+                filtered = [
+                    item for item in results
+                    if str(item.get("zoneCode") or "").strip().upper() == norm_zone_code
+                    or str(item.get("zone") or item.get("city") or "").strip().upper() in (norm_zone_code, target_zn)
+                ]
+                if filtered:
+                    results = filtered
         else:
             results = []
 
