@@ -2210,9 +2210,28 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
     # Common business sales filters matching exact specification:
     # 1. distribution_channel = 10 (Replacement Channel for primary sales)
     # 2. indicator_cancel NOT IN ('X', 'Y', '1')
+    # 3. Customer Master validation: KLABC <> 'X'
     # Note: Multi-column join on CancelledSalesInvoice is bypassed on HANA as indicator_cancel is present on fact views
     sales_where = f'WHERE s."invoice_date" IS NOT NULL AND (s."distribution_channel" = \'10\' OR s."distribution_channel" = 10) AND (s."indicator_cancel" IS NULL OR s."indicator_cancel" NOT IN (\'X\', \'Y\', \'1\'))'
     sales_where_all_channels = f'WHERE s."invoice_date" IS NOT NULL AND s."distribution_channel" IN (\'10\', \'20\', \'30\', \'40\', 10, 20, 30, 40) AND (s."indicator_cancel" IS NULL OR s."indicator_cancel" NOT IN (\'X\', \'Y\', \'1\'))'
+
+    # Customer Master global filter: KLABC <> 'X'
+    cust_join = f"""
+        INNER JOIN "{schema}"."{cust_view}" cm ON (
+            (s."dealer_code" = cm."KUNNR" OR
+             TRIM(LEADING '0' FROM cm."KUNNR") = TRIM(LEADING '0' FROM s."dealer_code") OR
+             LTRIM(s."dealer_code", '0') = LTRIM(cm."KUNNR", '0'))
+            AND (cm."KLABC" IS NULL OR cm."KLABC" <> 'X')
+        )
+    """ if cust_view else ""
+    cust_join_left = f"""
+        LEFT JOIN "{schema}"."{cust_view}" cm ON (
+            (s."dealer_code" = cm."KUNNR" OR
+             TRIM(LEADING '0' FROM cm."KUNNR") = TRIM(LEADING '0' FROM s."dealer_code") OR
+             LTRIM(s."dealer_code", '0') = LTRIM(cm."KUNNR", '0'))
+            AND (cm."KLABC" IS NULL OR cm."KLABC" <> 'X')
+        )
+    """ if cust_view else ""
 
     # ---------- 1. Overall Performance (Combined into 1 single ultra-fast query) ----------
     t0_overall = time.time()
@@ -2233,6 +2252,7 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
                 TO_VARCHAR(MIN(s."invoice_date"), 'DD Mon YYYY') || ' – Till Now' AS display_range,
                 SUM(COALESCE(s."invoice_value", 0)) AS total_rev_raw
             FROM {sales_source} s
+            {cust_join}
             {sales_where}
         """)
         row = cur.fetchone()
@@ -2268,6 +2288,7 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
             MONTHNAME(s."invoice_date") AS month_name,
             ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue
         FROM {sales_source} s
+        {cust_join}
         {sales_where}
         GROUP BY YEAR(s."invoice_date"), MONTH(s."invoice_date"), MONTHNAME(s."invoice_date")
         ORDER BY revenue DESC
@@ -2280,6 +2301,7 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
             MONTHNAME(s."invoice_date") AS month_name,
             ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue
         FROM {sales_source} s
+        {cust_join}
         {sales_where}
         GROUP BY YEAR(s."invoice_date"), MONTH(s."invoice_date"), MONTHNAME(s."invoice_date")
         ORDER BY revenue ASC
@@ -2294,6 +2316,7 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
                 MONTHNAME(s."invoice_date") AS month_name,
                 (SUM(COALESCE(s."invoice_value", 0)) / 10000000.0) AS revenue
             FROM {sales_source} s
+            {cust_join}
             {sales_where}
             GROUP BY YEAR(s."invoice_date"), MONTH(s."invoice_date"), MONTHNAME(s."invoice_date")
         ),
@@ -2321,6 +2344,7 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
                 MONTHNAME(s."invoice_date") AS month_name,
                 (SUM(COALESCE(s."invoice_value", 0)) / 10000000.0) AS revenue
             FROM {sales_source} s
+            {cust_join}
             {sales_where}
             GROUP BY YEAR(s."invoice_date"), MONTH(s."invoice_date"), MONTHNAME(s."invoice_date")
         ),
@@ -2347,6 +2371,7 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
                 cat."CAT_DESC" AS category_name,
                 ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue
             FROM {sales_source} s
+            {cust_join}
             INNER JOIN "{schema}"."{sku_view}" sk ON TRIM(s."SKU") = TRIM(sk."MATNR")
             INNER JOIN "{schema}"."{cat_view}" cat ON TRIM(sk."CAT_CODE") = TRIM(cat."CAT_CODE")
             {sales_where}
@@ -2361,6 +2386,7 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
                 cat."CAT_DESC" AS category_name,
                 ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue
             FROM {sales_source} s
+            {cust_join}
             INNER JOIN "{schema}"."{sku_view}" sk ON TRIM(s."SKU") = TRIM(sk."MATNR")
             INNER JOIN "{schema}"."{cat_view}" cat ON TRIM(sk."CAT_CODE") = TRIM(cat."CAT_CODE")
             {sales_where}
@@ -2381,6 +2407,7 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
                 END AS construction_description,
                 ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue
             FROM {sales_source} s
+            {cust_join}
             INNER JOIN "{schema}"."{sku_view}" sk ON TRIM(s."SKU") = TRIM(sk."MATNR")
             {sales_where}
             GROUP BY CASE 
@@ -2392,24 +2419,12 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
             LIMIT 1
         """)
 
-        # Tyre Type (commented out per UI request)
-        # run("top_tyre_type", f"""
-        #     SELECT
-        #         COALESCE(NULLIF(TRIM(sk."TYRE_TYPE"), ''), NULLIF(TRIM(sk."TYRE_TP"), ''), 'Unknown') AS tyre_type_name,
-        #         ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue
-        #     FROM {sales_source} s
-        #     INNER JOIN "{schema}"."{sku_view}" sk ON TRIM(s."SKU") = TRIM(sk."MATNR")
-        #     {sales_where}
-        #     GROUP BY COALESCE(NULLIF(TRIM(sk."TYRE_TYPE"), ''), NULLIF(TRIM(sk."TYRE_TP"), ''), 'Unknown')
-        #     ORDER BY revenue DESC
-        #     LIMIT 1
-        # """)
-
         run("top_5_products", f"""
             SELECT
                 COALESCE(NULLIF(TRIM(sk."MAKTX"), ''), NULLIF(TRIM(sk."PROD_TITLE"), ''), TRIM(s."SKU")) AS product_name,
                 ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue
             FROM {sales_source} s
+            {cust_join}
             INNER JOIN "{schema}"."{sku_view}" sk ON TRIM(s."SKU") = TRIM(sk."MATNR")
             {sales_where}
             GROUP BY COALESCE(NULLIF(TRIM(sk."MAKTX"), ''), NULLIF(TRIM(sk."PROD_TITLE"), ''), TRIM(s."SKU"))
@@ -2422,6 +2437,7 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
                 COALESCE(NULLIF(TRIM(sk."MAKTX"), ''), NULLIF(TRIM(sk."PROD_TITLE"), ''), TRIM(s."SKU")) AS product_name,
                 ROUND(SUM(COALESCE(s."invoice_value", 0)) / 10000000.0, 2) AS revenue
             FROM {sales_source} s
+            {cust_join}
             INNER JOIN "{schema}"."{sku_view}" sk ON TRIM(s."SKU") = TRIM(sk."MATNR")
             {sales_where}
             GROUP BY COALESCE(NULLIF(TRIM(sk."MAKTX"), ''), NULLIF(TRIM(sk."PROD_TITLE"), ''), TRIM(s."SKU"))
@@ -2438,6 +2454,7 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
                         COALESCE(NULLIF(TRIM(sk."MAKTX"), ''), NULLIF(TRIM(sk."PROD_TITLE"), ''), TRIM(s."SKU")) AS sku_title,
                         SUM(COALESCE(s."invoice_value", 0)) AS sku_rev
                     FROM {sales_source_30d} s
+                    {cust_join}
                     INNER JOIN "{schema}"."{sku_view}" sk ON TRIM(s."SKU") = TRIM(sk."MATNR")
                     INNER JOIN "{schema}"."{cat_view}" cat ON TRIM(sk."CAT_CODE") = TRIM(cat."CAT_CODE")
                     {sales_where}
@@ -2449,7 +2466,7 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
                     SELECT 
                         category_name,
                         SUM(sku_rev) AS total_cat_rev,
-                        DENSE_RANK() OVER(ORDER BY SUM(sku_rev) DESC) AS cat_rk
+                        DENSE_RANK() OVER (ORDER BY SUM(sku_rev) DESC) AS cat_rk
                     FROM CatSKU
                     GROUP BY category_name
                 ),
@@ -2740,32 +2757,15 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
         """)
 
         run("zero_billing_30d_accounts", f"""
-            WITH max_d AS (
-                SELECT MAX("invoice_date") AS max_dt 
-                FROM "{schema}"."{curr_view or 'ZPVF_SD_CurrentSales_01_TR'}" 
-                WHERE "invoice_date" IS NOT NULL
-            ),
-            sales_source AS (
-                SELECT "dealer_code", "invoice_date", "invoice_value", "distribution_channel", "indicator_cancel"
-                FROM "{schema}"."{curr_view or 'ZPVF_SD_CurrentSales_01_TR'}"
-                WHERE "invoice_date" >= '{year_start}'
-                UNION ALL
-                SELECT "dealer_code", "invoice_date", "invoice_value", "distribution_channel", "indicator_cancel"
-                FROM "{schema}"."{hist_view or 'ZPVF_SD_SalesHistory_01_TR'}"
-                WHERE "invoice_date" >= '{year_start}'
-            ),
-            cust_billing AS (
+            WITH cust_billing AS (
                 SELECT 
                     s."dealer_code",
-                    SUM(CASE WHEN s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -29) AND md.max_dt THEN COALESCE(s."invoice_value", 0) ELSE 0 END) AS curr_rev,
+                    SUM(CASE WHEN s."invoice_date" BETWEEN '{dt_30d_str}' AND '{max_dt_str}' THEN COALESCE(s."invoice_value", 0) ELSE 0 END) AS curr_rev,
                     SUM(COALESCE(s."invoice_value", 0)) AS total_historical_rev
-                FROM sales_source s
-                CROSS JOIN max_d md
-                WHERE s."invoice_date" IS NOT NULL 
-                  AND s."distribution_channel" = '10'
-                  AND (s."indicator_cancel" IS NULL OR s."indicator_cancel" NOT IN ('X', 'Y', '1'))
+                FROM {sales_source} s
+                {sales_where}
                 GROUP BY s."dealer_code"
-                HAVING SUM(CASE WHEN s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -29) AND md.max_dt THEN COALESCE(s."invoice_value", 0) ELSE 0 END) = 0
+                HAVING SUM(CASE WHEN s."invoice_date" BETWEEN '{dt_30d_str}' AND '{max_dt_str}' THEN COALESCE(s."invoice_value", 0) ELSE 0 END) = 0
                    AND SUM(COALESCE(s."invoice_value", 0)) >= 200000
             )
             SELECT 
@@ -2785,32 +2785,15 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
         """)
 
         run("zero_units_30d_accounts", f"""
-            WITH max_d AS (
-                SELECT MAX("invoice_date") AS max_dt 
-                FROM "{schema}"."{curr_view or 'ZPVF_SD_CurrentSales_01_TR'}" 
-                WHERE "invoice_date" IS NOT NULL
-            ),
-            sales_source AS (
-                SELECT "dealer_code", "invoice_date", "Tyre_Quantity", "distribution_channel", "indicator_cancel"
-                FROM "{schema}"."{curr_view or 'ZPVF_SD_CurrentSales_01_TR'}"
-                WHERE "invoice_date" >= '{year_start}'
-                UNION ALL
-                SELECT "dealer_code", "invoice_date", "Tyre_Quantity", "distribution_channel", "indicator_cancel"
-                FROM "{schema}"."{hist_view or 'ZPVF_SD_SalesHistory_01_TR'}"
-                WHERE "invoice_date" >= '{year_start}'
-            ),
-            cust_units AS (
+            WITH cust_units AS (
                 SELECT 
                     s."dealer_code",
-                    SUM(CASE WHEN s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -29) AND md.max_dt THEN COALESCE(s."Tyre_Quantity", 0) ELSE 0 END) AS recent_30_days_units_sold,
+                    SUM(CASE WHEN s."invoice_date" BETWEEN '{dt_30d_str}' AND '{max_dt_str}' THEN COALESCE(s."Tyre_Quantity", 0) ELSE 0 END) AS recent_30_days_units_sold,
                     SUM(COALESCE(s."Tyre_Quantity", 0)) AS total_historical_units
-                FROM sales_source s
-                CROSS JOIN max_d md
-                WHERE s."invoice_date" IS NOT NULL 
-                  AND s."distribution_channel" = '10'
-                  AND (s."indicator_cancel" IS NULL OR s."indicator_cancel" NOT IN ('X', 'Y', '1'))
+                FROM {sales_source} s
+                {sales_where}
                 GROUP BY s."dealer_code"
-                HAVING SUM(CASE WHEN s."invoice_date" BETWEEN ADD_DAYS(md.max_dt, -29) AND md.max_dt THEN COALESCE(s."Tyre_Quantity", 0) ELSE 0 END) = 0
+                HAVING SUM(CASE WHEN s."invoice_date" BETWEEN '{dt_30d_str}' AND '{max_dt_str}' THEN COALESCE(s."Tyre_Quantity", 0) ELSE 0 END) = 0
                    AND SUM(COALESCE(s."Tyre_Quantity", 0)) > 0
             )
             SELECT 

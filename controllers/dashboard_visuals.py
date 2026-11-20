@@ -6,6 +6,7 @@ from flask import request, jsonify
 from model.llm_client import call_llm_chat
 from database import config
 from database.hana_metadata_service import HANA_DB_TYPES, TARGET_SCHEMA, get_hana_connection_from_credential
+from helper.sap_connection import get_rolling_sales_boundary
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3746,7 +3747,8 @@ ORDER BY yr DESC"""
                             sas_variance_val = "0.0%"
 
                         # Rotation (Receivables Turnover Ratio = Annual Sales / Receivables)
-                        ref_sales_amt = (current_year * 10000000) if current_year > 0 else float(cm_row.get("tot_sale_tot") or 0)
+                        curr_yr_raw = current_year if current_year >= 10000000 else (current_year * 10000000.0)
+                        ref_sales_amt = curr_yr_raw if current_year > 0 else float(cm_row.get("tot_sale_tot") or 0)
                         sas_rec_amt = float(cm_row.get("tot_sas_in") or 0)
                         if ref_sales_amt > 0 and sas_rec_amt > 0:
                             rot = round(ref_sales_amt / sas_rec_amt, 1)
@@ -4115,20 +4117,12 @@ ORDER BY yr DESC"""
                             ach_subtext = "Lifetime Achievement"
 
                     if t_val > 0:
-                        if is_hana:
-                            t_val_cr = t_val / 10000000 if t_val >= 10000000 else t_val
-                            sales_target_val = f"₹{t_val_cr:,.2f} Cr"
-                            if ref_sales > 0:
-                                ach = (ref_sales / t_val_cr) * 100
-                                achievement_val = f"{ach:.2f}%"
-                        else:
-                            if t_val >= 10000000: sales_target_val = f"₹{(t_val / 10000000):.2f} Cr"
-                            elif t_val >= 100000: sales_target_val = f"₹{(t_val / 100000):.2f} Lac"
-                            else: sales_target_val = f"₹{t_val:,.2f}"
-
-                            if ref_sales > 0:
-                                ach = (ref_sales / t_val) * 100
-                                achievement_val = f"{ach:.2f}%"
+                        t_val_cr = t_val / 10000000.0 if t_val >= 10000000 else t_val
+                        sales_target_val = f"₹{t_val_cr:,.2f} Cr"
+                        if ref_sales > 0:
+                            ref_sales_cr = ref_sales / 10000000.0 if ref_sales >= 10000000 else ref_sales
+                            ach = (ref_sales_cr / t_val_cr) * 100
+                            achievement_val = f"{ach:.2f}%"
             except Exception as e:
                 print(f"[Default Metrics] Sales target query failed: {e}", flush=True)
 
@@ -4214,15 +4208,8 @@ ORDER BY yr DESC"""
         actual_subtext = "Actual sales"
         if current_year > 0 and current_year_num:
             actual_revenue = current_year
-            if is_hana:
-                formatted_actual = f"₹{actual_revenue:,.2f} Cr"
-            else:
-                if actual_revenue >= 10000000:
-                    formatted_actual = f"₹{(actual_revenue / 10000000):.2f} Cr"
-                elif actual_revenue >= 100000:
-                    formatted_actual = f"₹{(actual_revenue / 100000):.2f} Lac"
-                else:
-                    formatted_actual = f"₹{actual_revenue:,.2f}"
+            actual_cr = actual_revenue / 10000000.0 if actual_revenue >= 10000000 else actual_revenue
+            formatted_actual = f"₹{actual_cr:,.2f} Cr"
             actual_subtext = f"{current_year_num} Actual"
         else:
             formatted_actual = formatted_revenue
