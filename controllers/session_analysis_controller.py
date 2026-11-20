@@ -871,7 +871,7 @@ def _compute_core_kpis(cursor) -> dict:
             col_channel  = "distribution__Channel"
             col_discount = "Total_Discount_INR"
         else:
-            col_revenue  = "invoice_value" if "invoice_value" in cols_lower else "taxable_value"
+            col_revenue  = "ndp_value" if "ndp_value" in cols_lower else ("invoice_value" if "invoice_value" in cols_lower else "taxable_value")
             col_qty      = "Tyre_Quantity" if "tyre_quantity" in cols_lower else ("volume" if "volume" in cols_lower else "old_code")
             col_date     = "invoice_date" if "invoice_date" in cols_lower else "Date_"
             col_cust     = "dealer_code" if "dealer_code" in cols_lower else "ship_to_party"
@@ -2048,10 +2048,69 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
         print("[CoreKPI-HANA] No sales fact view found in view list", flush=True)
         return kpis
 
-    # Current Calendar Year 2026 (01 Jan 2026 – Till Now)
     schema = sap_schema or "SAP_S4"
-    current_year = datetime.now().year
+
+    cur = None
+    try:
+        cur = hana_conn.cursor()
+    except Exception as e:
+        print(f"[CoreKPI-HANA] Failed to create cursor: {e}", flush=True)
+        return kpis
+
+    from helper.sap_connection import get_rolling_sales_boundary
+    boundary_date = get_rolling_sales_boundary(cur, schema)
+
+    # 1. Dynamically fetch latest available transaction date (anchor date) from live transactions
+    max_dt_str = None
+    if curr_view:
+        try:
+            cur.execute(f'''
+                SELECT TO_VARCHAR(MAX(s."invoice_date"), 'YYYY-MM-DD') 
+                FROM "{schema}"."{curr_view}" s 
+                WHERE s."invoice_date" IS NOT NULL
+                  AND (s."distribution_channel" = '10' OR s."distribution_channel" = 10)
+                  AND (s."indicator_cancel" IS NULL OR s."indicator_cancel" NOT IN ('X', 'Y', '1'))
+            ''')
+            r_dt = cur.fetchone()
+            if r_dt and r_dt[0]:
+                max_dt_str = str(r_dt[0]).strip()
+        except Exception:
+            pass
+
+    if not max_dt_str and hist_view:
+        try:
+            cur.execute(f'''
+                SELECT TO_VARCHAR(MAX(s."invoice_date"), 'YYYY-MM-DD') 
+                FROM "{schema}"."{hist_view}" s 
+                WHERE s."invoice_date" IS NOT NULL
+                  AND (s."distribution_channel" = '10' OR s."distribution_channel" = 10)
+                  AND (s."indicator_cancel" IS NULL OR s."indicator_cancel" NOT IN ('X', 'Y', '1'))
+            ''')
+            r_dt = cur.fetchone()
+            if r_dt and r_dt[0]:
+                max_dt_str = str(r_dt[0]).strip()
+        except Exception:
+            pass
+
+    if not max_dt_str:
+        max_dt_str = datetime.now().strftime("%Y-%m-%d")
+
+    try:
+        max_dt_date = datetime.strptime(max_dt_str, "%Y-%m-%d").date()
+    except Exception:
+        max_dt_date = datetime.now().date()
+        max_dt_str = max_dt_date.strftime("%Y-%m-%d")
+
+    # Dynamic Operational Year (derived directly from latest transaction)
+    current_year = max_dt_date.year
     year_start = f"{current_year}-01-01"
+
+    # Rolling 30 Days and 60 Days date bounds (exact day arithmetic from anchor date)
+    dt_30d_str = (max_dt_date - timedelta(days=29)).strftime("%Y-%m-%d")
+    dt_60d_str = (max_dt_date - timedelta(days=59)).strftime("%Y-%m-%d")
+    dt_31d_prev_str = (max_dt_date - timedelta(days=30)).strftime("%Y-%m-%d")
+
+    print(f"[CoreKPI-HANA] Dynamic date bounds: Operational Year = {current_year}, Anchor Date = {max_dt_str}, Rolling 30D = {dt_30d_str} to {max_dt_str}, Prior 30D = {dt_60d_str} to {dt_31d_prev_str}", flush=True)
 
     # Common projected sales columns across CurrentSales and SalesHistory
     sales_cols = '''s."distribution_channel", s."plant", s."invoice_number", s."invoice_date", 
@@ -2061,11 +2120,11 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
         sales_source = f'''(
             SELECT {sales_cols}
             FROM "{schema}"."{curr_view}" s
-            WHERE s."invoice_date" >= '{year_start}' AND s."invoice_date" >= '2026-10-18'
+            WHERE s."invoice_date" >= '{year_start}' AND s."invoice_date" >= '{boundary_date}'
             UNION ALL
             SELECT {sales_cols}
             FROM "{schema}"."{hist_view}" s
-            WHERE s."invoice_date" >= '{year_start}' AND s."invoice_date" < '2026-10-18'
+            WHERE s."invoice_date" >= '{year_start}' AND s."invoice_date" < '{boundary_date}'
         )'''
     elif curr_view:
         sales_source = f'''(
@@ -2080,37 +2139,6 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
             WHERE s."invoice_date" >= '{year_start}'
         )'''
 
-    cur = None
-    try:
-        cur = hana_conn.cursor()
-    except Exception as e:
-        print(f"[CoreKPI-HANA] Failed to create cursor: {e}", flush=True)
-        return kpis
-
-    # Fast 1-time fetch of latest available transaction date (anchor date)
-    max_dt_str = None
-    try:
-        cur.execute(f'SELECT TO_VARCHAR(MAX(s."invoice_date"), \'YYYY-MM-DD\') FROM "{schema}"."{curr_view or hist_view}" s WHERE s."invoice_date" IS NOT NULL')
-        r_dt = cur.fetchone()
-        if r_dt and r_dt[0]:
-            max_dt_str = str(r_dt[0]).strip()
-    except Exception as e_dt:
-        print(f"[CoreKPI-HANA] Note fetching max invoice date: {e_dt}", flush=True)
-
-    if not max_dt_str:
-        max_dt_str = datetime.now().strftime("%Y-%m-%d")
-
-    try:
-        max_dt_date = datetime.strptime(max_dt_str, "%Y-%m-%d").date()
-    except Exception:
-        max_dt_date = datetime.now().date()
-        max_dt_str = max_dt_date.strftime("%Y-%m-%d")
-
-    # Rolling 30 Days and 60 Days date bounds (exact day arithmetic)
-    dt_30d_str = (max_dt_date - timedelta(days=29)).strftime("%Y-%m-%d")
-    dt_60d_str = (max_dt_date - timedelta(days=59)).strftime("%Y-%m-%d")
-    dt_31d_prev_str = (max_dt_date - timedelta(days=30)).strftime("%Y-%m-%d")
-
     print(f"[CoreKPI-HANA] Rolling date window: Max Date = {max_dt_str}, Last 30 Days = {dt_30d_str} to {max_dt_str}, Prev 30 Days = {dt_60d_str} to {dt_31d_prev_str}", flush=True)
 
     # Pruned Sales Sources for Last 30 Days and Last 60 Days (Pushes date filter down directly to HANA partitions)
@@ -2118,20 +2146,20 @@ def _compute_core_kpis_hana(hana_conn, sap_schema: str, view_names: list) -> dic
         sales_source_30d = f'''(
             SELECT {sales_cols}
             FROM "{schema}"."{curr_view}" s
-            WHERE s."invoice_date" >= '{dt_30d_str}' AND s."invoice_date" <= '{max_dt_str}' AND s."invoice_date" >= '2026-10-18'
+            WHERE s."invoice_date" >= '{dt_30d_str}' AND s."invoice_date" <= '{max_dt_str}' AND s."invoice_date" >= '{boundary_date}'
             UNION ALL
             SELECT {sales_cols}
             FROM "{schema}"."{hist_view}" s
-            WHERE s."invoice_date" >= '{dt_30d_str}' AND s."invoice_date" <= '{max_dt_str}' AND s."invoice_date" < '2026-10-18'
+            WHERE s."invoice_date" >= '{dt_30d_str}' AND s."invoice_date" <= '{max_dt_str}' AND s."invoice_date" < '{boundary_date}'
         )'''
         sales_source_60d = f'''(
             SELECT {sales_cols}
             FROM "{schema}"."{curr_view}" s
-            WHERE s."invoice_date" >= '{dt_60d_str}' AND s."invoice_date" <= '{max_dt_str}' AND s."invoice_date" >= '2026-10-18'
+            WHERE s."invoice_date" >= '{dt_60d_str}' AND s."invoice_date" <= '{max_dt_str}' AND s."invoice_date" >= '{boundary_date}'
             UNION ALL
             SELECT {sales_cols}
             FROM "{schema}"."{hist_view}" s
-            WHERE s."invoice_date" >= '{dt_60d_str}' AND s."invoice_date" <= '{max_dt_str}' AND s."invoice_date" < '2026-10-18'
+            WHERE s."invoice_date" >= '{dt_60d_str}' AND s."invoice_date" <= '{max_dt_str}' AND s."invoice_date" < '{boundary_date}'
         )'''
     elif curr_view:
         sales_source_30d = f'''(
