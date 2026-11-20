@@ -16,7 +16,7 @@ Calculates:
 import calendar
 from datetime import datetime
 from flask import request, jsonify
-from helper.sap_connection import get_sap_connection_for_session, sanitize_and_execute_hana, detect_sales_dates
+from helper.sap_connection import get_sap_connection_for_session, sanitize_and_execute_hana, detect_sales_dates, get_rolling_sales_boundary
 
 TABLE_NAME = "sales_summary_no_values"
 
@@ -199,6 +199,7 @@ def query_sales_summary_no_values_hana(cursor, schema, year_month: str, selected
     day_clamped = min(sel_d, last_day_curr)
     curr_from = f"{curr_yr}-{str(curr_mo).zfill(2)}-01"
     curr_to = f"{curr_yr}-{str(curr_mo).zfill(2)}-{str(day_clamped).zfill(2)}"
+    boundary_date = get_rolling_sales_boundary(cursor, schema)
 
     hana_sql = f"""
     WITH
@@ -218,7 +219,7 @@ def query_sales_summary_no_values_hana(cursor, schema, year_month: str, selected
         WHERE ("distribution_channel" = '10' OR "distribution_channel" = 10)
           AND "invoice_date" >= TO_DATE('{curr_from}', 'YYYY-MM-DD')
           AND "invoice_date" <= TO_DATE('{curr_to}', 'YYYY-MM-DD')
-          AND "invoice_date" < TO_DATE('2026-10-18', 'YYYY-MM-DD')
+          AND "invoice_date" < TO_DATE('{boundary_date}', 'YYYY-MM-DD')
           AND ("indicator_cancel" IS NULL OR "indicator_cancel" NOT IN ('X', 'Y', '1'))
         UNION ALL
         SELECT
@@ -236,7 +237,7 @@ def query_sales_summary_no_values_hana(cursor, schema, year_month: str, selected
         WHERE ("distribution_channel" = '10' OR "distribution_channel" = 10)
           AND "invoice_date" >= TO_DATE('{curr_from}', 'YYYY-MM-DD')
           AND "invoice_date" <= TO_DATE('{curr_to}', 'YYYY-MM-DD')
-          AND "invoice_date" >= TO_DATE('2026-10-18', 'YYYY-MM-DD')
+          AND "invoice_date" >= TO_DATE('{boundary_date}', 'YYYY-MM-DD')
           AND ("indicator_cancel" IS NULL OR "indicator_cancel" NOT IN ('X', 'Y', '1'))
     ),
 

@@ -28,23 +28,6 @@ from flask import request, jsonify
 _filters_cache = {}
 _CACHE_TTL = 300
 
-ZONE_NAME_MAP = {
-    'WZ': 'WEST',
-    'EZ': 'EAST',
-    'NZ': 'NORTH',
-    'SZ': 'SOUTH',
-    'TZ': 'South Zone - II',
-    'CZ': 'Central Zone',
-    'NP': 'Nepal',
-    'WEST': 'WEST',
-    'EAST': 'EAST',
-    'NORTH': 'NORTH',
-    'SOUTH': 'SOUTH',
-    'SOUTH ZONE - II': 'South Zone - II',
-    'CENTRAL ZONE': 'Central Zone',
-    'NEPAL': 'Nepal'
-}
-
 MONTH_MAP_NUM_TO_LABEL = {
     1: 'JAN', 2: 'FEB', 3: 'MAR', 4: 'APR', 5: 'MAY', 6: 'JUN',
     7: 'JUL', 8: 'AUG', 9: 'SEP', 10: 'OCT', 11: 'NOV', 12: 'DEC'
@@ -707,11 +690,14 @@ def bulk_sync_sales_by_zone_permutations(mysql_conn, session_id: str, user_id=No
                     COALESCE(NULLIF(TRIM(cat."CAT_DESC"), ''), 'UNKNOWN')
             """
 
-            # 1. CurrentSales (Active rolling period >= 2026-10-18)
+            from helper.sap_connection import get_rolling_sales_boundary
+            boundary_date = get_rolling_sales_boundary(cursor, sap_schema)
+
+            # 1. CurrentSales (Active rolling window >= boundary_date)
             sql_curr = base_query_template.format(
                 schema=sap_schema,
                 table_name="ZPVF_SD_CurrentSales_01_TR",
-                extra_filter="AND s.\"invoice_date\" >= '2026-10-18'"
+                extra_filter=f"AND s.\"invoice_date\" >= '{boundary_date}'"
             )
             try:
                 cursor.execute(sql_curr)
@@ -719,11 +705,11 @@ def bulk_sync_sales_by_zone_permutations(mysql_conn, session_id: str, user_id=No
             except Exception as e:
                 print(f"[Bulk Sync Sales by Zone] CurrentSales query warning: {e}", flush=True)
 
-            # 2. SalesHistory (Closed historical invoices < 2026-10-18)
+            # 2. SalesHistory (Closed historical invoices < boundary_date)
             sql_hist = base_query_template.format(
                 schema=sap_schema,
                 table_name="ZPVF_SD_SalesHistory_01_TR",
-                extra_filter="AND s.\"invoice_date\" >= '2024-01-01' AND s.\"invoice_date\" < '2026-10-18'"
+                extra_filter=f"AND s.\"invoice_date\" >= '2024-01-01' AND s.\"invoice_date\" < '{boundary_date}'"
             )
             try:
                 cursor.execute(sql_hist)
@@ -817,7 +803,6 @@ def bulk_sync_sales_by_zone_permutations(mysql_conn, session_id: str, user_id=No
         zn = _val(r, "zone_name", default=zc)
         zc = str(zc).strip().upper() if zc else "UNKNOWN"
         zn = str(zn).strip() if zn else zc
-        zn = ZONE_NAME_MAP.get(zc, ZONE_NAME_MAP.get(zn.upper(), zn))
 
         s_yr = _val(r, "sales_year")
         m_no = _val(r, "month_no")
@@ -1041,7 +1026,7 @@ def get_sales_by_zone_data_controller(get_db_connection):
                 if sync_dt and not last_synced:
                     last_synced = str(sync_dt)
 
-                zn_clean = ZONE_NAME_MAP.get(str(zc).upper(), zn)
+                zn_clean = zn if zn else str(zc)
 
                 # If a specific zone was selected, filter by it
                 if zone_filter != "ALL":

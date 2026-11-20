@@ -188,7 +188,8 @@ def save_category_sales_to_table(mysql_conn, session_id, zone, data_list):
 
 
 def calculate_category_sales_hana(cursor, schema, zone=None, year=None):
-    from helper.sap_connection import sanitize_and_execute_hana
+    from helper.sap_connection import sanitize_and_execute_hana, get_rolling_sales_boundary
+    boundary_date = get_rolling_sales_boundary(cursor, schema)
     
     # Year filter support: If year is provided (e.g. 2026), filter CurrentSales/SalesHistory
     year_condition = ""
@@ -201,15 +202,17 @@ def calculate_category_sales_hana(cursor, schema, zone=None, year=None):
         ROUND(SUM(COALESCE(cs."NDP_VALUE", 0)) / 10000000, 2) AS "total_sales_cr"
     FROM (
         SELECT s."DEALER_CODE", s."PLANT", s."SKU", s."INVOICE_VALUE", s."TAXABLE_VALUE", s."NDP_VALUE", s."INDICATOR_CANCEL", s."DISTRIBUTION_CHANNEL", s."invoice_date"
-        FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR" s
-        WHERE (s."INDICATOR_CANCEL" IS NULL OR s."INDICATOR_CANCEL" NOT IN ('X', 'Y', '1'))
-          AND (s."DISTRIBUTION_CHANNEL" = 10 OR s."DISTRIBUTION_CHANNEL" = '10')
-          {year_condition}
-        UNION ALL
-        SELECT s."DEALER_CODE", s."PLANT", s."SKU", s."INVOICE_VALUE", s."TAXABLE_VALUE", s."NDP_VALUE", s."INDICATOR_CANCEL", s."DISTRIBUTION_CHANNEL", s."invoice_date"
         FROM "{schema}"."ZPVF_SD_SalesHistory_01_TR" s
         WHERE (s."INDICATOR_CANCEL" IS NULL OR s."INDICATOR_CANCEL" NOT IN ('X', 'Y', '1'))
           AND (s."DISTRIBUTION_CHANNEL" = 10 OR s."DISTRIBUTION_CHANNEL" = '10')
+          AND s."invoice_date" < '{boundary_date}'
+          {year_condition}
+        UNION ALL
+        SELECT s."DEALER_CODE", s."PLANT", s."SKU", s."INVOICE_VALUE", s."TAXABLE_VALUE", s."NDP_VALUE", s."INDICATOR_CANCEL", s."DISTRIBUTION_CHANNEL", s."invoice_date"
+        FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR" s
+        WHERE (s."INDICATOR_CANCEL" IS NULL OR s."INDICATOR_CANCEL" NOT IN ('X', 'Y', '1'))
+          AND (s."DISTRIBUTION_CHANNEL" = 10 OR s."DISTRIBUTION_CHANNEL" = '10')
+          AND s."invoice_date" >= '{boundary_date}'
           {year_condition}
     ) cs
     INNER JOIN "{schema}"."ZIVR_SKUMaster_01_TR" sku 
@@ -217,29 +220,13 @@ def calculate_category_sales_hana(cursor, schema, zone=None, year=None):
     INNER JOIN "{schema}"."ZIVF_CategoryMaster_01_TR" cat 
         ON (TRIM(sku."CAT_CODE") = TRIM(cat."CAT_CODE"))
     LEFT JOIN "{schema}"."ZIVF_CustomerMaster_01_MD" cust 
-        ON (cs."DEALER_CODE" = cust."KUNNR" OR LPAD(TRIM(cs."DEALER_CODE"), 10, '0') = cust."KUNNR" OR LTRIM(cs."DEALER_CODE", '0') = LTRIM(cust."KUNNR", '0'))
-    LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm_plant 
-        ON (cs."PLANT" = tm_plant."WERKS" OR cust."VWERK" = tm_plant."WERKS")
-    LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm_bzirk 
-        ON (cust."BZIRK" = tm_bzirk."BZIRK")
+        ON (LPAD(TRIM(cs."DEALER_CODE"), 10, '0') = LPAD(TRIM(cust."KUNNR"), 10, '0') OR LTRIM(cs."DEALER_CODE", '0') = LTRIM(cust."KUNNR", '0'))
+    LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm 
+        ON (TRIM(cust."BZIRK") = TRIM(tm."BZIRK"))
     LEFT JOIN "{schema}"."ZIVF_RegionMaster_MD_01" rm 
-        ON (rm."region_code" = COALESCE(NULLIF(TRIM(tm_plant."REGIO"), ''), NULLIF(TRIM(tm_bzirk."REGIO"), ''), NULLIF(TRIM(TO_VARCHAR(cust."REGIO")), '')))
+        ON (TRIM(tm."REGIO") = TRIM(rm."region_code"))
     LEFT JOIN "{schema}"."ZIVF_ZoneMaster_01_TR" zm 
-        ON (zm."P_ZONE" = COALESCE(
-            NULLIF(TRIM(tm_plant."P_ZONE"), ''),
-            NULLIF(TRIM(tm_bzirk."P_ZONE"), ''),
-            NULLIF(TRIM(rm."zone_code"), ''),
-            CASE 
-                WHEN SUBSTRING(TO_VARCHAR(cs."PLANT"), 1, 2) IN ('36', '71', '72') THEN 'CZ'
-                WHEN SUBSTRING(TO_VARCHAR(cs."PLANT"), 1, 1) = '3' THEN 'NZ'
-                WHEN SUBSTRING(TO_VARCHAR(cs."PLANT"), 1, 1) = '1' THEN 'EZ'
-                WHEN SUBSTRING(TO_VARCHAR(cs."PLANT"), 1, 1) = '8' THEN 'NP'
-                WHEN SUBSTRING(TO_VARCHAR(cs."PLANT"), 1, 2) IN ('51', '52') THEN 'TZ'
-                WHEN SUBSTRING(TO_VARCHAR(cs."PLANT"), 1, 1) = '5' THEN 'SZ'
-                WHEN SUBSTRING(TO_VARCHAR(cs."PLANT"), 1, 1) = '7' THEN 'WZ'
-                ELSE NULL
-            END
-        ))
+        ON (zm."P_ZONE" = COALESCE(NULLIF(TRIM(rm."zone_code"), ''), NULLIF(TRIM(tm."P_ZONE"), '')))
     WHERE (cust."KLABC" IS NULL OR UPPER(TRIM(cust."KLABC")) <> 'X')
       AND cat."CAT_DESC" IS NOT NULL 
       AND TRIM(cat."CAT_DESC") <> '' 

@@ -1308,7 +1308,10 @@ def sales_by_zone_data_controller(get_db_connection):
                       AND C."FKART" = S."FKART"
                 )""")
 
-                # Sales source selection (strictly NDP value, with clean date boundary)
+                from helper.sap_connection import get_rolling_sales_boundary
+                boundary_date = get_rolling_sales_boundary(cursor, schema)
+
+                # Sales source selection (strictly NDP value, with dynamic rolling boundary)
                 if valid_years and all(y <= 2025 for y in valid_years):
                     sales_src_sql = f"""SELECT "invoice_number", "plant", "FKART", "dealer_code", "SKU", "invoice_date",
                                    "distribution_channel", "indicator_cancel", "ndp_value", "Tyre_Quantity"
@@ -1317,12 +1320,12 @@ def sales_by_zone_data_controller(get_db_connection):
                     sales_src_sql = f"""SELECT "invoice_number", "plant", "FKART", "dealer_code", "SKU", "invoice_date",
                                    "distribution_channel", "indicator_cancel", "ndp_value", "Tyre_Quantity"
                             FROM "{schema}"."{hist_tbl}"
-                            WHERE "invoice_date" < '2026-10-18'
+                            WHERE "invoice_date" < '{boundary_date}'
                             UNION ALL
                             SELECT "invoice_number", "plant", "FKART", "dealer_code", "SKU", "invoice_date",
                                    "distribution_channel", "indicator_cancel", "ndp_value", "Tyre_Quantity"
                             FROM "{schema}"."{curr_tbl}"
-                            WHERE "invoice_date" >= '2026-10-18' """
+                            WHERE "invoice_date" >= '{boundary_date}' """
 
                 where_combined = " AND ".join(filter_conds)
 
@@ -1394,11 +1397,6 @@ ORDER BY IFNULL(SA."TOTAL_SALES", 0) DESC
                     execute_query(cursor, hana_zone_sql_fb, is_hana=True)
                     results = fetchall_dict(cursor)
 
-                zone_map = {
-                    'WZ': 'West Zone', 'EZ': 'East Zone', 'NZ': 'North Zone',
-                    'SZ': 'South Zone I', 'TZ': 'South Zone II', 'CZ': 'Central Zone', 'NP': 'Nepal'
-                }
-
                 valid_selected_zones = [str(z).strip().upper() for z in selected_zones if z and str(z).strip().lower() != "all"]
                 if valid_selected_zones:
                     results = [r for r in results if str(r.get('zone_code') or r.get('ZONE_CODE') or '').strip().upper() in valid_selected_zones]
@@ -1410,7 +1408,7 @@ ORDER BY IFNULL(SA."TOTAL_SALES", 0) DESC
                     raw_name = str(r.get('zone_name') or r.get('ZONE_NAME') or r.get('name') or '').strip()
                     val = float(r.get('total_sales') or r.get('TOTAL_SALES') or r.get('sales_value') or 0.0)
                     r['zone'] = raw_code
-                    r['name'] = raw_name if raw_name else zone_map.get(raw_code, raw_code)
+                    r['name'] = raw_name if raw_name else raw_code
                     r['sales_value'] = val
                     r['value'] = val
                     r['quantity'] = float(r.get('total_quantity') or r.get('TOTAL_QUANTITY') or r.get('quantity') or 0.0)
@@ -1429,7 +1427,7 @@ ORDER BY IFNULL(SA."TOTAL_SALES", 0) DESC
 
             required_metrics = {
                 "zone": ["name", "p_zone", "Zone", "zone"],
-                "invoice_value": ["invoice_value", "ndp_value", "Invoice_Value", "taxable_value", "Invoice_Value_INR"]
+                "invoice_value": ["ndp_value", "ndp", "ndp_inr", "invoice_value", "taxable_value", "Invoice_Value", "Invoice_Value_INR"]
             }
             optional_dims = {}
             if has_valid_filters(selected_years) or has_valid_filters(selected_months):
@@ -1532,14 +1530,10 @@ ORDER BY IFNULL(SA."TOTAL_SALES", 0) DESC
                 results = fetchall_dict(cursor)
 
                 total_sales = sum(float(r.get('sales_value') or 0.0) for r in results)
-                zone_map = {
-                    'WZ': 'West Zone', 'EZ': 'East Zone', 'NZ': 'North Zone',
-                    'SZ': 'South Zone I', 'TZ': 'South Zone II', 'CZ': 'Central Zone', 'NP': 'Nepal'
-                }
 
                 for r in results:
                     raw_zone = str(r.get('zone') or '').strip()
-                    r['name'] = zone_map.get(raw_zone.upper(), raw_zone)
+                    r['name'] = raw_zone
                     r['value'] = float(r.get('sales_value') or 0.0)
                     r['percentage'] = round((r['value'] / total_sales) * 100, 1) if total_sales > 0 else 0.0
 
@@ -2833,6 +2827,21 @@ def default_dashboard_metrics_controller(get_db_connection):
         z_code = check_col(table_columns.get(zone_tbl, {}), ["zone_code", "p_zone", "zone"]) or "zone_code" if zone_tbl else None
         z_name = check_col(table_columns.get(zone_tbl, {}), ["zone_name", "name"]) if zone_tbl else None
 
+        # Dynamically resolve zone code and zone name from master view (e.g. ZIVF_ZoneMaster_01_TR)
+        if zone_tbl and zone_param and z_code:
+            try:
+                name_col_sql = f", {q_name(z_name)}" if z_name else ""
+                execute_query(cursor, f"SELECT {q_name(z_code)} AS zc {name_col_sql} FROM {q_tbl(zone_tbl)}", is_hana=is_hana)
+                for _zr in fetchall_dict(cursor):
+                    _zc = str(_zr.get("zc") or _zr.get("z_code") or _zr.get("P_ZONE") or "").strip()
+                    _zn = str((_zr.get(z_name) if z_name else None) or _zr.get("NAME") or _zr.get("zone_name") or _zc).strip()
+                    if zone_param.strip().upper() in (_zc.upper(), _zn.upper()):
+                        norm_zone_code = _zc
+                        norm_zone_name = _zn
+                        break
+            except Exception:
+                pass
+
         if not is_hana and is_geo_restricted and cust_tbl:
             geo_joins = f" JOIN {q_tbl(cust_tbl)} cm_geo ON (s.{q_name(sales_cust_c)} = cm_geo.{q_name(cust_pk)})"
             geo_wheres = []
@@ -3479,6 +3488,7 @@ LIMIT 1"""
                     canc_tbl4 = find_table(["zpvfsdcancelledsalesinvoice", "cancelledsalesinvoice", "cancelled_sales_invoice", "cancelled"])
                     cust_tbl4 = find_table(["zivfcustomermaster", "customermaster", "customer"])
 
+                    boundary_date_yoy = get_rolling_sales_boundary(cursor, user_db)
                     q_yoy_hana = f"""
 WITH base AS (
     SELECT "{_h_inv4}" AS "invoice_number", "{_h_plt4}" AS "plant", "{_h_fk4}" AS "FKART",
@@ -3486,14 +3496,14 @@ WITH base AS (
            "{_h_dc4}" AS "distribution_channel", "{_h_canc4}" AS "indicator_cancel",
            "{_h_rev4}" AS "invoice_value"
     FROM {q_tbl(hist_sales_tbl)}
-    WHERE "{_h_date4}" < '2026-10-18'
+    WHERE "{_h_date4}" < '{boundary_date_yoy}'
     UNION ALL
     SELECT "{_c_inv4}" AS "invoice_number", "{_c_plt4}" AS "plant", "{_c_fk4}" AS "FKART",
            "{_c_cust4}" AS "dealer_code", "{_c_date4}" AS "invoice_date",
            "{_c_dc4}" AS "distribution_channel", "{_c_canc4}" AS "indicator_cancel",
            "{_c_rev4}" AS "invoice_value"
     FROM {q_tbl(curr_sales_tbl)}
-    WHERE "{_c_date4}" >= '2026-10-18'
+    WHERE "{_c_date4}" >= '{boundary_date_yoy}'
 )
 SELECT YEAR(t."invoice_date") AS yr,
        ROUND(SUM(COALESCE(t."invoice_value", 0)) / 10000000, 2) AS revenue
@@ -3617,16 +3627,17 @@ ORDER BY yr DESC"""
 
             # 5. Billing Scope (Distinct customers billed in operational year e.g. 2026 with valid distribution channel 10)
             try:
+                boundary_date_bscope = get_rolling_sales_boundary(cursor, user_db)
                 q_bscope_h = f"""
                 SELECT COUNT(DISTINCT s."dealer_code") AS cust_count
                 FROM (
                     SELECT "dealer_code", "distribution_channel", "indicator_cancel", "invoice_number", "plant", "FKART", "invoice_date"
                     FROM {q_tbl(hist_sales_tbl)}
-                    WHERE "invoice_date" < '2026-10-18'
+                    WHERE "invoice_date" < '{boundary_date_bscope}'
                     UNION ALL
                     SELECT "dealer_code", "distribution_channel", "indicator_cancel", "invoice_number", "plant", "FKART", "invoice_date"
                     FROM {q_tbl(curr_sales_tbl)}
-                    WHERE "invoice_date" >= '2026-10-18'
+                    WHERE "invoice_date" >= '{boundary_date_bscope}'
                 ) s
                 WHERE CAST(s."distribution_channel" AS NVARCHAR(10)) = '10'
                   AND COALESCE(s."indicator_cancel", '') NOT IN ('X', 'Y', '1')
@@ -4482,13 +4493,13 @@ def bulk_sync_key_metrics_permutations(mysql_conn, session_id: str, user_id=None
                 SELECT
                     YEAR(s."invoice_date") AS YR,
                     MONTH(s."invoice_date") AS MO,
-                    ROUND(SUM(COALESCE(s."invoice_value", s."ndp_value", 0)) / 10000000, 2) AS TOTAL_REV
+                    ROUND(SUM(COALESCE(s."ndp_value", 0)) / 10000000, 2) AS TOTAL_REV
                 FROM (
-                    SELECT "invoice_date", "invoice_value", "ndp_value", "distribution_channel", "indicator_cancel"
+                    SELECT "invoice_date", "ndp_value", "distribution_channel", "indicator_cancel"
                     FROM "{user_db}"."ZPVF_SD_SalesHistory_01_TR"
                     WHERE "invoice_date" >= ADD_YEARS(CURRENT_DATE, -3)
                     UNION ALL
-                    SELECT "invoice_date", "invoice_value", "ndp_value", "distribution_channel", "indicator_cancel"
+                    SELECT "invoice_date", "ndp_value", "distribution_channel", "indicator_cancel"
                     FROM "{user_db}"."ZPVF_SD_CurrentSales_01_TR"
                 ) s
                 WHERE CAST(s."distribution_channel" AS NVARCHAR(10)) = '10'
@@ -4513,13 +4524,13 @@ def bulk_sync_key_metrics_permutations(mysql_conn, session_id: str, user_id=None
                     YEAR(s."invoice_date") AS YR,
                     MONTH(s."invoice_date") AS MO,
                     COALESCE(NULLIF(TRIM(sku."TYRE_TYPE"), ''), 'TBR') AS TYRE_TYPE,
-                    ROUND(SUM(COALESCE(s."invoice_value", s."ndp_value", 0)) / 10000000, 2) AS TOTAL_REV
+                    ROUND(SUM(COALESCE(s."ndp_value", 0)) / 10000000, 2) AS TOTAL_REV
                 FROM (
-                    SELECT "invoice_date", "invoice_value", "ndp_value", "SKU", "distribution_channel", "indicator_cancel"
+                    SELECT "invoice_date", "ndp_value", "SKU", "distribution_channel", "indicator_cancel"
                     FROM "{user_db}"."ZPVF_SD_SalesHistory_01_TR"
                     WHERE "invoice_date" >= ADD_YEARS(CURRENT_DATE, -3)
                     UNION ALL
-                    SELECT "invoice_date", "invoice_value", "ndp_value", "SKU", "distribution_channel", "indicator_cancel"
+                    SELECT "invoice_date", "ndp_value", "SKU", "distribution_channel", "indicator_cancel"
                     FROM "{user_db}"."ZPVF_SD_CurrentSales_01_TR"
                 ) s
                 LEFT JOIN "{user_db}"."ZIVR_SKUMaster_01_TR" sku ON s."SKU" = sku."SKU"
@@ -4545,13 +4556,13 @@ def bulk_sync_key_metrics_permutations(mysql_conn, session_id: str, user_id=None
                     YEAR(s."invoice_date") AS YR,
                     MONTH(s."invoice_date") AS MO,
                     COALESCE(NULLIF(TRIM(rm."NAME"), ''), NULLIF(TRIM(rm."P_REGION"), ''), 'JAIPUR') AS REGION_NAME,
-                    ROUND(SUM(COALESCE(s."invoice_value", s."ndp_value", 0)) / 10000000, 2) AS TOTAL_REV
+                    ROUND(SUM(COALESCE(s."ndp_value", 0)) / 10000000, 2) AS TOTAL_REV
                 FROM (
-                    SELECT "invoice_date", "invoice_value", "ndp_value", "dealer_code", "distribution_channel", "indicator_cancel"
+                    SELECT "invoice_date", "ndp_value", "dealer_code", "distribution_channel", "indicator_cancel"
                     FROM "{user_db}"."ZPVF_SD_SalesHistory_01_TR"
                     WHERE "invoice_date" >= ADD_YEARS(CURRENT_DATE, -3)
                     UNION ALL
-                    SELECT "invoice_date", "invoice_value", "ndp_value", "dealer_code", "distribution_channel", "indicator_cancel"
+                    SELECT "invoice_date", "ndp_value", "dealer_code", "distribution_channel", "indicator_cancel"
                     FROM "{user_db}"."ZPVF_SD_CurrentSales_01_TR"
                 ) s
                 LEFT JOIN "{user_db}"."ZIVF_CustomerMaster_01_TR" cm ON s."dealer_code" = cm."KUNNR"

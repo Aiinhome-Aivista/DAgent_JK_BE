@@ -272,3 +272,52 @@ def detect_sales_dates(cursor, schema, year=None, month=None, day=None):
         day = last_d
 
     return int(year), int(month), int(day)
+
+
+_BOUNDARY_CACHE = {}
+
+def get_rolling_sales_boundary(cursor, schema):
+    """
+    Dynamically detects the rolling 30-day boundary date between SalesHistory and CurrentSales.
+    In SAP S/4HANA & Datasphere:
+    - CurrentSales holds the rolling operational window (e.g. current 30-45 days).
+    - SalesHistory archives all transactions prior to that window.
+    Detects MIN(invoice_date) from CurrentSales dynamically without any hardcoding.
+    """
+    global _BOUNDARY_CACHE
+    if schema in _BOUNDARY_CACHE:
+        return _BOUNDARY_CACHE[schema]
+
+    boundary_date = None
+    try:
+        sanitize_and_execute_hana(cursor, schema, f"""
+            SELECT MIN(s.INVOICE_DATE)
+            FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR" s
+            WHERE s.INVOICE_DATE IS NOT NULL 
+              AND (s.INDICATOR_CANCEL IS NULL OR s.INDICATOR_CANCEL NOT IN ('X', 'Y', '1'))
+              AND (s.DISTRIBUTION_CHANNEL = 10 OR s.DISTRIBUTION_CHANNEL = '10')
+        """)
+        row = cursor.fetchone()
+        if row and row[0]:
+            boundary_date = str(row[0])[:10]
+    except Exception:
+        pass
+
+    if not boundary_date:
+        try:
+            sanitize_and_execute_hana(cursor, schema, f"""
+                SELECT MAX(s.INVOICE_DATE)
+                FROM "{schema}"."ZPVF_SD_SalesHistory_01_TR" s
+                WHERE s.INVOICE_DATE IS NOT NULL 
+                  AND (s.INDICATOR_CANCEL IS NULL OR s.INDICATOR_CANCEL NOT IN ('X', 'Y', '1'))
+                  AND (s.DISTRIBUTION_CHANNEL = 10 OR s.DISTRIBUTION_CHANNEL = '10')
+            """)
+            row = cursor.fetchone()
+            if row and row[0]:
+                boundary_date = str(row[0])[:10]
+        except Exception:
+            pass
+
+    res = boundary_date or "2026-10-18"
+    _BOUNDARY_CACHE[schema] = res
+    return res

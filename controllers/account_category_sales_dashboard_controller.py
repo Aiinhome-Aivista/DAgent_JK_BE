@@ -202,11 +202,11 @@ def save_account_category_sales_to_table(mysql_conn, session_id, zone, data_list
 
 
 def calculate_account_category_sales_hana(cursor, schema, zone=None):
-    from helper.sap_connection import sanitize_and_execute_hana
-    from helper.sap_connection import detect_sales_dates
+    from helper.sap_connection import sanitize_and_execute_hana, detect_sales_dates, get_rolling_sales_boundary
     det_year, _, _ = detect_sales_dates(cursor, schema)
     curr_year = det_year or datetime.now().year
     start_year_date = f"{curr_year}-01-01"
+    boundary_date = get_rolling_sales_boundary(cursor, schema)
 
     hana_sql = f"""
     WITH master_cats AS (
@@ -226,41 +226,22 @@ def calculate_account_category_sales_hana(cursor, schema, zone=None):
             WHERE ("DISTRIBUTION_CHANNEL" = 10 OR "DISTRIBUTION_CHANNEL" = '10')
               AND ("INDICATOR_CANCEL" IS NULL OR "INDICATOR_CANCEL" NOT IN ('X', 'Y', '1'))
               AND "invoice_date" >= '{start_year_date}'
+              AND "invoice_date" < '{boundary_date}'
             UNION ALL
             SELECT cs_raw."DEALER_CODE", cs_raw."NDP_VALUE", cs_raw."PLANT", cs_raw."INDICATOR_CANCEL", cs_raw."DISTRIBUTION_CHANNEL", cs_raw."invoice_date", cs_raw."invoice_number"
             FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR" cs_raw
             WHERE (cs_raw."DISTRIBUTION_CHANNEL" = 10 OR cs_raw."DISTRIBUTION_CHANNEL" = '10')
               AND (cs_raw."INDICATOR_CANCEL" IS NULL OR cs_raw."INDICATOR_CANCEL" NOT IN ('X', 'Y', '1'))
               AND cs_raw."invoice_date" >= '{start_year_date}'
-              AND NOT EXISTS (
-                  SELECT 1 FROM "{schema}"."ZPVF_SD_SalesHistory_01_TR" sh 
-                  WHERE sh."invoice_number" = cs_raw."invoice_number"
-              )
+              AND cs_raw."invoice_date" >= '{boundary_date}'
         ) cs
         INNER JOIN "{schema}"."ZIVF_CustomerMaster_01_MD" cm ON (
             LPAD(TRIM(TO_VARCHAR(cs.DEALER_CODE)), 10, '0') = LPAD(TRIM(TO_VARCHAR(cm.KUNNR)), 10, '0') 
             OR LTRIM(TO_VARCHAR(cs.DEALER_CODE), '0') = LTRIM(TO_VARCHAR(cm.KUNNR), '0')
         )
-        LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm_plant ON (cs.PLANT = tm_plant.WERKS)
-        LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm_bzirk ON (cm.BZIRK = tm_bzirk.BZIRK)
-        LEFT JOIN "{schema}"."ZIVF_RegionMaster_MD_01" rm ON (
-            rm.REGION_CODE = COALESCE(NULLIF(TRIM(tm_plant.REGIO), ''), NULLIF(TRIM(tm_bzirk.REGIO), ''), NULLIF(TRIM(TO_VARCHAR(cm.REGIO)), ''))
-        )
-        LEFT JOIN "{schema}"."ZIVF_ZoneMaster_01_TR" zm ON (zm.P_ZONE = COALESCE(
-            NULLIF(TRIM(tm_plant.P_ZONE), ''),
-            NULLIF(TRIM(tm_bzirk.P_ZONE), ''),
-            NULLIF(TRIM(rm.ZONE_CODE), ''),
-            CASE 
-                WHEN SUBSTRING(TO_VARCHAR(cs.PLANT), 1, 2) IN ('36', '71', '72') THEN 'CZ'
-                WHEN SUBSTRING(TO_VARCHAR(cs.PLANT), 1, 1) = '3' THEN 'NZ'
-                WHEN SUBSTRING(TO_VARCHAR(cs.PLANT), 1, 1) = '1' THEN 'EZ'
-                WHEN SUBSTRING(TO_VARCHAR(cs.PLANT), 1, 1) = '8' THEN 'NP'
-                WHEN SUBSTRING(TO_VARCHAR(cs.PLANT), 1, 2) IN ('51', '52') THEN 'TZ'
-                WHEN SUBSTRING(TO_VARCHAR(cs.PLANT), 1, 1) = '5' THEN 'SZ'
-                WHEN SUBSTRING(TO_VARCHAR(cs.PLANT), 1, 1) = '7' THEN 'WZ'
-                ELSE 'CZ'
-            END
-        ))
+        LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm ON (TRIM(cm.BZIRK) = TRIM(tm.BZIRK))
+        LEFT JOIN "{schema}"."ZIVF_RegionMaster_MD_01" rm ON (TRIM(tm.REGIO) = TRIM(rm.region_code))
+        LEFT JOIN "{schema}"."ZIVF_ZoneMaster_01_TR" zm ON (zm.P_ZONE = COALESCE(NULLIF(TRIM(rm.zone_code), ''), NULLIF(TRIM(tm.P_ZONE), '')))
         WHERE (cs.INDICATOR_CANCEL IS NULL OR cs.INDICATOR_CANCEL NOT IN ('X', 'Y', '1'))
           AND (cs.DISTRIBUTION_CHANNEL = 10 OR cs.DISTRIBUTION_CHANNEL = '10')
           AND cm.CH_TYPE IS NOT NULL 
