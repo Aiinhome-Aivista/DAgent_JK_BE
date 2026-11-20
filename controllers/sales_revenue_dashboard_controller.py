@@ -199,18 +199,34 @@ def get_cached_sales_revenue(mysql_conn, session_id, zone=None):
         return None
     try:
         ensure_sales_revenue_table(mysql_conn)
-        zone_val = str(zone).strip() if zone and str(zone).strip().lower() != "all" else "ALL"
+        norm_zone_code = _normalize_zone_code(zone)
+        norm_zone_name = _normalize_zone_name(zone)
+        zone_val = norm_zone_code if norm_zone_code else "ALL"
 
         cur = mysql_conn.cursor(dictionary=True) if hasattr(mysql_conn, "cursor") else mysql_conn.cursor()
-        cur.execute(
-            """
-            SELECT city_or_zone_name, plan_value_cr, sale_value_cr, achiev_value_pct, last_synced_at
-            FROM sales_revenue_plan_vs_sale
-            WHERE session_id = %s AND zone_code = %s
-            ORDER BY sale_value_cr DESC
-            """,
-            (str(session_id).strip(), zone_val)
-        )
+        if zone_val == "ALL":
+            cur.execute(
+                """
+                SELECT city_or_zone_name, plan_value_cr, sale_value_cr, achiev_value_pct, last_synced_at
+                FROM sales_revenue_plan_vs_sale
+                WHERE session_id = %s AND zone_code = 'ALL'
+                ORDER BY sale_value_cr DESC
+                """,
+                (str(session_id).strip(),)
+            )
+        else:
+            cur.execute(
+                """
+                SELECT city_or_zone_name, plan_value_cr, sale_value_cr, achiev_value_pct, last_synced_at
+                FROM sales_revenue_plan_vs_sale
+                WHERE session_id = %s AND (
+                    zone_code = %s
+                    OR (zone_code = 'ALL' AND (UPPER(city_or_zone_name) = UPPER(%s) OR UPPER(city_or_zone_name) = UPPER(%s)))
+                )
+                ORDER BY sale_value_cr DESC
+                """,
+                (str(session_id).strip(), zone_val, norm_zone_name or zone_val, norm_zone_code or zone_val)
+            )
         rows = cur.fetchall()
         cur.close()
 
@@ -368,24 +384,26 @@ def calculate_sales_revenue_hana(cursor, schema, level='zone', zone=None, region
         ACTUAL_BY_ZONE AS
         (
             SELECT
-                T.P_ZONE,
+                COALESCE(NULLIF(T.P_ZONE, ''), NULLIF(RM.ZONE_CODE, '')) AS P_ZONE,
                 SUM(S.SALES_VALUE) AS ACTUAL_SALES
             FROM CURRENT_SALES S
             INNER JOIN CUSTOMER_MAP C ON S.CUSTOMER_CODE = C.CUSTOMER_CODE
             INNER JOIN TERRITORY_MAP T ON C.BZIRK = T.BZIRK
-            GROUP BY T.P_ZONE
+            LEFT JOIN REGION_MAP RM ON (T.REGIO = RM.REGION_CODE OR (T.P_ZONE = RM.ZONE_CODE AND T.REGIO = RM.REGION_NAME))
+            GROUP BY COALESCE(NULLIF(T.P_ZONE, ''), NULLIF(RM.ZONE_CODE, ''))
         ),
         PLAN_BY_ZONE AS
         (
             SELECT
-                T.P_ZONE,
+                COALESCE(NULLIF(T.P_ZONE, ''), NULLIF(RM.ZONE_CODE, '')) AS P_ZONE,
                 SUM(IFNULL(P."PLAN_VALUE", 0)) AS ORIGINAL_PLAN,
                 SUM(IFNULL(P."REV_PLAN_VAL", 0)) AS REVISED_PLAN,
                 COUNT(*) AS TARGET_RECORDS
             FROM "{schema}"."ZIVF_SD_Sales_Plan_Target_01_TR" P
             INNER JOIN TERRITORY_MAP T ON TRIM(P."TERR_CODE") = T.BZIRK
+            LEFT JOIN REGION_MAP RM ON (T.REGIO = RM.REGION_CODE OR (T.P_ZONE = RM.ZONE_CODE AND T.REGIO = RM.REGION_NAME))
             WHERE P."YMONTH" LIKE '{plan_year_like}'
-            GROUP BY T.P_ZONE
+            GROUP BY COALESCE(NULLIF(T.P_ZONE, ''), NULLIF(RM.ZONE_CODE, ''))
         )
         SELECT
             CASE Z."P_ZONE"
@@ -607,7 +625,18 @@ def get_sales_revenue_data_controller(get_db_connection):
         target_reg = region if region and str(region).strip().upper() not in ("ALL", "NONE", "NULL", "") else None
         target_terr = territory if territory and str(territory).strip().upper() not in ("ALL", "NONE", "NULL", "") else None
 
-    cache_ctx = f"sr_lvl_{eff_level}_z_{target_zone or 'ALL'}_r_{target_reg or 'ALL'}_t_{target_terr or 'ALL'}_u{user_id or 'anon'}"
+    norm_zone_code = _normalize_zone_code(target_zone)
+    if eff_level == "zone":
+        norm_reg = "ALL"
+        norm_terr = "ALL"
+    elif eff_level == "region":
+        norm_reg = str(target_reg).strip().upper() if target_reg else "ALL"
+        norm_terr = "ALL"
+    else:
+        norm_reg = str(target_reg).strip().upper() if target_reg else "ALL"
+        norm_terr = str(target_terr).strip().upper() if target_terr else "ALL"
+
+    cache_ctx = f"sr_lvl_{eff_level}_z_{norm_zone_code or 'ALL'}_r_{norm_reg}_t_{norm_terr}"
 
     try:
         from helper.dashboard_cache_service import get_cached_component_data, set_cached_component_data
@@ -625,8 +654,49 @@ def get_sales_revenue_data_controller(get_db_connection):
                     "_last_synced_at": cached_res.get("_last_synced_at")
                 }), 200
 
+            # Hierarchy cache fallback: If a restricted user or specific zone is requested at zone-level,
+            # check if the all-zones cache exists! If it does, extract the matching zone row so numbers are 100% identical!
+            if eff_level == "zone" and norm_zone_code:
+                all_zones_cache = get_cached_component_data(mysql_conn, effective_session, "sales_revenue", "sr_lvl_zone_z_ALL_r_ALL_t_ALL")
+                if all_zones_cache and all_zones_cache.get("data"):
+                    target_zn = (_normalize_zone_name(norm_zone_code) or "").upper()
+                    filtered_zone_data = [
+                        item for item in all_zones_cache["data"]
+                        if str(item.get("zoneCode") or "").strip().upper() == norm_zone_code
+                        or str(item.get("zone") or item.get("city") or "").strip().upper() in (norm_zone_code, target_zn)
+                    ]
+                    if filtered_zone_data:
+                        return jsonify({
+                            "status": "success",
+                            "source": "dashboard_cached_metrics_derived",
+                            "level": "zone",
+                            "data": filtered_zone_data,
+                            "_cached": True,
+                            "_last_synced_at": all_zones_cache.get("_last_synced_at")
+                        }), 200
+
+            # Hierarchy cache fallback: If a restricted user requests a specific region at region-level,
+            # check if the all-regions cache for this zone exists! If it does, extract the matching region row so numbers are 100% identical!
+            if eff_level == "region" and norm_zone_code and norm_reg != "ALL":
+                all_regions_cache = get_cached_component_data(mysql_conn, effective_session, "sales_revenue", f"sr_lvl_region_z_{norm_zone_code}_r_ALL_t_ALL")
+                if all_regions_cache and all_regions_cache.get("data"):
+                    filtered_reg_data = [
+                        item for item in all_regions_cache["data"]
+                        if str(item.get("region") or item.get("city") or "").strip().upper() == norm_reg
+                        or str(item.get("regionCode") or "").strip().upper() == norm_reg
+                    ]
+                    if filtered_reg_data:
+                        return jsonify({
+                            "status": "success",
+                            "source": "dashboard_cached_metrics_derived",
+                            "level": "region",
+                            "data": filtered_reg_data,
+                            "_cached": True,
+                            "_last_synced_at": all_regions_cache.get("_last_synced_at")
+                        }), 200
+
             # Fallback for zone-level cache in sales_revenue_plan_vs_sale table
-            if eff_level == "zone" and not is_restricted and not target_zone:
+            if eff_level == "zone":
                 cached = get_cached_sales_revenue(mysql_conn, effective_session, zone=target_zone)
                 if cached and cached.get("data"):
                     return jsonify({
@@ -657,6 +727,19 @@ def get_sales_revenue_data_controller(get_db_connection):
         if results:
             try:
                 set_cached_component_data(mysql_conn, effective_session, "sales_revenue", results, cache_ctx)
+                if eff_level == "zone" and not norm_zone_code:
+                    save_sales_revenue_to_table(mysql_conn, effective_session, "ALL", results)
+                    for item in results:
+                        zc = str(item.get("zoneCode") or "").strip().upper()
+                        if zc:
+                            sub_ctx = f"sr_lvl_zone_z_{zc}_r_ALL_t_ALL"
+                            set_cached_component_data(mysql_conn, effective_session, "sales_revenue", [item], sub_ctx)
+                elif eff_level == "region" and norm_zone_code and norm_reg == "ALL":
+                    for item in results:
+                        rc = str(item.get("region") or item.get("city") or "").strip().upper()
+                        if rc:
+                            sub_ctx = f"sr_lvl_region_z_{norm_zone_code}_r_{rc}_t_ALL"
+                            set_cached_component_data(mysql_conn, effective_session, "sales_revenue", [item], sub_ctx)
             except Exception as ce:
                 print(f"[Sales Revenue] Cache set note: {ce}", flush=True)
 

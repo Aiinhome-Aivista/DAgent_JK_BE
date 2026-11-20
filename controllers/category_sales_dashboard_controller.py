@@ -12,21 +12,34 @@ Self-contained query functions without external service fallback.
 
 from datetime import datetime, timezone, timedelta
 from flask import request, jsonify
+from database.config import MYSQL_CONFIG
 
 CATEGORY_SALES_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS `dashboard_category_sales` (
     `id` BIGINT AUTO_INCREMENT PRIMARY KEY,
     `session_id` VARCHAR(100) NOT NULL,
     `zone_code` VARCHAR(20) NOT NULL DEFAULT 'ALL',
+    `region_code` VARCHAR(50) NOT NULL DEFAULT 'ALL',
     `category_name` VARCHAR(100) NOT NULL,
     `total_sales_cr` DECIMAL(18, 2) NOT NULL DEFAULT 0.00,
     `last_synced_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP,
-    INDEX `idx_session_zone` (`session_id`, `zone_code`)
+    INDEX `idx_session_zone` (`session_id`, `zone_code`),
+    INDEX `idx_session_zone_reg` (`session_id`, `zone_code`, `region_code`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 """
 
 _cat_table_initialized = False
+
+
+def _use_main_db(conn):
+    try:
+        main_db = MYSQL_CONFIG.get("database", "dagent_v2")
+        cur = conn.cursor()
+        cur.execute(f"USE `{main_db}`")
+        cur.close()
+    except Exception:
+        pass
 
 
 def ensure_category_sales_table(conn):
@@ -34,8 +47,19 @@ def ensure_category_sales_table(conn):
     if _cat_table_initialized or not conn:
         return
     try:
+        _use_main_db(conn)
         cur = conn.cursor()
         cur.execute(CATEGORY_SALES_TABLE_SQL)
+        # Check if region_code column exists, if not add it
+        try:
+            cur.execute("SELECT region_code FROM `dashboard_category_sales` LIMIT 1")
+            cur.fetchall()
+        except Exception:
+            try:
+                cur.execute("ALTER TABLE `dashboard_category_sales` ADD COLUMN `region_code` VARCHAR(50) NOT NULL DEFAULT 'ALL' AFTER `zone_code`")
+                cur.execute("ALTER TABLE `dashboard_category_sales` ADD INDEX `idx_session_zone_reg` (`session_id`, `zone_code`, `region_code`)")
+            except Exception:
+                pass
         # Purge any previously cached invalid records (e.g. '0', '', 'Z')
         try:
             cur.execute("DELETE FROM `dashboard_category_sales` WHERE category_name IN ('0', '', 'Z') OR category_name IS NULL")
@@ -55,6 +79,7 @@ def _resolve_session(conn, session_id):
         cur = conn.cursor(dictionary=True) if hasattr(conn, "cursor") else conn.cursor()
         cur.execute("SELECT session_id FROM workspaces WHERE session_id IS NOT NULL AND session_id != '' ORDER BY id ASC LIMIT 1")
         row = cur.fetchone()
+        cur.fetchall()
         cur.close()
         if row and isinstance(row, dict) and row.get("session_id"):
             return row["session_id"]
@@ -104,30 +129,28 @@ def _close_connections(mysql_conn, hana_conn, tunnel, cursor=None):
             tunnel.stop()
         except Exception:
             pass
-    if mysql_conn and hasattr(mysql_conn, "is_connected") and mysql_conn.is_connected():
-        try:
-            mysql_conn.close()
-        except Exception:
-            pass
-    elif mysql_conn:
+    if mysql_conn:
         try:
             mysql_conn.close()
         except Exception:
             pass
 
 
-def get_cached_category_sales(mysql_conn, session_id, zone=None):
+def get_cached_category_sales(mysql_conn, session_id, zone=None, region=None):
+    _use_main_db(mysql_conn)
     ensure_category_sales_table(mysql_conn)
-    z_code = str(zone).strip() if zone and str(zone).strip().lower() != "all" else "ALL"
+    z_code = str(zone).strip() if zone and str(zone).strip().lower() not in ("all", "null", "none", "") else "ALL"
+    r_code = str(region).strip() if region and str(region).strip().lower() not in ("all", "null", "none", "") else "ALL"
     try:
         cur = mysql_conn.cursor(dictionary=True) if hasattr(mysql_conn, "cursor") else mysql_conn.cursor()
         cur.execute("""
             SELECT category_name, total_sales_cr, last_synced_at
             FROM `dashboard_category_sales`
-            WHERE session_id = %s AND zone_code = %s
+            WHERE session_id = %s AND zone_code = %s AND region_code = %s
               AND category_name NOT IN ('0', '', 'Z')
+              AND total_sales_cr > 0
             ORDER BY total_sales_cr DESC
-        """, (str(session_id).strip(), z_code))
+        """, (str(session_id).strip(), z_code, r_code))
         rows = cur.fetchall()
         cur.close()
         if not rows:
@@ -153,30 +176,34 @@ def get_cached_category_sales(mysql_conn, session_id, zone=None):
         return None
 
 
-def save_category_sales_to_table(mysql_conn, session_id, zone, data_list):
+def save_category_sales_to_table(mysql_conn, session_id, zone, data_list, region=None):
     if not mysql_conn or not session_id or not data_list:
         return False
     try:
+        _use_main_db(mysql_conn)
         ensure_category_sales_table(mysql_conn)
         ist_now = datetime.now(timezone(timedelta(hours=5, minutes=30))).strftime('%Y-%m-%d %H:%M:%S')
-        z_code = str(zone).strip() if zone and str(zone).strip().lower() != "all" else "ALL"
+        z_code = str(zone).strip() if zone and str(zone).strip().lower() not in ("all", "null", "none", "") else "ALL"
+        r_code = str(region).strip() if region and str(region).strip().lower() not in ("all", "null", "none", "") else "ALL"
         cur = mysql_conn.cursor()
         cur.execute(
-            "DELETE FROM `dashboard_category_sales` WHERE session_id = %s AND zone_code = %s",
-            (str(session_id).strip(), z_code)
+            "DELETE FROM `dashboard_category_sales` WHERE session_id = %s AND zone_code = %s AND region_code = %s",
+            (str(session_id).strip(), z_code, r_code)
         )
         sql = """
             INSERT INTO `dashboard_category_sales`
-                (`session_id`, `zone_code`, `category_name`, `total_sales_cr`, `last_synced_at`, `created_at`)
-            VALUES (%s, %s, %s, %s, %s, %s)
+                (`session_id`, `zone_code`, `region_code`, `category_name`, `total_sales_cr`, `last_synced_at`, `created_at`)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
         """
         batch = []
         for item in data_list:
             if isinstance(item, dict):
                 cname = str(item.get("category") or item.get("category_name") or item.get("name") or "").strip()[:100]
                 cr = float(item.get("total_sales_cr") or item.get("valCr") or item.get("sales_value") or 0.0)
+                if cr <= 0:
+                    continue
                 if cname and cname not in ('0', '', 'Z'):
-                    batch.append((str(session_id).strip(), z_code, cname, cr, ist_now, ist_now))
+                    batch.append((str(session_id).strip(), z_code, r_code, cname, cr, ist_now, ist_now))
         if batch:
             cur.executemany(sql, batch)
             mysql_conn.commit()
@@ -187,7 +214,7 @@ def save_category_sales_to_table(mysql_conn, session_id, zone, data_list):
         return False
 
 
-def calculate_category_sales_hana(cursor, schema, zone=None, year=None):
+def calculate_category_sales_hana(cursor, schema, zone=None, year=None, region=None):
     from helper.sap_connection import sanitize_and_execute_hana, get_rolling_sales_boundary
     boundary_date = get_rolling_sales_boundary(cursor, schema)
     
@@ -235,18 +262,53 @@ def calculate_category_sales_hana(cursor, schema, zone=None, year=None):
       AND (? IS NULL OR ? = '' OR ? = 'null' OR ? = 'All' 
            OR zm."NAME" = ? OR zm."P_ZONE" = ?
            OR UPPER(TRIM(zm."NAME")) = UPPER(TRIM(?)) OR UPPER(TRIM(zm."P_ZONE")) = UPPER(TRIM(?)))
+      AND (? IS NULL OR ? = '' OR ? = 'null' OR ? = 'All'
+           OR rm."region_name" = ? OR rm."region_code" = ?
+           OR UPPER(TRIM(rm."region_name")) = UPPER(TRIM(?)) OR UPPER(TRIM(rm."region_code")) = UPPER(TRIM(?))
+           OR tm."REGIO" = ? OR UPPER(TRIM(tm."REGIO")) = UPPER(TRIM(?)))
     GROUP BY cat."CAT_DESC"
     HAVING SUM(COALESCE(cs."NDP_VALUE", 0)) > 0
     ORDER BY "total_sales_cr" DESC
     """
-    sanitize_and_execute_hana(cursor, schema, hana_sql, (zone, zone, zone, zone, zone, zone, zone, zone))
+    params = (
+        zone, zone, zone, zone, zone, zone, zone, zone,
+        region, region, region, region, region, region, region, region, region, region
+    )
+    sanitize_and_execute_hana(cursor, schema, hana_sql, params)
     cols = [d[0] for d in cursor.description]
     return [dict(zip(cols, r)) for r in cursor.fetchall()]
 
 
-def calculate_category_sales_mysql(cursor, session_id, zone=None):
+def calculate_category_sales_mysql(cursor, session_id, zone=None, region=None):
     """Direct self-contained MySQL query function."""
     try:
+        from helper.sap_connection import _prepare_mysql_workspace
+        _prepare_mysql_workspace(cursor, session_id)
+
+        if region and str(region).strip().lower() not in ("all", "null", "none", ""):
+            reg_val = str(region).strip()
+            z_val = str(zone).strip() if zone and str(zone).strip().lower() not in ("all", "null", "none", "") else None
+            sql = """
+                SELECT 
+                    cm.category_name AS category, 
+                    ROUND(SUM(sd.Invoice_Value_INR) / 10000000, 2) AS total_sales_cr
+                FROM sales_data sd
+                JOIN material_master sku ON sd.material = sku.matnr
+                JOIN category_master cm ON sku.category = cm.category_code
+                JOIN customer_master cust ON sd.customer = cust.KUNNR
+                LEFT JOIN territory_master tm ON cust.territory = tm.territory_code
+                LEFT JOIN region_master rm ON tm.region_code = rm.region
+                WHERE (%s IS NULL OR rm.zone = %s)
+                  AND (rm.region = %s OR rm.region_name = %s OR UPPER(TRIM(rm.region_name)) = UPPER(TRIM(%s)))
+                GROUP BY cm.category_name
+                HAVING total_sales_cr > 0
+                ORDER BY total_sales_cr DESC;
+            """
+            cursor.execute(sql, (z_val, z_val, reg_val, reg_val, reg_val))
+            if hasattr(cursor, 'fetchall'):
+                return cursor.fetchall()
+            return []
+
         args = (zone,) if zone and str(zone).strip().lower() != "all" else (None,)
         cursor.callproc('sp_get_category_sales', args)
         rows = []
@@ -260,13 +322,29 @@ def calculate_category_sales_mysql(cursor, session_id, zone=None):
     except Exception as e:
         print(f"[Category Sales] MySQL calculation note: {e}", flush=True)
         return []
+    finally:
+        try:
+            main_db = MYSQL_CONFIG.get("database", "dagent_v2")
+            cursor.execute(f"USE `{main_db}`")
+        except Exception:
+            pass
 
 
 def get_category_sales_controller(get_db_connection):
     session_id = request.args.get("session_id")
     zone = request.args.get("zone")
+    region = request.args.get("region")
     year = request.args.get("year") or request.args.get("years")
     force_refresh = request.args.get("force_refresh", "").lower() in ("true", "1")
+
+    if request.is_json and request.get_json():
+        body = request.get_json()
+        session_id = session_id or body.get("session_id")
+        zone = zone or body.get("zone")
+        region = region or body.get("region")
+        year = year or body.get("year") or body.get("years")
+        if not force_refresh:
+            force_refresh = str(body.get("force_refresh", "")).lower() in ("true", "1")
 
     mysql_conn, hana_conn, tunnel, is_hana, schema, effective_session = \
         _get_connection_context(get_db_connection, session_id)
@@ -277,7 +355,7 @@ def get_category_sales_controller(get_db_connection):
     try:
         # 1. Check MySQL table `dashboard_category_sales` first if not force_refresh
         if not force_refresh:
-            cached = get_cached_category_sales(mysql_conn, effective_session, zone=zone)
+            cached = get_cached_category_sales(mysql_conn, effective_session, zone=zone, region=region)
             if cached and cached.get("data"):
                 return jsonify({
                     "status": "success",
@@ -290,16 +368,16 @@ def get_category_sales_controller(get_db_connection):
         # 2. Compute dynamically using self-contained query function
         if is_hana:
             cursor = hana_conn.cursor()
-            results = calculate_category_sales_hana(cursor, schema, zone=zone, year=year)
+            results = calculate_category_sales_hana(cursor, schema, zone=zone, year=year, region=region)
             cursor.close()
         else:
             cursor = mysql_conn.cursor(dictionary=True) if hasattr(mysql_conn, "cursor") else mysql_conn.cursor()
-            results = calculate_category_sales_mysql(cursor, effective_session, zone=zone)
+            results = calculate_category_sales_mysql(cursor, effective_session, zone=zone, region=region)
             cursor.close()
 
         # 3. Save into `dashboard_category_sales` table
         if results:
-            save_category_sales_to_table(mysql_conn, effective_session, zone, results)
+            save_category_sales_to_table(mysql_conn, effective_session, zone, results, region=region)
 
         return jsonify({
             "status": "success",

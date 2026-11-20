@@ -626,11 +626,13 @@ CREATE TABLE IF NOT EXISTS `dashboard_category_sales` (
     `id` BIGINT AUTO_INCREMENT PRIMARY KEY,
     `session_id` VARCHAR(100) NOT NULL,
     `zone_code` VARCHAR(20) NOT NULL DEFAULT 'ALL',
+    `region_code` VARCHAR(50) NOT NULL DEFAULT 'ALL',
     `category_name` VARCHAR(100) NOT NULL,
     `total_sales_cr` DECIMAL(18, 2) NOT NULL DEFAULT 0.00,
     `last_synced_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP,
-    INDEX `idx_session_zone` (`session_id`, `zone_code`)
+    INDEX `idx_session_zone` (`session_id`, `zone_code`),
+    INDEX `idx_session_zone_reg` (`session_id`, `zone_code`, `region_code`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 """
 
@@ -643,25 +645,35 @@ def ensure_category_sales_table(conn):
     try:
         cur = conn.cursor()
         cur.execute(CATEGORY_SALES_TABLE_SQL)
+        try:
+            cur.execute("SELECT region_code FROM `dashboard_category_sales` LIMIT 1")
+            cur.fetchall()
+        except Exception:
+            try:
+                cur.execute("ALTER TABLE `dashboard_category_sales` ADD COLUMN `region_code` VARCHAR(50) NOT NULL DEFAULT 'ALL' AFTER `zone_code`")
+                cur.execute("ALTER TABLE `dashboard_category_sales` ADD INDEX `idx_session_zone_reg` (`session_id`, `zone_code`, `region_code`)")
+            except Exception:
+                pass
         conn.commit()
         cur.close()
         _category_sales_table_init = True
     except Exception as e:
         print(f"[Category Sales Table] init: {e}", flush=True)
 
-def get_category_sales_table_data(conn, session_id: str, zone: str = None):
+def get_category_sales_table_data(conn, session_id: str, zone: str = None, region: str = None):
     if not conn or not session_id:
         return None
     try:
         ensure_category_sales_table(conn)
-        z_code = str(zone).strip() if zone and str(zone).strip().lower() != "all" else "ALL"
+        z_code = str(zone).strip() if zone and str(zone).strip().lower() not in ("all", "null", "none", "") else "ALL"
+        r_code = str(region).strip() if region and str(region).strip().lower() not in ("all", "null", "none", "") else "ALL"
         cur = _get_dict_cursor(conn)
         cur.execute("""
             SELECT category_name, total_sales_cr, last_synced_at
             FROM `dashboard_category_sales`
-            WHERE session_id = %s AND zone_code = %s
+            WHERE session_id = %s AND zone_code = %s AND region_code = %s
             ORDER BY total_sales_cr DESC
-        """, (str(session_id).strip(), z_code))
+        """, (str(session_id).strip(), z_code, r_code))
         rows = cur.fetchall()
         cur.close()
         if not rows:
@@ -682,27 +694,28 @@ def get_category_sales_table_data(conn, session_id: str, zone: str = None):
         print(f"[Category Sales Table] Read error: {e}", flush=True)
         return None
 
-def save_category_sales_table_data(conn, session_id: str, zone: str, data_list: list):
+def save_category_sales_table_data(conn, session_id: str, zone: str, data_list: list, region: str = None):
     if not conn or not session_id or not data_list:
         return False
     try:
         ensure_category_sales_table(conn)
         from datetime import datetime, timezone, timedelta
         ist_now = datetime.now(timezone(timedelta(hours=5, minutes=30))).strftime('%Y-%m-%d %H:%M:%S')
-        z_code = str(zone).strip() if zone and str(zone).strip().lower() != "all" else "ALL"
+        z_code = str(zone).strip() if zone and str(zone).strip().lower() not in ("all", "null", "none", "") else "ALL"
+        r_code = str(region).strip() if region and str(region).strip().lower() not in ("all", "null", "none", "") else "ALL"
         cur = conn.cursor()
-        cur.execute("DELETE FROM `dashboard_category_sales` WHERE session_id = %s AND zone_code = %s", (str(session_id).strip(), z_code))
+        cur.execute("DELETE FROM `dashboard_category_sales` WHERE session_id = %s AND zone_code = %s AND region_code = %s", (str(session_id).strip(), z_code, r_code))
         sql = """
             INSERT INTO `dashboard_category_sales`
-                (`session_id`, `zone_code`, `category_name`, `total_sales_cr`, `last_synced_at`, `created_at`)
-            VALUES (%s, %s, %s, %s, %s, %s)
+                (`session_id`, `zone_code`, `region_code`, `category_name`, `total_sales_cr`, `last_synced_at`, `created_at`)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
         """
         batch = []
         for item in data_list:
             if isinstance(item, dict):
                 cn = str(item.get("category") or item.get("CATEGORY") or item.get("title") or "")[:100]
                 cr = float(item.get("total_sales_cr") or item.get("valCr") or 0.0)
-                batch.append((str(session_id).strip(), z_code, cn, cr, ist_now, ist_now))
+                batch.append((str(session_id).strip(), z_code, r_code, cn, cr, ist_now, ist_now))
         if batch:
             cur.executemany(sql, batch)
             conn.commit()
@@ -721,11 +734,13 @@ CREATE TABLE IF NOT EXISTS `dashboard_account_category_sales` (
     `id` BIGINT AUTO_INCREMENT PRIMARY KEY,
     `session_id` VARCHAR(100) NOT NULL,
     `zone_code` VARCHAR(20) NOT NULL DEFAULT 'ALL',
+    `region_code` VARCHAR(50) NOT NULL DEFAULT 'ALL',
     `category_title` VARCHAR(100) NOT NULL,
     `sales_value_cr` DECIMAL(18, 2) NOT NULL DEFAULT 0.00,
     `last_synced_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP,
-    INDEX `idx_session_zone` (`session_id`, `zone_code`)
+    INDEX `idx_session_zone` (`session_id`, `zone_code`),
+    INDEX `idx_session_zone_reg` (`session_id`, `zone_code`, `region_code`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 """
 
@@ -738,28 +753,38 @@ def ensure_account_category_sales_table(conn):
     try:
         cur = conn.cursor()
         cur.execute(ACCOUNT_CATEGORY_SALES_TABLE_SQL)
+        try:
+            cur.execute("SELECT region_code FROM `dashboard_account_category_sales` LIMIT 1")
+            cur.fetchall()
+        except Exception:
+            try:
+                cur.execute("ALTER TABLE `dashboard_account_category_sales` ADD COLUMN `region_code` VARCHAR(50) NOT NULL DEFAULT 'ALL' AFTER `zone_code`")
+                cur.execute("ALTER TABLE `dashboard_account_category_sales` ADD INDEX `idx_session_zone_reg` (`session_id`, `zone_code`, `region_code`)")
+            except Exception:
+                pass
         conn.commit()
         cur.close()
         _account_cat_sales_table_init = True
     except Exception as e:
         print(f"[Account Category Sales Table] init: {e}", flush=True)
 
-def get_account_category_sales_table_data(conn, session_id: str, zone: str = None):
+def get_account_category_sales_table_data(conn, session_id: str, zone: str = None, region: str = None):
     if not conn or not session_id:
         return None
     try:
         ensure_account_category_sales_table(conn)
-        z_code = str(zone).strip() if zone and str(zone).strip().lower() != "all" else "ALL"
+        z_code = str(zone).strip() if zone and str(zone).strip().lower() not in ("all", "null", "none", "") else "ALL"
+        r_code = str(region).strip() if region and str(region).strip().lower() not in ("all", "null", "none", "") else "ALL"
         cur = _get_dict_cursor(conn)
         cur.execute("""
             SELECT category_title, sales_value_cr, last_synced_at
             FROM `dashboard_account_category_sales`
-            WHERE session_id = %s AND zone_code = %s
+            WHERE session_id = %s AND zone_code = %s AND region_code = %s
               AND category_title IS NOT NULL
               AND TRIM(category_title) <> ''
               AND LOWER(TRIM(category_title)) NOT IN ('account category', 'unknown', '0', 'null', 'none')
             ORDER BY sales_value_cr DESC
-        """, (str(session_id).strip(), z_code))
+        """, (str(session_id).strip(), z_code, r_code))
         rows = cur.fetchall()
         cur.close()
         if not rows:
@@ -781,20 +806,21 @@ def get_account_category_sales_table_data(conn, session_id: str, zone: str = Non
         print(f"[Account Category Sales Table] Read error: {e}", flush=True)
         return None
 
-def save_account_category_sales_table_data(conn, session_id: str, zone: str, data_list: list):
+def save_account_category_sales_table_data(conn, session_id: str, zone: str, data_list: list, region: str = None):
     if not conn or not session_id or not data_list:
         return False
     try:
         ensure_account_category_sales_table(conn)
         from datetime import datetime, timezone, timedelta
         ist_now = datetime.now(timezone(timedelta(hours=5, minutes=30))).strftime('%Y-%m-%d %H:%M:%S')
-        z_code = str(zone).strip() if zone and str(zone).strip().lower() != "all" else "ALL"
+        z_code = str(zone).strip() if zone and str(zone).strip().lower() not in ("all", "null", "none", "") else "ALL"
+        r_code = str(region).strip() if region and str(region).strip().lower() not in ("all", "null", "none", "") else "ALL"
         cur = conn.cursor()
-        cur.execute("DELETE FROM `dashboard_account_category_sales` WHERE session_id = %s AND zone_code = %s", (str(session_id).strip(), z_code))
+        cur.execute("DELETE FROM `dashboard_account_category_sales` WHERE session_id = %s AND zone_code = %s AND region_code = %s", (str(session_id).strip(), z_code, r_code))
         sql = """
             INSERT INTO `dashboard_account_category_sales`
-                (`session_id`, `zone_code`, `category_title`, `sales_value_cr`, `last_synced_at`, `created_at`)
-            VALUES (%s, %s, %s, %s, %s, %s)
+                (`session_id`, `zone_code`, `region_code`, `category_title`, `sales_value_cr`, `last_synced_at`, `created_at`)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
         """
         batch = []
         for item in data_list:
@@ -803,7 +829,7 @@ def save_account_category_sales_table_data(conn, session_id: str, zone: str, dat
                 if not ct or ct.lower() in ("account category", "unknown", "0", "null", "none"):
                     continue
                 cr = float(item.get("valCr") or item.get("value") or 0.0)
-                batch.append((str(session_id).strip(), z_code, ct, cr, ist_now, ist_now))
+                batch.append((str(session_id).strip(), z_code, r_code, ct, cr, ist_now, ist_now))
         if batch:
             cur.executemany(sql, batch)
             conn.commit()
