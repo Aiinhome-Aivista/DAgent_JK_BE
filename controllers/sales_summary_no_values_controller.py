@@ -17,6 +17,7 @@ import calendar
 from datetime import datetime
 from flask import request, jsonify
 from helper.sap_connection import get_sap_connection_for_session, sanitize_and_execute_hana, detect_sales_dates, get_rolling_sales_boundary
+from helper.period_filter_helper import parse_period_args
 
 TABLE_NAME = "sales_summary_no_values"
 
@@ -24,7 +25,7 @@ CREATE_TABLE_SQL = f"""
 CREATE TABLE IF NOT EXISTS `{TABLE_NAME}` (
     `id` INT AUTO_INCREMENT PRIMARY KEY,
     `session_id` VARCHAR(100) NOT NULL,
-    `year_month` VARCHAR(10) NOT NULL,
+    `year_month` VARCHAR(60) NOT NULL,
     `selected_date` DATE NOT NULL,
     `zone_name` VARCHAR(60) NOT NULL,
     `row_type` VARCHAR(20) NOT NULL,
@@ -67,6 +68,10 @@ def ensure_table(conn):
     try:
         cur = conn.cursor()
         cur.execute(CREATE_TABLE_SQL)
+        try:
+            cur.execute(f"ALTER TABLE `{TABLE_NAME}` MODIFY `year_month` VARCHAR(60) NOT NULL")
+        except Exception:
+            pass
         conn.commit()
         cur.close()
         _table_initialized = True
@@ -178,7 +183,7 @@ def _clean_zone(name, p_zone=None):
     return n, 8
 
 
-def query_sales_summary_no_values_hana(cursor, schema, year_month: str, selected_date: str):
+def query_sales_summary_no_values_hana(cursor, schema, year_month: str, selected_date: str, period_info: dict = None):
     """
     Executes memory-optimized HANA query for Sales Summary in No's & Values (Sheet 4).
     Calculates Actuals and Targets grouped by Zone across:
@@ -187,18 +192,26 @@ def query_sales_summary_no_values_hana(cursor, schema, year_month: str, selected
       Car Bias, Car Radial, Jeep Bias, Jeep Radial, Tr. Fro, Tr. Rear, Tr. Trail,
       ADV, 3 Whlrs, Scooter, Motor
     """
-    curr_yr = int(year_month[:4])
-    curr_mo = int(year_month[4:6])
+    if period_info:
+        curr_from = period_info["curr_from"]
+        curr_to = period_info["curr_to"]
+        tgt_ym_list = ", ".join(f"'{ym}'" for ym in period_info.get("target_ymonths", [year_month]))
+        target_where = f'(CAST(tgt."YMONTH" AS VARCHAR) IN ({tgt_ym_list}) OR tgt."YMONTH" IN ({tgt_ym_list}))'
+    else:
+        curr_yr = int(year_month[:4])
+        curr_mo = int(year_month[4:6])
 
-    last_day_curr = calendar.monthrange(curr_yr, curr_mo)[1]
-    try:
-        sel_d = int(str(selected_date).split("-")[2])
-    except Exception:
-        sel_d = last_day_curr
+        last_day_curr = calendar.monthrange(curr_yr, curr_mo)[1]
+        try:
+            sel_d = int(str(selected_date).split("-")[2])
+        except Exception:
+            sel_d = last_day_curr
 
-    day_clamped = min(sel_d, last_day_curr)
-    curr_from = f"{curr_yr}-{str(curr_mo).zfill(2)}-01"
-    curr_to = f"{curr_yr}-{str(curr_mo).zfill(2)}-{str(day_clamped).zfill(2)}"
+        day_clamped = min(sel_d, last_day_curr)
+        curr_from = f"{curr_yr}-{str(curr_mo).zfill(2)}-01"
+        curr_to = f"{curr_yr}-{str(curr_mo).zfill(2)}-{str(day_clamped).zfill(2)}"
+        target_where = f'(CAST(tgt."YMONTH" AS VARCHAR) = \'{year_month}\' OR tgt."YMONTH" = \'{year_month}\')'
+
     boundary_date = get_rolling_sales_boundary(cursor, schema)
 
     hana_sql = f"""
@@ -354,7 +367,7 @@ def query_sales_summary_no_values_hana(cursor, schema, year_month: str, selected
         LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm ON (TRIM(tgt."TERR_CODE") = TRIM(tm."BZIRK"))
         LEFT JOIN "{schema}"."ZIVF_RegionMaster_MD_01" rm ON (TRIM(COALESCE(NULLIF(TRIM(tgt."REG_CODE"), ''), NULLIF(TRIM(tm."REGIO"), ''))) = TRIM(rm."region_code"))
         LEFT JOIN "{schema}"."ZIVF_ZoneMaster_01_TR" zm ON (zm."P_ZONE" = COALESCE(NULLIF(TRIM(rm."zone_code"), ''), NULLIF(TRIM(tm."P_ZONE"), '')))
-        WHERE tgt."YMONTH" = '{year_month}'
+        WHERE {target_where}
           AND zm."NAME" IS NOT NULL AND TRIM(zm."NAME") != '' AND UPPER(TRIM(zm."NAME")) NOT LIKE '%UNKNOWN%'
         GROUP BY zm."NAME", zm."P_ZONE"
     ),
@@ -956,39 +969,16 @@ def get_sales_summary_no_values_controller(get_db_connection):
             detected_month = int(param_month) if param_month else now.month
             detected_day = int(param_day) if param_day else now.day
 
-        selected_mo_num = None
-        if param_month is not None:
-            try:
-                p_str = str(param_month).strip().upper()
-                if p_str.isdigit():
-                    selected_mo_num = int(p_str)
-                else:
-                    found = next((m for m in master_months if m["month_name"] == p_str), None)
-                    if found:
-                        selected_mo_num = found["month_no"]
-            except Exception:
-                pass
-
-        if not selected_mo_num and param_ym:
-            try:
-                clean_ym = str(param_ym).strip()
-                if len(clean_ym) == 6:
-                    selected_mo_num = int(clean_ym[4:6])
-                elif clean_ym.isdigit():
-                    selected_mo_num = int(clean_ym)
-            except Exception:
-                pass
-
-        if not selected_mo_num or selected_mo_num < 1 or selected_mo_num > 12:
-            selected_mo_num = int(detected_month)
-
-        year_month = f"{current_year}{str(selected_mo_num).zfill(2)}"
-
-        if selected_mo_num == detected_month:
-            selected_date = f"{current_year}-{str(selected_mo_num).zfill(2)}-{str(detected_day).zfill(2)}"
-        else:
-            last_d = calendar.monthrange(current_year, selected_mo_num)[1]
-            selected_date = f"{current_year}-{str(selected_mo_num).zfill(2)}-{str(last_d).zfill(2)}"
+        period_info = parse_period_args(
+            request.args,
+            detected_year=current_year,
+            detected_month=detected_month,
+            detected_day=detected_day,
+            master_months=master_months
+        )
+        year_month = period_info["cache_key"]
+        selected_date = period_info["day_date"]
+        selected_mo_num = period_info["selected_months"][0] if period_info["selected_months"] else detected_month
 
         rows = []
         is_fresh = False
@@ -1001,7 +991,7 @@ def get_sales_summary_no_values_controller(get_db_connection):
         if not is_fresh and is_hana:
             try:
                 h_cur = hana_conn.cursor()
-                hana_res = query_sales_summary_no_values_hana(h_cur, schema, year_month, selected_date)
+                hana_res = query_sales_summary_no_values_hana(h_cur, schema, year_month, selected_date, period_info=period_info)
                 h_cur.close()
                 if hana_res and len(hana_res) > 0:
                     rows = hana_res
@@ -1030,21 +1020,24 @@ def get_sales_summary_no_values_controller(get_db_connection):
                             "is_total": is_tot
                         })
 
-        mo_abbr = calendar.month_abbr[selected_mo_num]
-        curr_yr_short = str(current_year)[-2:]
-
-        meta_info = {
-            "month_abbr": mo_abbr,
-            "curr_year_short": curr_yr_short,
-            "title_label": f"Sales Summary in No's & Values for {mo_abbr}-{curr_yr_short}"
-        }
+        meta_info = period_info["meta"]
+        meta_info["curr_year_short"] = str(period_info["year"])[-2:]
+        meta_info["title_label"] = f"Sales Summary in No's & Values for {period_info['meta']['curr_period_label']}"
 
         return jsonify({
             "status": "success",
             "data": rows,
             "months": master_months,
             "selected_month": selected_mo_num,
-            "meta": meta_info
+            "meta": meta_info,
+            "period_info": {
+                "mode": period_info["mode"],
+                "months": period_info["selected_months"],
+                "year": period_info["year"],
+                "start_date": period_info["start_date"],
+                "end_date": period_info["end_date"],
+                "label": period_info["meta"]["curr_period_label"]
+            }
         }), 200
 
     finally:

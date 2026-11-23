@@ -15,6 +15,7 @@ from datetime import datetime
 from flask import request, jsonify
 from helper.sap_connection import get_sap_connection_for_session, sanitize_and_execute_hana, detect_sales_dates
 from utils.logger_service import log_system_error
+from helper.period_filter_helper import parse_period_args
 
 TABLE_NAME = "sales_summary_sales_numbers"
 
@@ -114,6 +115,11 @@ def ensure_table(conn):
     try:
         cur = conn.cursor()
         cur.execute(CREATE_TABLE_SQL)
+        try:
+            cur.execute(f"ALTER TABLE `{TABLE_NAME}` MODIFY COLUMN `year_month` VARCHAR(60) NOT NULL")
+            conn.commit()
+        except Exception:
+            pass
         conn.commit()
         cur.close()
         _table_initialized = True
@@ -203,7 +209,7 @@ def fetch_master_months(cursor, schema):
     return months
 
 
-def query_sales_numbers_hana(cursor, schema, year_month: str, selected_date: str):
+def query_sales_numbers_hana(cursor, schema, year_month: str, selected_date: str, period_info: dict = None):
     """
     Executes memory-optimized HANA query for Sales Number's (Sheet 2).
     Slices sales numbers by:
@@ -214,23 +220,33 @@ def query_sales_numbers_hana(cursor, schema, year_month: str, selected_date: str
     - Domestic Total: Target, Actual, % Achv.
     Grouped by Category: <TYRE_TYPE> - <CONSTRUCTION>
     """
-    curr_yr = int(year_month[:4])
-    curr_mo = int(year_month[4:6])
-    prev_yr = curr_yr - 1
+    if period_info:
+        curr_from = period_info["curr_from"]
+        curr_month_end = period_info["curr_to"]
+        prev_from = period_info["prev_from"]
+        prev_month_end = period_info["prev_to"]
+        day_date = period_info["day_date"]
+        tgt_ym_list = ", ".join(f"'{ym}'" for ym in period_info.get("target_ymonths", [year_month]))
+        target_where = f'(CAST(tgt."YMONTH" AS VARCHAR) IN ({tgt_ym_list}) OR tgt."YMONTH" IN ({tgt_ym_list}))'
+    else:
+        curr_yr = int(year_month[:4])
+        curr_mo = int(year_month[4:6])
+        prev_yr = curr_yr - 1
 
-    last_day_curr = calendar.monthrange(curr_yr, curr_mo)[1]
-    try:
-        sel_d = int(str(selected_date).split("-")[2])
-    except Exception:
-        sel_d = last_day_curr
+        last_day_curr = calendar.monthrange(curr_yr, curr_mo)[1]
+        try:
+            sel_d = int(str(selected_date).split("-")[2])
+        except Exception:
+            sel_d = last_day_curr
 
-    curr_from = f"{curr_yr}-{str(curr_mo).zfill(2)}-01"
-    curr_month_end = f"{curr_yr}-{str(curr_mo).zfill(2)}-{str(min(sel_d, last_day_curr)).zfill(2)}"
-    day_date = str(selected_date)
+        curr_from = f"{curr_yr}-{str(curr_mo).zfill(2)}-01"
+        curr_month_end = f"{curr_yr}-{str(curr_mo).zfill(2)}-{str(min(sel_d, last_day_curr)).zfill(2)}"
+        day_date = str(selected_date)
 
-    last_day_prev = calendar.monthrange(prev_yr, curr_mo)[1]
-    prev_from = f"{prev_yr}-{str(curr_mo).zfill(2)}-01"
-    prev_month_end = f"{prev_yr}-{str(curr_mo).zfill(2)}-{str(last_day_prev).zfill(2)}"
+        last_day_prev = calendar.monthrange(prev_yr, curr_mo)[1]
+        prev_from = f"{prev_yr}-{str(curr_mo).zfill(2)}-01"
+        prev_month_end = f"{prev_yr}-{str(curr_mo).zfill(2)}-{str(last_day_prev).zfill(2)}"
+        target_where = f'(CAST(tgt."YMONTH" AS VARCHAR) = \'{year_month}\' OR tgt."YMONTH" = \'{year_month}\')'
 
     hana_sql = f"""
     WITH
@@ -441,7 +457,7 @@ def query_sales_numbers_hana(cursor, schema, year_month: str, selected_date: str
             ON LTRIM(TRIM(tgt."MATNR"), '0') = sk."MATNR"
         LEFT JOIN "{schema}"."ZIVF_CategoryMaster_01_TR" cat
             ON (COALESCE(NULLIF(TRIM(tgt."CAT_CODE"), ''), NULLIF(TRIM(sk."CAT_CODE"), '')) = TRIM(cat."CAT_CODE"))
-        WHERE (CAST(tgt."YMONTH" AS VARCHAR) = '{year_month}' OR tgt."YMONTH" = '{year_month}')
+        WHERE {target_where}
     ),
 
     AGG_TARGET AS (
@@ -811,42 +827,16 @@ def get_sales_numbers_report_controller(get_db_connection):
             except Exception as e:
                 print(f"[{TABLE_NAME}] HANA date detection error: {e}", flush=True)
 
-        previous_year = current_year - 1
-
-        selected_mo_num = None
-        if param_month:
-            try:
-                clean_m = str(param_month).strip().upper()
-                if clean_m.isdigit():
-                    selected_mo_num = int(clean_m)
-                else:
-                    found = next((m for m in master_months if m["month_name"].upper() == clean_m or m["month_name"].upper().startswith(clean_m[:3])), None)
-                    if found:
-                        selected_mo_num = found["month_no"]
-            except Exception:
-                pass
-
-        if not selected_mo_num and param_ym:
-            try:
-                clean_ym = str(param_ym).strip()
-                if len(clean_ym) == 6:
-                    selected_mo_num = int(clean_ym[4:6])
-                elif clean_ym.isdigit():
-                    selected_mo_num = int(clean_ym)
-            except Exception:
-                pass
-
-        if not selected_mo_num or selected_mo_num < 1 or selected_mo_num > 12:
-            selected_mo_num = int(detected_month)
-
-        year_month = f"{current_year}{str(selected_mo_num).zfill(2)}"
-
-        if not selected_date or str(selected_date).strip() in ("", "null", "None"):
-            if selected_mo_num == detected_month:
-                selected_date = f"{current_year}-{str(selected_mo_num).zfill(2)}-{str(detected_day).zfill(2)}"
-            else:
-                last_d = calendar.monthrange(current_year, selected_mo_num)[1]
-                selected_date = f"{current_year}-{str(selected_mo_num).zfill(2)}-{str(last_d).zfill(2)}"
+        period_info = parse_period_args(
+            request.args,
+            detected_year=current_year,
+            detected_month=detected_month,
+            detected_day=detected_day,
+            master_months=master_months
+        )
+        year_month = period_info["cache_key"]
+        selected_date = period_info["day_date"]
+        selected_mo_num = period_info["selected_months"][0] if period_info["selected_months"] else detected_month
 
         rows = []
         is_fresh = False
@@ -859,7 +849,7 @@ def get_sales_numbers_report_controller(get_db_connection):
         if not is_fresh and is_hana:
             try:
                 h_cur = hana_conn.cursor()
-                hana_res = query_sales_numbers_hana(h_cur, schema, year_month, selected_date)
+                hana_res = query_sales_numbers_hana(h_cur, schema, year_month, selected_date, period_info=period_info)
                 h_cur.close()
                 if hana_res and len(hana_res) > 0:
                     rows = hana_res
@@ -870,23 +860,22 @@ def get_sales_numbers_report_controller(get_db_connection):
         if not rows and cached_rows:
             rows = cached_rows
 
-        mo_abbr = calendar.month_abbr[selected_mo_num]
-        prev_yr_short = str(previous_year)[-2:]
-        curr_yr_short = str(current_year)[-2:]
-
-        meta_info = {
-            "month_abbr": mo_abbr,
-            "prev_year_label": f"{mo_abbr}-{prev_yr_short} Act",
-            "curr_year_label": f"Actual Sale for {mo_abbr}-{curr_yr_short}",
-            "day_label": f"Sale for day"
-        }
+        meta_info = period_info["meta"]
 
         return jsonify({
             "status": "success",
             "data": rows,
             "months": master_months,
             "selected_month": selected_mo_num,
-            "meta": meta_info
+            "meta": meta_info,
+            "period_info": {
+                "mode": period_info["mode"],
+                "months": period_info["selected_months"],
+                "year": period_info["year"],
+                "start_date": period_info["start_date"],
+                "end_date": period_info["end_date"],
+                "label": period_info["meta"]["curr_period_label"]
+            }
         }), 200
 
     finally:

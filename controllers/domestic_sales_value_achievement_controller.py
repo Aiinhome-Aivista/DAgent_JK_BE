@@ -42,6 +42,11 @@ def ensure_table(conn):
     try:
         cur = conn.cursor()
         cur.execute(CREATE_TABLE_SQL)
+        try:
+            cur.execute(f"ALTER TABLE `{TABLE_NAME}` MODIFY COLUMN `year_month` VARCHAR(60) NOT NULL")
+            conn.commit()
+        except Exception:
+            pass
         conn.commit()
         cur.close()
         _table_initialized = True
@@ -147,13 +152,51 @@ def fetch_master_months(cursor, schema):
     return months
 
 
-def query_domestic_sales_value_achievement_hana(cursor, schema, year_month: str, selected_date: str):
+def query_domestic_sales_value_achievement_hana(cursor, schema, year_month: str, selected_date: str, period_info: dict = None):
     """
     Executes user's exact HANA SQL query for Domestic Sales Value Achievement.
     Parameters:
-      year_month: e.g. '202611'
+      year_month: e.g. '202611' or cache_key
       selected_date: e.g. '2026-11-04'
+      period_info: Optional parsed period dict with curr_from, curr_to, prev_from, prev_to, day_date, target_ymonths
     """
+    if period_info:
+        tgt_ym_list = ", ".join(f"'{ym}'" for ym in period_info.get("target_ymonths", [year_month]))
+        target_where = f'(CAST(T."YMONTH" AS VARCHAR) IN ({tgt_ym_list}) OR T."YMONTH" IN ({tgt_ym_list}))'
+        date_params_cte = f"""
+            SELECT
+                '{period_info.get("cache_key", year_month)}' AS P_YEAR_MONTH,
+                TO_DATE('{period_info.get("day_date", selected_date)}') AS P_SELECTED_DATE,
+                TO_DATE('{period_info.get("curr_from")}') AS CURRENT_MONTH_START,
+                ADD_DAYS(TO_DATE('{period_info.get("curr_to")}'), 1) AS CURRENT_MTD_END,
+                TO_DATE('{period_info.get("prev_from")}') AS PREVIOUS_MONTH_START,
+                ADD_DAYS(TO_DATE('{period_info.get("prev_to")}'), 1) AS CURRENT_MONTH_END,
+                TO_DATE('{period_info.get("prev_to")}') AS PREVIOUS_SELECTED_DATE
+            FROM DUMMY
+        """
+    else:
+        target_where = '(CAST(T."YMONTH" AS VARCHAR) = D.P_YEAR_MONTH OR T."YMONTH" = D.P_YEAR_MONTH)'
+        date_params_cte = """
+            SELECT
+                P_YEAR_MONTH,
+                P_SELECTED_DATE,
+                TO_DATE(P_YEAR_MONTH || '01', 'YYYYMMDD') AS CURRENT_MONTH_START,
+                ADD_DAYS(P_SELECTED_DATE, 1) AS CURRENT_MTD_END,
+                ADD_MONTHS(
+                    TO_DATE(P_YEAR_MONTH || '01', 'YYYYMMDD'),
+                    -12
+                ) AS PREVIOUS_MONTH_START,
+                ADD_MONTHS(
+                    TO_DATE(P_YEAR_MONTH || '01', 'YYYYMMDD'),
+                    1
+                ) AS CURRENT_MONTH_END,
+                ADD_MONTHS(
+                    P_SELECTED_DATE,
+                    -12
+                ) AS PREVIOUS_SELECTED_DATE
+            FROM INPUT_PARAMS
+        """
+
     hana_sql = f"""
     WITH INPUT_PARAMS AS
     (
@@ -165,30 +208,7 @@ def query_domestic_sales_value_achievement_hana(cursor, schema, year_month: str,
 
     DATE_PARAMS AS
     (
-        SELECT
-            P_YEAR_MONTH,
-            P_SELECTED_DATE,
-
-            TO_DATE(P_YEAR_MONTH || '01', 'YYYYMMDD') AS CURRENT_MONTH_START,
-
-            ADD_DAYS(P_SELECTED_DATE, 1) AS CURRENT_MTD_END,
-
-            ADD_MONTHS(
-                TO_DATE(P_YEAR_MONTH || '01', 'YYYYMMDD'),
-                -12
-            ) AS PREVIOUS_MONTH_START,
-
-            ADD_MONTHS(
-                TO_DATE(P_YEAR_MONTH || '01', 'YYYYMMDD'),
-                1
-            ) AS CURRENT_MONTH_END,
-
-            ADD_MONTHS(
-                P_SELECTED_DATE,
-                -12
-            ) AS PREVIOUS_SELECTED_DATE
-
-        FROM INPUT_PARAMS
+        {date_params_cte}
     ),
 
     SALES_DATA AS
@@ -355,7 +375,7 @@ def query_domestic_sales_value_achievement_hana(cursor, schema, year_month: str,
         CROSS JOIN DATE_PARAMS D
 
         WHERE
-            (CAST(T."YMONTH" AS VARCHAR) = D.P_YEAR_MONTH OR T."YMONTH" = D.P_YEAR_MONTH)
+            {target_where}
 
         GROUP BY
             CASE
@@ -769,69 +789,31 @@ def get_domestic_sales_value_achievement_controller(get_db_connection):
         if not master_months:
             master_months = [{"month_no": m, "month_name": calendar.month_abbr[m].upper()} for m in range(1, 13)]
 
-        # 3. Determine user selected month number (1 to 12)
-        param_m = request.args.get("month") or (request.json.get("month") if request.is_json else None)
-        param_ym = request.args.get("year_month") or (request.json.get("year_month") if request.is_json else None)
-        selected_date = request.args.get("selected_date") or (request.json.get("selected_date") if request.is_json else None)
-        force_refresh = (request.args.get("force_refresh", "").lower() in ("true", "1")) or \
-                        (request.is_json and str(request.json.get("force_refresh", "")).lower() in ("true", "1"))
+        # 3. Determine dynamic period parameters (Single Month, Multi-Month, Custom Date Range)
+        req_params = request.get_json(silent=True) if request.is_json else request.args
+        from helper.period_filter_helper import parse_period_args
+        period_info = parse_period_args(req_params, default_year=current_year, default_month=detected_month, default_day=detected_day)
 
-        selected_mo_num = None
-        if param_m:
-            try:
-                clean_m = str(param_m).strip().upper()
-                if clean_m.isdigit():
-                    selected_mo_num = int(clean_m)
-                else:
-                    found = next((m for m in master_months if m["month_name"] == clean_m), None)
-                    if found:
-                        selected_mo_num = found["month_no"]
-            except Exception:
-                pass
-
-        if not selected_mo_num and param_ym:
-            try:
-                clean_ym = str(param_ym).strip()
-                if len(clean_ym) == 6:
-                    selected_mo_num = int(clean_ym[4:6])
-                elif clean_ym.isdigit():
-                    selected_mo_num = int(clean_ym)
-            except Exception:
-                pass
-
-        if not selected_mo_num or selected_mo_num < 1 or selected_mo_num > 12:
-            selected_mo_num = int(detected_month)
-
-        # Dynamic year_month based on current_year (NO hardcoding!)
-        year_month = f"{current_year}{str(selected_mo_num).zfill(2)}"
-
-        # Determine selected_date for that month
-        if not selected_date or str(selected_date).strip() in ("", "null", "None"):
-            if selected_mo_num == detected_month:
-                selected_date = f"{current_year}-{str(selected_mo_num).zfill(2)}-{str(detected_day).zfill(2)}"
-            else:
-                last_d = calendar.monthrange(current_year, selected_mo_num)[1]
-                selected_date = f"{current_year}-{str(selected_mo_num).zfill(2)}-{str(last_d).zfill(2)}"
-        else:
-            selected_date = str(selected_date).strip()
-
-        # Dynamic header labels
-        mo_item = next((m for m in master_months if m["month_no"] == selected_mo_num), None)
-        mo_name = mo_item["month_name"].capitalize() if mo_item else calendar.month_abbr[selected_mo_num]
-        prev_yr_short = str(previous_year)[-2:]
-        curr_yr_short = str(current_year)[-2:]
-        try:
-            s_day = int(selected_date.split("-")[2])
-        except Exception:
-            s_day = 1
+        year_month = period_info["cache_key"]
+        selected_date = period_info["day_date"]
+        selected_mo_num = period_info["selected_month"]
 
         meta_info = {
-            "month_abbr": mo_name,
+            "month_abbr": period_info["meta"]["month_abbr"],
             "unit": "₹ in Cr",
-            "prev_year_label": f"{mo_name}-{prev_yr_short} Actual",
-            "curr_year_label": f"Actual Sale for {mo_name}-{curr_yr_short}",
-            "day_label": f"Sale for day {s_day}"
+            "prev_year_label": period_info["meta"]["prev_year_label"],
+            "curr_year_label": period_info["meta"]["curr_year_label"],
+            "day_label": period_info["meta"]["day_label"],
+            "filter_mode": period_info["meta"]["filter_mode"]
         }
+        if "months" in period_info["meta"]:
+            meta_info["months"] = period_info["meta"]["months"]
+        if "start_date" in period_info["meta"]:
+            meta_info["start_date"] = period_info["meta"]["start_date"]
+            meta_info["end_date"] = period_info["meta"]["end_date"]
+
+        force_refresh = (request.args.get("force_refresh", "").lower() in ("true", "1")) or \
+                        (request.is_json and str(request.json.get("force_refresh", "")).lower() in ("true", "1"))
 
         # 4. Check cache table if not force_refresh
         if not force_refresh:
@@ -859,7 +841,7 @@ def get_domestic_sales_value_achievement_controller(get_db_connection):
         # 5. Query from SAP HANA
         if is_hana:
             h_cur = hana_conn.cursor()
-            rows = query_domestic_sales_value_achievement_hana(h_cur, schema, year_month, selected_date)
+            rows = query_domestic_sales_value_achievement_hana(h_cur, schema, year_month, selected_date, period_info=period_info)
             h_cur.close()
         else:
             rows = [

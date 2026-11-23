@@ -18,6 +18,7 @@ import calendar
 from datetime import datetime
 from flask import request, jsonify
 from helper.sap_connection import get_sap_connection_for_session, sanitize_and_execute_hana, detect_sales_dates
+from helper.period_filter_helper import parse_period_args
 
 TABLE_NAME = "sales_summary_zone_wise_sales_achievement"
 
@@ -25,7 +26,7 @@ CREATE_TABLE_SQL = f"""
 CREATE TABLE IF NOT EXISTS `{TABLE_NAME}` (
     `id` INT AUTO_INCREMENT PRIMARY KEY,
     `session_id` VARCHAR(100) NOT NULL,
-    `year_month` VARCHAR(10) NOT NULL,
+    `year_month` VARCHAR(60) NOT NULL,
     `selected_date` DATE NOT NULL,
     `zone` VARCHAR(60) NOT NULL,
     `prev_year_actual_month` DECIMAL(18,2) DEFAULT 0,
@@ -54,6 +55,10 @@ def ensure_table(conn):
     try:
         cur = conn.cursor()
         cur.execute(CREATE_TABLE_SQL)
+        try:
+            cur.execute(f"ALTER TABLE `{TABLE_NAME}` MODIFY `year_month` VARCHAR(60) NOT NULL")
+        except Exception:
+            pass
         conn.commit()
         cur.close()
         _table_initialized = True
@@ -182,31 +187,43 @@ def _clean_zone(name, p_zone=None):
     return n, 8
 
 
-def query_zone_wise_sales_achievement_hana(cursor, schema, year_month: str, selected_date: str):
+def query_zone_wise_sales_achievement_hana(cursor, schema, year_month: str, selected_date: str, period_info: dict = None):
     """
     Queries HANA for zone-wise sales achievement metrics matching Sheet 1 columns.
     """
-    curr_yr = int(year_month[:4])
-    curr_mo = int(year_month[4:6])
-    prev_yr = curr_yr - 1
+    if period_info:
+        curr_from = period_info["curr_from"]
+        curr_to = period_info["curr_to"]
+        curr_month_end = period_info["curr_to"]
+        prev_from = period_info["prev_from"]
+        prev_to = period_info["prev_to"]
+        prev_month_end = period_info["prev_to"]
+        day_date = period_info["day_date"]
+        tgt_ym_list = ", ".join(f"'{ym}'" for ym in period_info.get("target_ymonths", [year_month]))
+        target_where = f'(CAST(tgt."YMONTH" AS VARCHAR) IN ({tgt_ym_list}) OR tgt."YMONTH" IN ({tgt_ym_list}))'
+    else:
+        curr_yr = int(year_month[:4])
+        curr_mo = int(year_month[4:6])
+        prev_yr = curr_yr - 1
 
-    last_day_curr = calendar.monthrange(curr_yr, curr_mo)[1]
-    try:
-        sel_d = int(str(selected_date).split("-")[2])
-    except Exception:
-        sel_d = last_day_curr
+        last_day_curr = calendar.monthrange(curr_yr, curr_mo)[1]
+        try:
+            sel_d = int(str(selected_date).split("-")[2])
+        except Exception:
+            sel_d = last_day_curr
 
-    day_clamped = min(sel_d, last_day_curr)
-    curr_from = f"{curr_yr}-{str(curr_mo).zfill(2)}-01"
-    curr_to = f"{curr_yr}-{str(curr_mo).zfill(2)}-{str(day_clamped).zfill(2)}"
-    curr_month_end = f"{curr_yr}-{str(curr_mo).zfill(2)}-{str(last_day_curr).zfill(2)}"
+        day_clamped = min(sel_d, last_day_curr)
+        curr_from = f"{curr_yr}-{str(curr_mo).zfill(2)}-01"
+        curr_to = f"{curr_yr}-{str(curr_mo).zfill(2)}-{str(day_clamped).zfill(2)}"
+        curr_month_end = f"{curr_yr}-{str(curr_mo).zfill(2)}-{str(last_day_curr).zfill(2)}"
 
-    last_day_prev = calendar.monthrange(prev_yr, curr_mo)[1]
-    prev_from = f"{prev_yr}-{str(curr_mo).zfill(2)}-01"
-    prev_to = f"{prev_yr}-{str(curr_mo).zfill(2)}-{str(min(day_clamped, last_day_prev)).zfill(2)}"
-    prev_month_end = f"{prev_yr}-{str(curr_mo).zfill(2)}-{str(last_day_prev).zfill(2)}"
+        last_day_prev = calendar.monthrange(prev_yr, curr_mo)[1]
+        prev_from = f"{prev_yr}-{str(curr_mo).zfill(2)}-01"
+        prev_to = f"{prev_yr}-{str(curr_mo).zfill(2)}-{str(min(day_clamped, last_day_prev)).zfill(2)}"
+        prev_month_end = f"{prev_yr}-{str(curr_mo).zfill(2)}-{str(last_day_prev).zfill(2)}"
 
-    day_date = curr_to if str(selected_date).startswith(f"{curr_yr}-{str(curr_mo).zfill(2)}") else curr_month_end
+        day_date = curr_to if str(selected_date).startswith(f"{curr_yr}-{str(curr_mo).zfill(2)}") else curr_month_end
+        target_where = f'(CAST(tgt."YMONTH" AS VARCHAR) = \'{year_month}\' OR tgt."YMONTH" = \'{year_month}\')'
 
     hana_sql = f"""
     WITH
@@ -288,7 +305,7 @@ def query_zone_wise_sales_achievement_hana(cursor, schema, year_month: str, sele
         LEFT JOIN "{schema}"."ZIVF_TerritoryMaster_01_TR" tm ON (TRIM(tgt."TERR_CODE") = TRIM(tm."BZIRK"))
         LEFT JOIN "{schema}"."ZIVF_RegionMaster_MD_01" rm ON (TRIM(COALESCE(NULLIF(TRIM(tgt."REG_CODE"), ''), NULLIF(TRIM(tm."REGIO"), ''))) = TRIM(rm."region_code"))
         LEFT JOIN "{schema}"."ZIVF_ZoneMaster_01_TR" zm ON (zm."P_ZONE" = COALESCE(NULLIF(TRIM(rm."zone_code"), ''), NULLIF(TRIM(tm."P_ZONE"), '')))
-        WHERE tgt."YMONTH" = '{year_month}'
+        WHERE {target_where}
           AND zm."NAME" IS NOT NULL AND TRIM(zm."NAME") != '' AND UPPER(TRIM(zm."NAME")) NOT LIKE '%UNKNOWN%'
         GROUP BY zm."NAME", zm."P_ZONE"
     ),
@@ -563,59 +580,23 @@ def get_zone_wise_sales_achievement_controller(get_db_connection):
         force_refresh = (request.args.get("force_refresh", "").lower() in ("true", "1")) or \
                         (request.is_json and str(request.json.get("force_refresh", "")).lower() in ("true", "1"))
 
-        selected_mo_num = None
-        if param_m:
-            try:
-                clean_m = str(param_m).strip().upper()
-                if clean_m.isdigit():
-                    selected_mo_num = int(clean_m)
-                else:
-                    found = next((m for m in master_months if m["month_name"] == clean_m), None)
-                    if found:
-                        selected_mo_num = found["month_no"]
-            except Exception:
-                pass
+        combined_params = dict(request.args)
+        if request.is_json and isinstance(request.json, dict):
+            combined_params.update(request.json)
 
-        if not selected_mo_num and param_ym:
-            try:
-                clean_ym = str(param_ym).strip()
-                if len(clean_ym) == 6:
-                    selected_mo_num = int(clean_ym[4:6])
-                elif clean_ym.isdigit():
-                    selected_mo_num = int(clean_ym)
-            except Exception:
-                pass
+        period_info = parse_period_args(
+            combined_params,
+            detected_year=current_year,
+            detected_month=detected_month,
+            detected_day=detected_day,
+            master_months=master_months
+        )
+        year_month = period_info["cache_key"]
+        selected_date = period_info["day_date"]
+        selected_mo_num = period_info["selected_months"][0] if period_info["selected_months"] else detected_month
 
-        if not selected_mo_num or selected_mo_num < 1 or selected_mo_num > 12:
-            selected_mo_num = int(detected_month)
-
-        year_month = f"{current_year}{str(selected_mo_num).zfill(2)}"
-
-        if not selected_date or str(selected_date).strip() in ("", "null", "None"):
-            if selected_mo_num == detected_month:
-                selected_date = f"{current_year}-{str(selected_mo_num).zfill(2)}-{str(detected_day).zfill(2)}"
-            else:
-                last_d = calendar.monthrange(current_year, selected_mo_num)[1]
-                selected_date = f"{current_year}-{str(selected_mo_num).zfill(2)}-{str(last_d).zfill(2)}"
-        else:
-            selected_date = str(selected_date).strip()
-
-        mo_item = next((m for m in master_months if m["month_no"] == selected_mo_num), None)
-        mo_name = mo_item["month_name"].capitalize() if mo_item else calendar.month_abbr[selected_mo_num]
-        prev_yr_short = str(previous_year)[-2:]
-        curr_yr_short = str(current_year)[-2:]
-        try:
-            s_day = int(selected_date.split("-")[2])
-        except Exception:
-            s_day = 1
-
-        meta_info = {
-            "month_abbr": mo_name,
-            "unit": "₹ in Cr",
-            "prev_year_label": f"{mo_name}-{prev_yr_short} Actual",
-            "curr_year_label": f"Actual Sale for {mo_name}-{curr_yr_short}",
-            "day_label": f"Sale for day {s_day}"
-        }
+        meta_info = period_info["meta"]
+        meta_info["unit"] = "₹ in Cr"
 
         # 4. Check cache table if not force_refresh
         if not force_refresh:
@@ -632,6 +613,14 @@ def get_zone_wise_sales_achievement_controller(get_db_connection):
                     "year_month": year_month,
                     "selected_date": cached.get("selected_date") or selected_date,
                     "meta": meta_info,
+                    "period_info": {
+                        "mode": period_info["mode"],
+                        "months": period_info["selected_months"],
+                        "year": period_info["year"],
+                        "start_date": period_info["start_date"],
+                        "end_date": period_info["end_date"],
+                        "label": period_info["meta"]["curr_period_label"]
+                    },
                     "_cached": True,
                     "_last_synced_at": cached.get("_last_synced_at")
                 }), 200
@@ -639,7 +628,7 @@ def get_zone_wise_sales_achievement_controller(get_db_connection):
         # 5. Query from SAP HANA
         if is_hana:
             h_cur = hana_conn.cursor()
-            rows = query_zone_wise_sales_achievement_hana(h_cur, schema, year_month, selected_date)
+            rows = query_zone_wise_sales_achievement_hana(h_cur, schema, year_month, selected_date, period_info=period_info)
             h_cur.close()
         else:
             rows = [
@@ -668,6 +657,14 @@ def get_zone_wise_sales_achievement_controller(get_db_connection):
             "year_month": year_month,
             "selected_date": selected_date,
             "meta": meta_info,
+            "period_info": {
+                "mode": period_info["mode"],
+                "months": period_info["selected_months"],
+                "year": period_info["year"],
+                "start_date": period_info["start_date"],
+                "end_date": period_info["end_date"],
+                "label": period_info["meta"]["curr_period_label"]
+            },
             "_cached": False,
             "_last_synced_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }), 200
