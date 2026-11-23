@@ -4496,14 +4496,14 @@ def bulk_sync_key_metrics_permutations(mysql_conn, session_id: str, user_id=None
             h_zone_where = ""
             if clean_zone or clean_region:
                 h_zone_join = f"""
-                INNER JOIN "{user_db}"."ZIVF_CustomerMaster_01_MD" cm_z ON LTRIM(TRIM(s."dealer_code"), '0') = LTRIM(TRIM(cm_z."KUNNR"), '0')
-                INNER JOIN "{user_db}"."ZIVF_TerritoryMaster_01_TR" tm_z ON TRIM(cm_z."BZIRK") = TRIM(tm_z."BZIRK")
+                INNER JOIN "{user_db}"."ZIVF_CustomerMaster_01_MD" cm ON LTRIM(TRIM(s."dealer_code"), '0') = LTRIM(TRIM(cm."KUNNR"), '0')
+                LEFT JOIN "{user_db}"."ZIVF_TerritoryMaster_01_TR" tm ON TRIM(cm."BZIRK") = TRIM(tm."BZIRK")
                 """
                 conds = []
                 if clean_zone:
-                    conds.append(f"(TRIM(tm_z.\"P_ZONE\") = '{clean_zone}' OR UPPER(TRIM(tm_z.\"P_ZONE\")) = UPPER(TRIM('{clean_zone}')))")
+                    conds.append(f"(TRIM(tm.\"P_ZONE\") = '{clean_zone}' OR UPPER(TRIM(tm.\"P_ZONE\")) = UPPER(TRIM('{clean_zone}')))")
                 if clean_region:
-                    conds.append(f"(TRIM(tm_z.\"REGIO\") = '{clean_region}' OR UPPER(TRIM(tm_z.\"REGIO\")) = UPPER(TRIM('{clean_region}')))")
+                    conds.append(f"(TRIM(tm.\"REGIO\") = '{clean_region}' OR UPPER(TRIM(tm.\"REGIO\")) = UPPER(TRIM('{clean_region}')))")
                 h_zone_where = "AND " + " AND ".join(conds)
 
             # Query 1: Monthly Total Sales Revenue (Fast group-by query)
