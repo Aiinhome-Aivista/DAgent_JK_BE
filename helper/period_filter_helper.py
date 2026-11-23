@@ -11,7 +11,17 @@ and building uniform SQL date conditions, meta headers, and cache keys across al
 import calendar
 from datetime import datetime, date
 
-def parse_period_args(args_or_json, default_year=None, default_month=None, default_day=None):
+def parse_period_args(
+    args_or_json,
+    default_year=None,
+    default_month=None,
+    default_day=None,
+    detected_year=None,
+    detected_month=None,
+    detected_day=None,
+    master_months=None,
+    **kwargs
+):
     """
     Parses request arguments / JSON payload for:
       - month (single month 1..12 or abbreviation 'NOV')
@@ -22,9 +32,9 @@ def parse_period_args(args_or_json, default_year=None, default_month=None, defau
     Returns a unified period dictionary.
     """
     now = datetime.now()
-    cur_yr = int(default_year or now.year)
-    cur_mo = int(default_month or now.month)
-    cur_d = int(default_day or now.day)
+    cur_yr = int(default_year or detected_year or now.year)
+    cur_mo = int(default_month or detected_month or now.month)
+    cur_d = int(default_day or detected_day or now.day)
 
     data = args_or_json or {}
     if not isinstance(data, dict) and hasattr(data, "to_dict"):
