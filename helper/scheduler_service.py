@@ -129,70 +129,10 @@ def _execute_sync_task(origin: str = "scheduled"):
             t_step = time.time()
             print(f"[Scheduler] ⏳ [1/13] Syncing Key Metrics (16 KPIs & All Permutations)...", flush=True)
             try:
-                # 1a. Base All-India sync
                 with _app_instance.test_request_context(json={"session_id": s_id, "user_id": u_id, "force_refresh": True}):
                     default_dashboard_metrics_controller(_get_db_conn_func)
                 from controllers.dashboard_visuals import bulk_sync_key_metrics_permutations
                 bulk_sync_key_metrics_permutations(conn, s_id, u_id, _app_instance, _get_db_conn_func)
-
-                # 1b. Dynamically sync Key Metrics for all active assigned zones (NO hardcoding! ~6-7 zones total)
-                try:
-                    cur_h = conn.cursor(dictionary=True) if hasattr(conn, "cursor") else conn.cursor()
-                    cur_h.execute("""
-                        SELECT DISTINCT zone_code
-                        FROM user_hierarchy_access
-                        WHERE zone_code IS NOT NULL AND TRIM(zone_code) != '' AND UPPER(TRIM(zone_code)) != 'ALL'
-                    """)
-                    h_zones = cur_h.fetchall()
-
-                    if h_zones:
-                        synced_zones = set()
-                        for h_row in h_zones:
-                            z_code = str((h_row.get("zone_code") if isinstance(h_row, dict) else h_row[0]) or "").strip()
-                            if not z_code or z_code.upper() in ("ALL", "NONE", "NULL", "") or z_code in synced_zones:
-                                continue
-                            synced_zones.add(z_code)
-
-                            req_payload = {"session_id": s_id, "zone": z_code, "force_refresh": True}
-
-                            # 1. Refresh base 16 KPIs for this zone and update timestamp in dashboard_cached_metrics
-                            with _app_instance.test_request_context(json=req_payload):
-                                default_dashboard_metrics_controller(_get_db_conn_func)
-
-                            # 2. Pre-compute month/year permutations for this zone
-                            bulk_sync_key_metrics_permutations(conn, s_id, u_id, _app_instance, _get_db_conn_func, zone=z_code)
-
-                    # 1c. Dynamically sync default Key Metrics for active assigned regions (Fast base refresh only ~2s each)
-                    cur_h.execute("""
-                        SELECT DISTINCT zone_code, region_code
-                        FROM user_hierarchy_access
-                        WHERE region_code IS NOT NULL AND TRIM(region_code) != '' AND UPPER(TRIM(region_code)) != 'ALL'
-                    """)
-                    h_regions = cur_h.fetchall()
-                    cur_h.close()
-
-                    if h_regions:
-                        synced_regions = set()
-                        for h_row in h_regions:
-                            z_code = str((h_row.get("zone_code") if isinstance(h_row, dict) else h_row[0]) or "").strip()
-                            r_code = str((h_row.get("region_code") if isinstance(h_row, dict) else (h_row[1] if len(h_row) > 1 else "")) or "").strip()
-                            if not r_code or r_code.upper() in ("ALL", "NONE", "NULL", ""):
-                                continue
-                            reg_key = (z_code, r_code)
-                            if reg_key in synced_regions:
-                                continue
-                            synced_regions.add(reg_key)
-
-                            reg_payload = {"session_id": s_id, "region": r_code, "force_refresh": True}
-                            if z_code and z_code.upper() not in ("ALL", "NONE", "NULL", ""):
-                                reg_payload["zone"] = z_code
-
-                            # Refresh base 16 KPIs for this region so its dashboard and Synced time are pre-cached
-                            with _app_instance.test_request_context(json=reg_payload):
-                                default_dashboard_metrics_controller(_get_db_conn_func)
-                except Exception as zh_err:
-                    print(f"[Scheduler] Note: Zone/region key metrics sync note: {zh_err}", flush=True)
-
                 print(f"[Scheduler] ✅ [1/13] Key Metrics all permutations synced in {round(time.time() - t_step, 2)}s", flush=True)
             except Exception as e:
                 print(f"[Scheduler] ❌ [1/13] Error syncing key_metrics: {e}", flush=True)
