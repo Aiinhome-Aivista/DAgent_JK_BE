@@ -129,10 +129,55 @@ def _execute_sync_task(origin: str = "scheduled"):
             t_step = time.time()
             print(f"[Scheduler] ⏳ [1/13] Syncing Key Metrics (16 KPIs & All Permutations)...", flush=True)
             try:
+                # 1a. Base All-India sync
                 with _app_instance.test_request_context(json={"session_id": s_id, "user_id": u_id, "force_refresh": True}):
                     default_dashboard_metrics_controller(_get_db_conn_func)
                 from controllers.dashboard_visuals import bulk_sync_key_metrics_permutations
                 bulk_sync_key_metrics_permutations(conn, s_id, u_id, _app_instance, _get_db_conn_func)
+
+                # 1b. Dynamically sync Key Metrics for all active assigned zones & regions (NO hardcoding!)
+                try:
+                    cur_h = conn.cursor(dictionary=True) if hasattr(conn, "cursor") else conn.cursor()
+                    cur_h.execute("""
+                        SELECT DISTINCT zone_code, region_code
+                        FROM user_hierarchy_access
+                        WHERE (zone_code IS NOT NULL AND TRIM(zone_code) != '' AND UPPER(TRIM(zone_code)) != 'ALL')
+                           OR (region_code IS NOT NULL AND TRIM(region_code) != '' AND UPPER(TRIM(region_code)) != 'ALL')
+                    """)
+                    h_scopes = cur_h.fetchall()
+                    cur_h.close()
+
+                    if h_scopes:
+                        synced_zones = set()
+                        for h_row in h_scopes:
+                            z_code = str((h_row.get("zone_code") if isinstance(h_row, dict) else h_row[0]) or "").strip()
+                            r_code = str((h_row.get("region_code") if isinstance(h_row, dict) else (h_row[1] if len(h_row) > 1 else "")) or "").strip()
+                            if r_code.upper() in ("ALL", "NONE", "NULL", ""):
+                                r_code = None
+                            if z_code.upper() in ("ALL", "NONE", "NULL", ""):
+                                z_code = None
+
+                            if not z_code and not r_code:
+                                continue
+
+                            req_payload = {"session_id": s_id, "force_refresh": True}
+                            if z_code:
+                                req_payload["zone"] = z_code
+                            if r_code:
+                                req_payload["region"] = r_code
+
+                            # Refresh base 16 KPIs for this scope and update timestamp in dashboard_cached_metrics
+                            with _app_instance.test_request_context(json=req_payload):
+                                default_dashboard_metrics_controller(_get_db_conn_func)
+
+                            # Pre-compute month/year permutations for this scope (zone and/or region)
+                            scope_key = (z_code, r_code)
+                            if scope_key not in synced_zones:
+                                synced_zones.add(scope_key)
+                                bulk_sync_key_metrics_permutations(conn, s_id, u_id, _app_instance, _get_db_conn_func, zone=z_code, region=r_code)
+                except Exception as zh_err:
+                    print(f"[Scheduler] Note: Zone/region key metrics sync note: {zh_err}", flush=True)
+
                 print(f"[Scheduler] ✅ [1/13] Key Metrics all permutations synced in {round(time.time() - t_step, 2)}s", flush=True)
             except Exception as e:
                 print(f"[Scheduler] ❌ [1/13] Error syncing key_metrics: {e}", flush=True)
