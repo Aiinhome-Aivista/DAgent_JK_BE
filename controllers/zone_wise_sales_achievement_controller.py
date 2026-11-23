@@ -593,7 +593,7 @@ def get_zone_wise_sales_achievement_controller(get_db_connection):
         )
         year_month = period_info["cache_key"]
         selected_date = period_info["day_date"]
-        selected_mo_num = period_info["selected_months"][0] if period_info["selected_months"] else detected_month
+        selected_mo_num = period_info.get("selected_months", [detected_month])[0] if period_info.get("selected_months") else detected_month
 
         meta_info = period_info["meta"]
         meta_info["unit"] = "₹ in Cr"
@@ -614,12 +614,12 @@ def get_zone_wise_sales_achievement_controller(get_db_connection):
                     "selected_date": cached.get("selected_date") or selected_date,
                     "meta": meta_info,
                     "period_info": {
-                        "mode": period_info["mode"],
-                        "months": period_info["selected_months"],
-                        "year": period_info["year"],
-                        "start_date": period_info["start_date"],
-                        "end_date": period_info["end_date"],
-                        "label": period_info["meta"]["curr_period_label"]
+                        "mode": period_info.get("mode", "single_month"),
+                        "months": period_info.get("selected_months", []),
+                        "year": period_info.get("year", current_year),
+                        "start_date": period_info.get("start_date", ""),
+                        "end_date": period_info.get("end_date", ""),
+                        "label": period_info.get("meta", {}).get("curr_period_label", "")
                     },
                     "_cached": True,
                     "_last_synced_at": cached.get("_last_synced_at")
@@ -658,12 +658,12 @@ def get_zone_wise_sales_achievement_controller(get_db_connection):
             "selected_date": selected_date,
             "meta": meta_info,
             "period_info": {
-                "mode": period_info["mode"],
-                "months": period_info["selected_months"],
-                "year": period_info["year"],
-                "start_date": period_info["start_date"],
-                "end_date": period_info["end_date"],
-                "label": period_info["meta"]["curr_period_label"]
+                "mode": period_info.get("mode", "single_month"),
+                "months": period_info.get("selected_months", []),
+                "year": period_info.get("year", current_year),
+                "start_date": period_info.get("start_date", ""),
+                "end_date": period_info.get("end_date", ""),
+                "label": period_info.get("meta", {}).get("curr_period_label", "")
             },
             "_cached": False,
             "_last_synced_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")

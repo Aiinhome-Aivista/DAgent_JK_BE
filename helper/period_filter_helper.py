@@ -90,6 +90,10 @@ def parse_period_args(
                 "target_ymonths": t_ymonths,
                 "cache_key": cache_key,
                 "selected_month": s_dt.month,
+                "selected_months": [s_dt.month],
+                "year": s_dt.year,
+                "start_date": curr_from,
+                "end_date": curr_to,
                 "meta": {
                     "month_abbr": f"{s_dt.strftime('%b %d')} - {e_dt.strftime('%b %d')}",
                     "prev_year_label": f"Actual ({s_str} - {e_str_prev})",
@@ -97,6 +101,7 @@ def parse_period_args(
                     "prev_year_tooltip": f"Previous Year Range: {prev_from} to {prev_to}",
                     "curr_year_tooltip": f"Selected Date Range: {curr_from} to {curr_to}",
                     "day_label": f"Sale for day {e_dt.day}",
+                    "curr_period_label": f"{s_str} - {e_str}",
                     "filter_mode": "date_range",
                     "start_date": curr_from,
                     "end_date": curr_to
@@ -178,6 +183,10 @@ def parse_period_args(
             "target_ymonths": [ym_str],
             "cache_key": ym_str,
             "selected_month": m_num,
+            "selected_months": [m_num],
+            "year": cur_yr,
+            "start_date": curr_from,
+            "end_date": curr_to,
             "meta": {
                 "month_abbr": m_abbr,
                 "prev_year_label": f"{m_abbr}-{prev_yr_2d} Actual",
@@ -185,6 +194,7 @@ def parse_period_args(
                 "prev_year_tooltip": f"{m_abbr} {cur_yr - 1} Actual Sales",
                 "curr_year_tooltip": f"Actual Sales for {m_abbr} {cur_yr}",
                 "day_label": f"Sale for day {active_d}",
+                "curr_period_label": f"{m_abbr} {cur_yr}",
                 "filter_mode": "single_month",
                 "months": [m_num]
             }
@@ -234,6 +244,10 @@ def parse_period_args(
         "target_ymonths": t_ymonths,
         "cache_key": cache_key,
         "selected_month": parsed_months[0],
+        "selected_months": parsed_months,
+        "year": cur_yr,
+        "start_date": curr_from,
+        "end_date": curr_to,
         "meta": {
             "month_abbr": full_month_names,
             "prev_year_label": prev_label,
@@ -241,6 +255,7 @@ def parse_period_args(
             "prev_year_tooltip": prev_tooltip,
             "curr_year_tooltip": curr_tooltip,
             "day_label": f"Sale for day {active_d}",
+            "curr_period_label": f"{full_month_names} {cur_yr}",
             "filter_mode": "multi_month",
             "months": parsed_months
         }

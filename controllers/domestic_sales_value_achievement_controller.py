@@ -834,6 +834,22 @@ def get_domestic_sales_value_achievement_controller(get_db_connection):
                     "year_month": year_month,
                     "selected_date": cached.get("selected_date") or selected_date,
                     "meta": meta_info,
+            "period_info": {
+                "mode": period_info.get("mode", "single_month"),
+                "months": period_info.get("selected_months", []),
+                "year": period_info.get("year", current_year),
+                "start_date": period_info.get("start_date", ""),
+                "end_date": period_info.get("end_date", ""),
+                "label": period_info.get("meta", {}).get("curr_period_label", "")
+            },
+                    "period_info": {
+                        "mode": period_info.get("mode", "single_month"),
+                        "months": period_info.get("selected_months", []),
+                        "year": period_info.get("year", current_year),
+                        "start_date": period_info.get("start_date", ""),
+                        "end_date": period_info.get("end_date", ""),
+                        "label": period_info.get("meta", {}).get("curr_period_label", "")
+                    },
                     "_cached": True,
                     "_last_synced_at": cached.get("_last_synced_at")
                 }), 200
@@ -874,6 +890,14 @@ def get_domestic_sales_value_achievement_controller(get_db_connection):
             "year_month": year_month,
             "selected_date": selected_date,
             "meta": meta_info,
+            "period_info": {
+                "mode": period_info.get("mode", "single_month"),
+                "months": period_info.get("selected_months", []),
+                "year": period_info.get("year", current_year),
+                "start_date": period_info.get("start_date", ""),
+                "end_date": period_info.get("end_date", ""),
+                "label": period_info.get("meta", {}).get("curr_period_label", "")
+            },
             "_cached": False,
             "_last_synced_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }), 200
