@@ -3778,14 +3778,20 @@ ORDER BY yr DESC"""
                             # Dynamic Attrition: Billed in previous year (e.g. 2025) but zero bills in current year (2026)
                             try:
                                 prev_yr_num = int(target_yr_str) - 1
+                                geo_filter_att = (
+                                    hana_geo_exists_sales.replace('t."dealer_code"', 's."dealer_code"')
+                                    if (is_geo_restricted and hana_geo_exists_sales)
+                                    else ""
+                                )
                                 q_att_h = f"""
                                 SELECT COUNT(DISTINCT d_prev."dealer_code") AS att_cnt
                                 FROM (
-                                    SELECT DISTINCT "dealer_code"
-                                    FROM {q_tbl(hist_sales_tbl)}
-                                    WHERE YEAR("invoice_date") = {prev_yr_num}
-                                      AND CAST("distribution_channel" AS NVARCHAR(10)) = '10'
-                                      AND COALESCE("indicator_cancel", '') NOT IN ('X', 'Y', '1')
+                                    SELECT DISTINCT s."dealer_code"
+                                    FROM {q_tbl(hist_sales_tbl)} s
+                                    WHERE YEAR(s."invoice_date") = {prev_yr_num}
+                                      AND CAST(s."distribution_channel" AS NVARCHAR(10)) = '10'
+                                      AND COALESCE(s."indicator_cancel", '') NOT IN ('X', 'Y', '1')
+                                      {geo_filter_att}
                                 ) d_prev
                                 WHERE d_prev."dealer_code" NOT IN (
                                     SELECT DISTINCT "dealer_code"
