@@ -4554,7 +4554,7 @@ def bulk_sync_key_metrics_permutations(mysql_conn, session_id: str, user_id=None
                     FROM "{user_db}"."ZPVF_SD_CurrentSales_01_TR"
                 ) s
                 {h_zone_join}
-                LEFT JOIN "{user_db}"."ZIVR_SKUMaster_01_TR" sku ON s."SKU" = sku."SKU"
+                LEFT JOIN "{user_db}"."ZIVR_SKUMaster_01_TR" sku ON (TRIM(s."SKU") = TRIM(sku."MATNR"))
                 WHERE CAST(s."distribution_channel" AS NVARCHAR(10)) = '10'
                   AND COALESCE(s."indicator_cancel", '') NOT IN ('X', 'Y', '1')
                   {h_zone_where}
@@ -4577,7 +4577,7 @@ def bulk_sync_key_metrics_permutations(mysql_conn, session_id: str, user_id=None
                 SELECT
                     YEAR(s."invoice_date") AS YR,
                     MONTH(s."invoice_date") AS MO,
-                    COALESCE(NULLIF(TRIM(rm."NAME"), ''), NULLIF(TRIM(rm."P_REGION"), ''), 'JAIPUR') AS REGION_NAME,
+                    COALESCE(NULLIF(TRIM(rm."region_name"), ''), NULLIF(TRIM(rm."region_code"), '')) AS REGION_NAME,
                     ROUND(SUM(COALESCE(s."ndp_value", 0)) / 10000000, 2) AS TOTAL_REV
                 FROM (
                     SELECT "invoice_date", "ndp_value", "dealer_code", "distribution_channel", "indicator_cancel"
@@ -4587,11 +4587,13 @@ def bulk_sync_key_metrics_permutations(mysql_conn, session_id: str, user_id=None
                     SELECT "invoice_date", "ndp_value", "dealer_code", "distribution_channel", "indicator_cancel"
                     FROM "{user_db}"."ZPVF_SD_CurrentSales_01_TR"
                 ) s
-                LEFT JOIN "{user_db}"."ZIVF_CustomerMaster_01_TR" cm ON s."dealer_code" = cm."KUNNR"
-                LEFT JOIN "{user_db}"."ZIVF_RegionMaster_01_TR" rm ON cm."P_REGION" = rm."P_REGION"
+                INNER JOIN "{user_db}"."ZIVF_CustomerMaster_01_MD" cm ON LTRIM(TRIM(s."dealer_code"), '0') = LTRIM(TRIM(cm."KUNNR"), '0')
+                LEFT JOIN "{user_db}"."ZIVF_TerritoryMaster_01_TR" tm ON TRIM(cm."BZIRK") = TRIM(tm."BZIRK")
+                LEFT JOIN "{user_db}"."ZIVF_RegionMaster_MD_01" rm ON TRIM(tm."REGIO") = TRIM(rm."region_code")
                 WHERE CAST(s."distribution_channel" AS NVARCHAR(10)) = '10'
                   AND COALESCE(s."indicator_cancel", '') NOT IN ('X', 'Y', '1')
-                GROUP BY YEAR(s."invoice_date"), MONTH(s."invoice_date"), rm."NAME", rm."P_REGION"
+                  {h_zone_where}
+                GROUP BY YEAR(s."invoice_date"), MONTH(s."invoice_date"), rm."region_name", rm."region_code"
                 ORDER BY YR DESC, MO ASC, TOTAL_REV DESC
             """
             try:
@@ -4599,8 +4601,8 @@ def bulk_sync_key_metrics_permutations(mysql_conn, session_id: str, user_id=None
                 for r in cursor.fetchall():
                     y = int(r[0]) if r[0] else None
                     m = int(r[1]) if r[1] else None
-                    reg = str(r[2]).strip().upper() if r[2] else "JAIPUR"
-                    if y and m and (y, m) not in monthly_lead_reg:
+                    reg = str(r[2]).strip().upper() if r[2] else ""
+                    if y and m and reg and (y, m) not in monthly_lead_reg:
                         monthly_lead_reg[(y, m)] = reg
             except Exception as e:
                 print(f"[Bulk Sync Key Metrics] HANA region aggregation error: {e}", flush=True)
@@ -4626,8 +4628,8 @@ def bulk_sync_key_metrics_permutations(mysql_conn, session_id: str, user_id=None
             yr_top_tyres = [monthly_top_tyre.get((yr, m)) for m in yr_months if (yr, m) in monthly_top_tyre]
             yr_tyre = max(set(yr_top_tyres), key=yr_top_tyres.count) if yr_top_tyres else "TBR"
 
-            yr_regions = [monthly_lead_reg.get((yr, m)) for m in yr_months if (yr, m) in monthly_lead_reg]
-            yr_reg = max(set(yr_regions), key=yr_regions.count) if yr_regions else "JAIPUR"
+            yr_regions = [monthly_lead_reg.get((yr, m)) for m in yr_months if (yr, m) in monthly_lead_reg and monthly_lead_reg.get((yr, m))]
+            yr_reg = max(set(yr_regions), key=yr_regions.count) if yr_regions else (base_metrics.get("metric_3", {}).get("value") or "")
 
             year_kpis = copy.deepcopy(base_metrics)
             year_kpis["metric_1"] = {
@@ -4666,7 +4668,7 @@ def bulk_sync_key_metrics_permutations(mysql_conn, session_id: str, user_id=None
                     m_yoy_val = f"{yoy_calc:+0.2f}%"
 
                 m_tyre = monthly_top_tyre.get((yr, m), "TBR")
-                m_reg = monthly_lead_reg.get((yr, m), "JAIPUR")
+                m_reg = monthly_lead_reg.get((yr, m)) or yr_reg or ""
                 m_lbl = m_names[m] if 0 < m < len(m_names) else str(m)
 
                 month_kpis = copy.deepcopy(base_metrics)
@@ -4713,8 +4715,8 @@ def bulk_sync_key_metrics_permutations(mysql_conn, session_id: str, user_id=None
                 q_top_tyres = [monthly_top_tyre.get((yr, m)) for m in q_months if (yr, m) in monthly_top_tyre]
                 q_tyre = max(set(q_top_tyres), key=q_top_tyres.count) if q_top_tyres else "TBR"
 
-                q_regions = [monthly_lead_reg.get((yr, m)) for m in q_months if (yr, m) in monthly_lead_reg]
-                q_reg = max(set(q_regions), key=q_regions.count) if q_regions else "JAIPUR"
+                q_regions = [monthly_lead_reg.get((yr, m)) for m in q_months if (yr, m) in monthly_lead_reg and monthly_lead_reg.get((yr, m))]
+                q_reg = max(set(q_regions), key=q_regions.count) if q_regions else (yr_reg or "")
 
                 q_kpis = copy.deepcopy(base_metrics)
                 q_kpis["metric_1"] = {
