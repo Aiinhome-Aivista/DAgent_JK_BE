@@ -250,6 +250,12 @@ def query_sales_numbers_hana(cursor, schema, year_month: str, selected_date: str
 
     hana_sql = f"""
     WITH
+    BOUNDARY AS (
+        SELECT COALESCE(MIN("invoice_date"), '9999-12-31') AS MIN_CURR_DATE
+        FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR"
+        WHERE ("distribution_channel" = '10' OR "distribution_channel" = 10)
+          AND ("indicator_cancel" IS NULL OR "indicator_cancel" NOT IN ('X', 'Y', '1'))
+    ),
     SALES_BASE AS (
         SELECT
             "invoice_date",
@@ -262,13 +268,14 @@ def query_sales_numbers_hana(cursor, schema, year_month: str, selected_date: str
             "FKART",
             "indicator_cancel"
         FROM "{schema}"."ZPVF_SD_SalesHistory_01_TR"
+        CROSS JOIN BOUNDARY B
         WHERE ("distribution_channel" = '10' OR "distribution_channel" = 10)
           AND (
               ("invoice_date" >= TO_DATE('{prev_from}', 'YYYY-MM-DD') AND "invoice_date" <= TO_DATE('{prev_month_end}', 'YYYY-MM-DD'))
               OR
               ("invoice_date" >= TO_DATE('{curr_from}', 'YYYY-MM-DD') AND "invoice_date" <= TO_DATE('{curr_month_end}', 'YYYY-MM-DD'))
           )
-          AND "invoice_date" < TO_DATE('2026-10-18', 'YYYY-MM-DD')
+          AND "invoice_date" < B.MIN_CURR_DATE
           AND ("indicator_cancel" IS NULL OR "indicator_cancel" NOT IN ('X', 'Y', '1'))
         UNION ALL
         SELECT
@@ -282,13 +289,14 @@ def query_sales_numbers_hana(cursor, schema, year_month: str, selected_date: str
             "FKART",
             "indicator_cancel"
         FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR"
+        CROSS JOIN BOUNDARY B
         WHERE ("distribution_channel" = '10' OR "distribution_channel" = 10)
           AND (
               ("invoice_date" >= TO_DATE('{prev_from}', 'YYYY-MM-DD') AND "invoice_date" <= TO_DATE('{prev_month_end}', 'YYYY-MM-DD'))
               OR
               ("invoice_date" >= TO_DATE('{curr_from}', 'YYYY-MM-DD') AND "invoice_date" <= TO_DATE('{curr_month_end}', 'YYYY-MM-DD'))
           )
-          AND "invoice_date" >= TO_DATE('2026-10-18', 'YYYY-MM-DD')
+          AND "invoice_date" >= B.MIN_CURR_DATE
           AND ("indicator_cancel" IS NULL OR "indicator_cancel" NOT IN ('X', 'Y', '1'))
     ),
 

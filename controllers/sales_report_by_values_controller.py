@@ -200,6 +200,12 @@ def query_sales_report_by_values_hana(cursor, schema, year_month: str, selected_
 
     hana_sql = f"""
     WITH
+    BOUNDARY AS (
+        SELECT COALESCE(MIN("invoice_date"), '9999-12-31') AS MIN_CURR_DATE
+        FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR"
+        WHERE ("distribution_channel" = '10' OR "distribution_channel" = 10)
+          AND COALESCE("indicator_cancel", '') <> 'X'
+    ),
     SALES_BASE AS (
         SELECT
             "invoice_date",
@@ -212,13 +218,14 @@ def query_sales_report_by_values_hana(cursor, schema, year_month: str, selected_
             "FKART",
             "indicator_cancel"
         FROM "{schema}"."ZPVF_SD_SalesHistory_01_TR"
+        CROSS JOIN BOUNDARY B
         WHERE ("distribution_channel" = '10' OR "distribution_channel" = 10)
           AND (
               ("invoice_date" >= TO_DATE('{prev_from}', 'YYYY-MM-DD') AND "invoice_date" <= TO_DATE('{prev_month_end}', 'YYYY-MM-DD'))
               OR
               ("invoice_date" >= TO_DATE('{curr_from}', 'YYYY-MM-DD') AND "invoice_date" <= TO_DATE('{curr_month_end}', 'YYYY-MM-DD'))
           )
-          AND "invoice_date" < '2026-10-18'
+          AND "invoice_date" < B.MIN_CURR_DATE
           AND COALESCE("indicator_cancel", '') <> 'X'
         UNION ALL
         SELECT
@@ -232,13 +239,14 @@ def query_sales_report_by_values_hana(cursor, schema, year_month: str, selected_
             "FKART",
             "indicator_cancel"
         FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR"
+        CROSS JOIN BOUNDARY B
         WHERE ("distribution_channel" = '10' OR "distribution_channel" = 10)
           AND (
               ("invoice_date" >= TO_DATE('{prev_from}', 'YYYY-MM-DD') AND "invoice_date" <= TO_DATE('{prev_month_end}', 'YYYY-MM-DD'))
               OR
               ("invoice_date" >= TO_DATE('{curr_from}', 'YYYY-MM-DD') AND "invoice_date" <= TO_DATE('{curr_month_end}', 'YYYY-MM-DD'))
           )
-          AND "invoice_date" >= '2026-10-18'
+          AND "invoice_date" >= B.MIN_CURR_DATE
           AND COALESCE("indicator_cancel", '') <> 'X'
     ),
 

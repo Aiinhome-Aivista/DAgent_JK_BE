@@ -211,6 +211,14 @@ def query_domestic_sales_value_achievement_hana(cursor, schema, year_month: str,
         {date_params_cte}
     ),
 
+    BOUNDARY AS
+    (
+        SELECT COALESCE(MIN("invoice_date"), '9999-12-31') AS MIN_CURR_DATE
+        FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR"
+        WHERE ("distribution_channel" = '10' OR "distribution_channel" = 10)
+          AND COALESCE("indicator_cancel", '') <> 'X'
+    ),
+
     SALES_DATA AS
     (
         SELECT
@@ -224,9 +232,10 @@ def query_domestic_sales_value_achievement_hana(cursor, schema, year_month: str,
             "FKART",
             "indicator_cancel"
         FROM "{schema}"."ZPVF_SD_SalesHistory_01_TR"
-        WHERE "distribution_channel" = '10'
+        CROSS JOIN BOUNDARY B
+        WHERE ("distribution_channel" = '10' OR "distribution_channel" = 10)
           AND COALESCE("indicator_cancel", '') <> 'X'
-          AND "invoice_date" < '2026-10-18'
+          AND "invoice_date" < B.MIN_CURR_DATE
 
         UNION ALL
 
@@ -241,9 +250,10 @@ def query_domestic_sales_value_achievement_hana(cursor, schema, year_month: str,
             cs."FKART",
             cs."indicator_cancel"
         FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR" cs
-        WHERE cs."distribution_channel" = '10'
+        CROSS JOIN BOUNDARY B
+        WHERE (cs."distribution_channel" = '10' OR cs."distribution_channel" = 10)
           AND COALESCE(cs."indicator_cancel", '') <> 'X'
-          AND cs."invoice_date" >= '2026-10-18'
+          AND cs."invoice_date" >= B.MIN_CURR_DATE
     ),
 
     VALID_SALES AS

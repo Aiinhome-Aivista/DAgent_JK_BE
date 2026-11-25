@@ -291,11 +291,11 @@ def get_rolling_sales_boundary(cursor, schema):
     boundary_date = None
     try:
         sanitize_and_execute_hana(cursor, schema, f"""
-            SELECT MIN(s.INVOICE_DATE)
+            SELECT MIN(s."invoice_date")
             FROM "{schema}"."ZPVF_SD_CurrentSales_01_TR" s
-            WHERE s.INVOICE_DATE IS NOT NULL 
-              AND (s.INDICATOR_CANCEL IS NULL OR s.INDICATOR_CANCEL NOT IN ('X', 'Y', '1'))
-              AND (s.DISTRIBUTION_CHANNEL = 10 OR s.DISTRIBUTION_CHANNEL = '10')
+            WHERE s."invoice_date" IS NOT NULL 
+              AND (s."indicator_cancel" IS NULL OR s."indicator_cancel" NOT IN ('X', 'Y', '1'))
+              AND (s."distribution_channel" = 10 OR s."distribution_channel" = '10')
         """)
         row = cursor.fetchone()
         if row and row[0]:
@@ -306,11 +306,11 @@ def get_rolling_sales_boundary(cursor, schema):
     if not boundary_date:
         try:
             sanitize_and_execute_hana(cursor, schema, f"""
-                SELECT MAX(s.INVOICE_DATE)
+                SELECT MAX(s."invoice_date")
                 FROM "{schema}"."ZPVF_SD_SalesHistory_01_TR" s
-                WHERE s.INVOICE_DATE IS NOT NULL 
-                  AND (s.INDICATOR_CANCEL IS NULL OR s.INDICATOR_CANCEL NOT IN ('X', 'Y', '1'))
-                  AND (s.DISTRIBUTION_CHANNEL = 10 OR s.DISTRIBUTION_CHANNEL = '10')
+                WHERE s."invoice_date" IS NOT NULL 
+                  AND (s."indicator_cancel" IS NULL OR s."indicator_cancel" NOT IN ('X', 'Y', '1'))
+                  AND (s."distribution_channel" = 10 OR s."distribution_channel" = '10')
             """)
             row = cursor.fetchone()
             if row and row[0]:
@@ -318,6 +318,6 @@ def get_rolling_sales_boundary(cursor, schema):
         except Exception:
             pass
 
-    res = boundary_date or "2026-10-18"
+    res = boundary_date or datetime.now().strftime("%Y-%m-%d")
     _BOUNDARY_CACHE[schema] = res
     return res
