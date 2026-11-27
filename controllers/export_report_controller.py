@@ -692,7 +692,7 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day, return_wor
 
             # Merge cells for title
 
-            ws1.merge_cells('A1:S1')
+            ws1.merge_cells('A1:J1')
 
             ws1['A1'].value = "Sales Number's"
 
@@ -704,7 +704,7 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day, return_wor
 
             
 
-            for c in range(2, 20):
+            for c in range(2, 11):
 
                 ws1.cell(row=1, column=c).border = border
 
@@ -717,14 +717,6 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day, return_wor
             fill_cat = PatternFill(start_color="FFFFFF", end_color="FFFFFF", fill_type="solid") # White
 
             fill_rep = PatternFill(start_color="FFFF99", end_color="FFFF99", fill_type="solid") # Yellow
-
-            fill_oem = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid") # Pink
-
-            fill_stu = PatternFill(start_color="DDEBF7", end_color="DDEBF7", fill_type="solid") # Light Blue
-
-            fill_def = PatternFill(start_color="FFF0F5", end_color="FFF0F5", fill_type="solid") # Light Purple
-
-            fill_dom = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid") # Grey
 
             
 
@@ -740,33 +732,9 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day, return_wor
 
             ws1['B2'].fill = fill_rep
 
-            ws1.merge_cells('K2:L2')
-
-            ws1['K2'].value = "OEM"
-
-            ws1['K2'].fill = fill_oem
-
-            ws1.merge_cells('M2:N2')
-
-            ws1['M2'].value = "STU"
-
-            ws1['M2'].fill = fill_stu
-
-            ws1.merge_cells('O2:P2')
-
-            ws1['O2'].value = "DEF"
-
-            ws1['O2'].fill = fill_def
-
-            ws1.merge_cells('Q2:S2')
-
-            ws1['Q2'].value = "Domestic"
-
-            ws1['Q2'].fill = fill_dom
-
             
 
-            for c in range(1, 20):
+            for c in range(1, 11):
 
                 ws1.cell(row=2, column=c).border = border
 
@@ -782,11 +750,7 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day, return_wor
 
                 2: f"{month_abbr}-{prev_year_str} Act", 3: "Target", 4: "Total", 5: "% Achv", 6: "Today", 
 
-                7: "Dealer", 8: "Dist.", 9: "Fleet", 10: "Others", 
-
-                11: "Target", 12: "Actual", 13: "Target", 14: "Actual", 15: "Target", 16: "Actual", 
-
-                17: "Target", 18: "Actual", 19: "% Achv."
+                7: "Dealer", 8: "Dist.", 9: "Fleet", 10: "Others"
 
             }
 
@@ -804,7 +768,7 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day, return_wor
 
             for r in [3, 4]:
 
-                for c in range(2, 20):
+                for c in range(2, 11):
 
                     cell = ws1.cell(row=r, column=c)
 
@@ -865,56 +829,21 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day, return_wor
                 else:
                     achv1 = round((tot / tgt * 100), 2) if tgt > 0 else 0
 
-                dom_tgt = float(r.get('domestic_target') or 0)
-                dom_act = float(r.get('domestic_actual') or 0)
-                if r.get('domestic_achv_pct') is not None:
-                    achv2 = float(r.get('domestic_achv_pct') or 0)
-                else:
-                    achv2 = round((dom_act / dom_tgt * 100), 2) if dom_tgt > 0 else 0
-
                 achv1_str = f"{achv1}%" if tgt > 0 else "%"
-                achv2_str = f"{achv2}%" if dom_tgt > 0 else "%"
 
                 prev_val = r.get('prev_year_act') if r.get('prev_year_act') is not None else r.get('jul_act')
 
                 c_cells = [
                     ws1.cell(row=r_idx, column=1, value=cat),
                     ws1.cell(row=r_idx, column=2, value=sv(prev_val)),
-
                     ws1.cell(row=r_idx, column=3, value=sv(r.get('target'))),
-
                     ws1.cell(row=r_idx, column=4, value=sv(r.get('total'))),
-
                     ws1.cell(row=r_idx, column=5, value=achv1_str),
-
                     ws1.cell(row=r_idx, column=6, value=sv(r.get('today'))),
-
                     ws1.cell(row=r_idx, column=7, value=sv(r.get('dealer'))),
-
                     ws1.cell(row=r_idx, column=8, value=sv(r.get('distributor'))),
-
                     ws1.cell(row=r_idx, column=9, value=sv(r.get('fleet'))),
-
                     ws1.cell(row=r_idx, column=10, value=sv(r.get('others'))),
-
-                    ws1.cell(row=r_idx, column=11, value=sv(r.get('oem_target'))),
-
-                    ws1.cell(row=r_idx, column=12, value=sv(r.get('oem_actual'))),
-
-                    ws1.cell(row=r_idx, column=13, value=sv(r.get('stu_target'))),
-
-                    ws1.cell(row=r_idx, column=14, value=sv(r.get('stu_actual'))),
-
-                    ws1.cell(row=r_idx, column=15, value=sv(r.get('def_target'))),
-
-                    ws1.cell(row=r_idx, column=16, value=sv(r.get('def_actual'))),
-
-                    ws1.cell(row=r_idx, column=17, value=sv(r.get('domestic_target'))),
-
-                    ws1.cell(row=r_idx, column=18, value=sv(r.get('domestic_actual'))),
-
-                    ws1.cell(row=r_idx, column=19, value=achv2_str),
-
                 ]
 
                 
@@ -1836,7 +1765,7 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day, return_wor
 
             current_max_row += 2
 
-            copy_sheet_vertically(ws1, ws, current_max_row)
+            copy_sheet_vertically(ws2, ws, current_max_row)
 
             current_max_row = ws.max_row
 
@@ -1844,7 +1773,7 @@ def generate_domestic_sales_excel(conn, session_id, year, month, day, return_wor
 
             current_max_row += 2
 
-            copy_sheet_vertically(ws2, ws, current_max_row)
+            copy_sheet_vertically(ws1, ws, current_max_row)
 
             current_max_row = ws.max_row
 
